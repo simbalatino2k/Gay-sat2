@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "users": {
+      "title": "User Profiles",
+      "description": "User accounts, authentication details, and public gay & queer profiles",
+      "fields": {
+        "email": { "type": "string", "description": "User email address" },
+        "role": { "type": "string", "description": "User system role (USER, SUPERADMIN)" },
+        "status": { "type": "string", "description": "Account status (ACTIVE, SUSPENDED, DELETED)" },
+        "isAgeVerified18Plus": { "type": "boolean", "description": "18+ age gate verification flag" },
+        "displayName": { "type": "string", "description": "Public display name" },
+        "age": { "type": "number", "description": "Age" },
+        "identityRole": { "type": "string", "description": "Sexual position / identity role" },
+        "location": { "type": "string", "description": "City / region location" },
+        "bio": { "type": "string", "description": "Biography" },
+        "photos": { "type": "array", "description": "Array of photo objects with url and primary flags" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "updatedAt": { "type": "string", "description": "Last update timestamp" }
+      }
+    },
+    "conversations": {
+      "title": "Direct Conversations",
+      "description": "Chat conversation threads between pairs of users",
+      "fields": {
+        "participantIds": { "type": "array", "description": "Array of participant user IDs" },
+        "lastMessage": { "type": "object", "description": "Latest message object summary" },
+        "updatedAt": { "type": "string", "description": "Last message timestamp" }
+      }
+    },
+    "messages": {
+      "title": "Chat Messages",
+      "description": "Individual messages inside conversation threads",
+      "fields": {
+        "conversationId": { "type": "string", "description": "Conversation ID" },
+        "senderId": { "type": "string", "description": "Sender user ID" },
+        "receiverId": { "type": "string", "description": "Recipient user ID" },
+        "text": { "type": "string", "description": "Message text" },
+        "photoUrl": { "type": "string", "description": "Optional attached photo URL" },
+        "status": { "type": "string", "description": "Read status (SENT, DELIVERED, READ)" },
+        "createdAt": { "type": "string", "description": "Timestamp" }
+      }
+    },
+    "moments": {
+      "title": "24h Moments",
+      "description": "Ephemeral 24-hour photo and text stories shared on the network",
+      "fields": {
+        "userId": { "type": "string", "description": "Creator user ID" },
+        "mediaUrl": { "type": "string", "description": "Photo/video media URL" },
+        "mediaType": { "type": "string", "description": "photo or video" },
+        "caption": { "type": "string", "description": "Optional moment caption" },
+        "privacy": { "type": "string", "description": "Privacy setting (everyone, connections)" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" },
+        "expiresAt": { "type": "string", "description": "24-hour expiry timestamp" },
+        "viewsCount": { "type": "number", "description": "Number of views" },
+        "likesCount": { "type": "number", "description": "Number of likes" }
+      }
+    },
+    "likes": {
+      "title": "User Likes",
+      "description": "Like and superlike records for matching",
+      "fields": {
+        "fromUserId": { "type": "string", "description": "Liker user ID" },
+        "toUserId": { "type": "string", "description": "Liked user ID" },
+        "isSuperLike": { "type": "boolean", "description": "Superlike flag" },
+        "createdAt": { "type": "string", "description": "Timestamp" }
+      }
+    },
+    "matches": {
+      "title": "User Matches",
+      "description": "Mutual match connections",
+      "fields": {
+        "user1Id": { "type": "string", "description": "First user ID" },
+        "user2Id": { "type": "string", "description": "Second user ID" },
+        "createdAt": { "type": "string", "description": "Match timestamp" }
+      }
+    }
+  }
+}

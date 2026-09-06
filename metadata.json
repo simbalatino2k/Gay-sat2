@@ -1,0 +1,6 @@
+{
+  "name": "AURA GAY 18+",
+  "description": "A premium, secure, polished, mobile-first gay social & dating connection platform for adults 18+.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,1061 @@
+{
+  "users": [
+    [
+      "user-demo",
+      {
+        "id": "user-demo",
+        "email": "demo@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-demo",
+          "userId": "user-demo",
+          "displayName": "Christian",
+          "age": 27,
+          "identityRole": "Versatile",
+          "location": "West Hollywood, CA",
+          "distanceKm": 0,
+          "bio": "Creative technologist & coffee lover. Exploring music venues, rooftop sunsets, and spontaneous weekend trips.",
+          "heightCm": 182,
+          "weightKg": 78,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Dating",
+            "Relationship",
+            "Friends"
+          ],
+          "tribes": [
+            "Clean Cut",
+            "Jock"
+          ],
+          "interests": [
+            "Tech",
+            "Photography",
+            "Coffee",
+            "Travel",
+            "Running"
+          ],
+          "photos": [
+            {
+              "id": "ph-demo1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczN0LaCPFyly8JdqddIYkwQ85UT4_U9OB0YR2me2tT7bWL5r21rYXB33VjZZj77wsBmU4W-rer84AdXTbuS9biCdvvR4QHPnOZ2nOwDu0NzmVgdtgjw_=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-demo2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPn9ypQGTRId4JR_rbrK94AG-GgExaV880uDnkZaW_G3zo_7K02zCPO8yCAFDqdBSOk1s0SyUdT6rZxgn1F6xwMa4tyv0_bar3kokowlm3hBk0dKwhM=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0
+        }
+      }
+    ],
+    [
+      "user-admin",
+      {
+        "id": "user-admin",
+        "email": "admin@auragay.com",
+        "role": "SUPERADMIN",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-admin",
+          "userId": "user-admin",
+          "displayName": "AURA Safety Admin",
+          "age": 30,
+          "identityRole": "Unspecified",
+          "location": "System Command",
+          "distanceKm": 0,
+          "bio": "Official AURA Safety & Community Moderation Team.",
+          "lookingFor": [
+            "Networking"
+          ],
+          "tribes": [
+            "Clean Cut"
+          ],
+          "interests": [
+            "Community Safety",
+            "Security",
+            "Moderation"
+          ],
+          "photos": [
+            {
+              "id": "ph-admin1",
+              "url": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800",
+              "isPrimary": true
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0
+        }
+      }
+    ],
+    [
+      "user-marcus",
+      {
+        "id": "user-marcus",
+        "email": "marcus@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-marcus",
+          "userId": "user-marcus",
+          "displayName": "Marcus",
+          "age": 28,
+          "identityRole": "Vers Top",
+          "location": "West Hollywood, CA",
+          "distanceKm": 1.2,
+          "bio": "Architect & design nerd. Looking for deep talks over espresso, late night gallery walks, and weekend road trips.",
+          "heightCm": 185,
+          "weightKg": 82,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Dating",
+            "Relationship"
+          ],
+          "tribes": [
+            "Jock",
+            "Clean Cut"
+          ],
+          "interests": [
+            "Architecture",
+            "Art Galleries",
+            "Espresso",
+            "Pilates",
+            "House Music"
+          ],
+          "photos": [
+            {
+              "id": "ph-m1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPR4yeRM2uLGE6hsRYzsHYODDWLNgkOJ_KXO5rGVClcHwjf4BndfNAC6-zVBJK0P8rLsbjXYMH0K4e2-a9OxEph2T0Hxx3qLvg87FTob6ndL-vjOnoT=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-m2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczNmxN9GEP2_fYGPfUyy7Cv3BtQoXC1trbC6Zh6Xi08s1iza6BE_91-imtKhk_k3VMFeS5anLWFRJoZRhRJNUXucX_Jj8w1Sjkfe4FeFxXSjeD-enzr0=w800",
+              "isPrimary": false
+            },
+            {
+              "id": "ph-m3",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPvu95LbkYdiFXxKg3lL64IeVBGPKYsyHBn_a5FmluSGyoA_VrrwoY9_WL-8n_uX64eO4KvalIeR3Lk933_EY9_bNgh0nqjSPQ9oPABaXWEQSf2iIIU=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 2,
+          "instagramHandle": "@marcus.arch",
+          "spotifyTopArtist": "Rufus Du Sol"
+        }
+      }
+    ],
+    [
+      "user-julian",
+      {
+        "id": "user-julian",
+        "email": "julian@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-julian",
+          "userId": "user-julian",
+          "displayName": "Julian",
+          "age": 25,
+          "identityRole": "Versatile",
+          "location": "Silver Lake, CA",
+          "distanceKm": 2.8,
+          "bio": "Software engineer by day, analog synth enthusiast by night. Let us grab matcha or catch an indie film.",
+          "heightCm": 178,
+          "weightKg": 73,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Friends",
+            "Dating",
+            "Right Now"
+          ],
+          "tribes": [
+            "Otter",
+            "Geek"
+          ],
+          "interests": [
+            "Synthesizers",
+            "Indie Cinema",
+            "Matcha",
+            "Cycling",
+            "Vinyl"
+          ],
+          "photos": [
+            {
+              "id": "ph-j1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPkSE3xTSOHndE0uATaPs1yAE9Oj-01tnAASP8HQHpg5Qv1BbX53Ylggbvbdi4rYKeOqODJj9imvIx4SWZcf-oVzHSPbMd2pUajuMBojtpvru1pHe0W=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-j2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczObyL-dgIE4keKMZBbA_fA6gA8qriv5txlIqq-jE2YmPXjiK14pH68sXXbcHPSdyQqIN4ZqVXmIN8WZclgkkG9mEqLAbFf5FH8ganA_HosypPkfnfrK=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 5,
+          "instagramHandle": "@julian.synth",
+          "spotifyTopArtist": "Fred again.."
+        }
+      }
+    ],
+    [
+      "user-mateo",
+      {
+        "id": "user-mateo",
+        "email": "mateo@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-mateo",
+          "userId": "user-mateo",
+          "displayName": "Mateo",
+          "age": 32,
+          "identityRole": "Top",
+          "location": "Downtown LA, CA",
+          "distanceKm": 4.1,
+          "bio": "Chef & restaurant owner. Passionate about natural wine, sourdough, and long late-night conversations.",
+          "heightCm": 188,
+          "weightKg": 88,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Relationship",
+            "Dating"
+          ],
+          "tribes": [
+            "Bear",
+            "Cub"
+          ],
+          "interests": [
+            "Cooking",
+            "Natural Wine",
+            "Dog Walking",
+            "Cocktails",
+            "Jazz"
+          ],
+          "photos": [
+            {
+              "id": "ph-mat1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPsUtgnxy7_JAS29jldCnbEigRMhF6jGSLigXZ945edJ_WI9avwMm71qH3xFeGwSv_eh2gdALJCFninjntXhkusNKYTP9TSdo6ZeP3xnnYGgspiAR7V=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-mat2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPXbNxZtsmjMoMXuF_mg-l09zA_6-LLk6In6j4YTviuyj8kDOKXeqZnIj9Ca6PBuI2yxag9fKvMI8SELNVKC0QerpS7xTcGlEeIYiNAl2XegMf-_Svw=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": false,
+          "lastActiveMinutesAgo": 45,
+          "instagramHandle": "@chef_mateo"
+        }
+      }
+    ],
+    [
+      "user-alex",
+      {
+        "id": "user-alex",
+        "email": "alex@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-alex",
+          "userId": "user-alex",
+          "displayName": "Alex",
+          "age": 23,
+          "identityRole": "Vers Bottom",
+          "location": "Santa Monica, CA",
+          "distanceKm": 6.5,
+          "bio": "Graphic designer & surfer. Always down for beach sunset hangs or trying new ramen spots.",
+          "heightCm": 175,
+          "weightKg": 68,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Dating",
+            "Hookups"
+          ],
+          "tribes": [
+            "Twink",
+            "Clean Cut"
+          ],
+          "interests": [
+            "Surfing",
+            "Design",
+            "Ramen",
+            "Photography",
+            "Skateboarding"
+          ],
+          "photos": [
+            {
+              "id": "ph-a1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczOzbZERgszqbRXj5NVpm5t-8GebZJ_TCk25nZzEbEhjXg172j9y3kuJ8RXzS78xSTAl9keefSfdv2szaRs00b-LrJdxm1TK8aqdahZTZ1S3bwaeTL1O=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-a2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczMOwOr4NLeD14CqAF9LvZRbTUlemB9mmhrmFwtSXkUkNYQ0yNYD0KOJwgFdBsHuR2vhCbRZc44IhQ9ZCw1Nn57tORbzAA4wGdFJsTYTTk_ejWBX-Rn7=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": false,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 1,
+          "instagramHandle": "@alex_surf"
+        }
+      }
+    ],
+    [
+      "user-dante",
+      {
+        "id": "user-dante",
+        "email": "dante@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-dante",
+          "userId": "user-dante",
+          "displayName": "Dante",
+          "age": 36,
+          "identityRole": "Top",
+          "location": "West Hollywood, CA",
+          "distanceKm": 0.8,
+          "bio": "Creative Director in fashion. Into gym training, high fashion, and intimate dinner parties.",
+          "heightCm": 186,
+          "weightKg": 85,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Dating",
+            "Relationship"
+          ],
+          "tribes": [
+            "Daddy",
+            "Muscle",
+            "Leather"
+          ],
+          "interests": [
+            "Fashion",
+            "Gym",
+            "Travel",
+            "Cocktails",
+            "Contemporary Art"
+          ],
+          "photos": [
+            {
+              "id": "ph-d1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPT3iEGEmCHklDZfM-ls2IV-lquP7Op5-B89jFqX6bUE6KrpVYG3uDTITFx2NCdBO5QL5_heqCN4RkMykapIcK_lv7ofEeMXItlQ-Q0__9iy7qFvixx=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-d2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczOyM3dTYQrGZv8AX34kSan4CCB1-K1eVGhXZYp0pJZMwZDIqrQ857tP64EphrBrxqi8cqfONw8R9_xaVAKYKVLSu7ldaWdgeT7eGVVtp4QWMeHxNAV9=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0
+        }
+      }
+    ],
+    [
+      "user-leo",
+      {
+        "id": "user-leo",
+        "email": "leo@auragay.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T09:10:16.276Z",
+        "updatedAt": "2026-09-05T09:10:16.276Z",
+        "profile": {
+          "id": "prof-leo",
+          "userId": "user-leo",
+          "displayName": "Leo",
+          "age": 29,
+          "identityRole": "Bottom",
+          "location": "Venice, CA",
+          "distanceKm": 7.2,
+          "bio": "Yoga teacher & plant dad. Keeping things chill, authentic, and present. Let us flow together.",
+          "heightCm": 176,
+          "weightKg": 70,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Friends",
+            "Dating",
+            "Chat"
+          ],
+          "tribes": [
+            "Queer",
+            "Otter"
+          ],
+          "interests": [
+            "Yoga",
+            "Plants",
+            "Meditation",
+            "Hiking",
+            "Sound Baths"
+          ],
+          "photos": [
+            {
+              "id": "ph-l1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczMeWH3cGy66poesTxAOk-RVZ14M0ojRcwjDiruy-5VGqnUixoQ7u9qlt3JTVvVWuIOt6gfZNqaEHtpO-FFIQbR8jH-8LMyudmAl_Pp-SKHvWg3jBe2w=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-l2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczOEETegtSeWxMmuuoyh58VbTeQulfF7tP6cgdY8kDJIId1B1PlhlrXULcm2wYhXfREp8NOlrKc1ElE4e-WYIIOCL4gPM1GfPDzt587UIE1uzHvICyoM=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": false,
+          "lastActiveMinutesAgo": 120
+        }
+      }
+    ],
+    [
+      "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+      {
+        "id": "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+        "email": "adas.stasz1@gmail.com",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T10:08:52.962Z",
+        "updatedAt": "2026-09-05T11:44:01.067Z",
+        "profile": {
+          "id": "prof-YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "userId": "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "displayName": "Adam Dominik Stasz (Adasq)",
+          "age": 26,
+          "identityRole": "Versatile",
+          "location": "Los Angeles, CA",
+          "distanceKm": 1.2,
+          "bio": "Connecting on AURA 18+.",
+          "lookingFor": [
+            "Dating",
+            "Friends"
+          ],
+          "tribes": [
+            "Clean Cut"
+          ],
+          "interests": [
+            "Design",
+            "Music",
+            "Fitness"
+          ],
+          "photos": [
+            {
+              "id": "ph-YfFbq4qTCjZYMPZUZEZPzrkOM2k2-1",
+              "url": "https://lh3.googleusercontent.com/a/ACg8ocKoN8erafaAzJX89gaXv_FLVuQAW0w8PxngBDUhchKIllid-6YEPQ=s96-c",
+              "isPrimary": true
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0,
+          "locationPrivacy": "APPROXIMATE"
+        }
+      }
+    ],
+    [
+      "user-1788609190714",
+      {
+        "id": "user-1788609190714",
+        "email": "qa_tester@auragay.app",
+        "role": "USER",
+        "status": "ACTIVE",
+        "isAgeVerified18Plus": true,
+        "createdAt": "2026-09-05T11:53:10.714Z",
+        "updatedAt": "2026-09-05T11:53:10.714Z",
+        "profile": {
+          "id": "prof-1788609190714",
+          "userId": "user-1788609190714",
+          "displayName": "QA Tester",
+          "age": 26,
+          "identityRole": "Versatile",
+          "location": "Los Angeles, CA",
+          "distanceKm": 0.5,
+          "bio": "New on AURA! Excited to connect with amazing people.",
+          "lookingFor": [
+            "Dating",
+            "Friends"
+          ],
+          "tribes": [
+            "Clean Cut"
+          ],
+          "interests": [
+            "Travel",
+            "Art",
+            "Fitness"
+          ],
+          "photos": [
+            {
+              "id": "ph-1788609190714",
+              "url": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800",
+              "isPrimary": true
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0
+        }
+      }
+    ]
+  ],
+  "tokens": [
+    [
+      "eyJhbGciOiJSUzI1NiIsImtpZCI6IjI0N2Y4MDYwMDM5YjVmNDBkOTQ5NjkzOGJiMTg5NzA2ZWY4ODkzM2QiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiQWRhbSBEb21pbmlrIFN0YXN6IChBZGFzcSkiLCJwaWN0dXJlIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUNnOG9jS29OOGVyYWZhQXpKWDg5Z2FYdl9GTFZ1UUFXMHc4UHhuZ0JEVWhjaEtJbGxpZC02WUVQUT1zOTYtYyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9hdXJhLWRhdGluZy1nYXktbWFiIiwiYXVkIjoiYXVyYS1kYXRpbmctZ2F5LW1hYiIsImF1dGhfdGltZSI6MTc4ODU5MzIwNCwidXNlcl9pZCI6IllmRmJxNHFUQ2paWU1QWlVaRVpQenJrT00yazIiLCJzdWIiOiJZZkZicTRxVENqWllNUFpVWkVaUHpya09NMmsyIiwiaWF0IjoxNzg4NjAyNzIyLCJleHAiOjE3ODg2MDYzMjIsImVtYWlsIjoiYWRhcy5zdGFzejFAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImZpcmViYXNlIjp7ImlkZW50aXRpZXMiOnsiZ29vZ2xlLmNvbSI6WyIxMDM3OTU0OTIyMDY4ODc1NTU5NjYiXSwiZW1haWwiOlsiYWRhcy5zdGFzejFAZ21haWwuY29tIl19LCJzaWduX2luX3Byb3ZpZGVyIjoiZ29vZ2xlLmNvbSJ9fQ.kHA05L9o0EUMDEc9MTtdPK419I7OJl2IgV7VIDJT5JUZs8BupnZTmGHNYPY1Qg1eB54N2iRbm7-kdKl9YWU-UduSwmQtfwEo1tJOj4Fhn0GTwauv26I9Plbll57s0vqbCBQ8kO3Fgv-TW9MOT5mLel2Pt-f1LWHRwbBWpndHNKEhERyQya53-fDwRRaX72hu6RQjAovBnq5e6zmiY2S7n7H0z2rkJlyjmUCeDux7L9PNj6jYTD9NaDJpbc2kwff1Bak4C-o3pi3iluEjCYoFnMHoWCHQmO-wsVNrqu3AtKUGDy1stLPdGmNrMK9dFBKf7Ci8vG-iNoAYLPEWh9NNYg",
+      "YfFbq4qTCjZYMPZUZEZPzrkOM2k2"
+    ],
+    [
+      "eyJhbGciOiJSUzI1NiIsImtpZCI6IjI0N2Y4MDYwMDM5YjVmNDBkOTQ5NjkzOGJiMTg5NzA2ZWY4ODkzM2QiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiQWRhbSBEb21pbmlrIFN0YXN6IChBZGFzcSkiLCJwaWN0dXJlIjoiaHR0cHM6Ly9saDMuZ29vZ2xldXNlcmNvbnRlbnQuY29tL2EvQUNnOG9jS29OOGVyYWZhQXpKWDg5Z2FYdl9GTFZ1UUFXMHc4UHhuZ0JEVWhjaEtJbGxpZC02WUVQUT1zOTYtYyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9hdXJhLWRhdGluZy1nYXktbWFiIiwiYXVkIjoiYXVyYS1kYXRpbmctZ2F5LW1hYiIsImF1dGhfdGltZSI6MTc4ODU5MzIwNCwidXNlcl9pZCI6IllmRmJxNHFUQ2paWU1QWlVaRVpQenJrT00yazIiLCJzdWIiOiJZZkZicTRxVENqWllNUFpVWkVaUHpya09NMmsyIiwiaWF0IjoxNzg4NjA2MDIyLCJleHAiOjE3ODg2MDk2MjIsImVtYWlsIjoiYWRhcy5zdGFzejFAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWUsImZpcmViYXNlIjp7ImlkZW50aXRpZXMiOnsiZ29vZ2xlLmNvbSI6WyIxMDM3OTU0OTIyMDY4ODc1NTU5NjYiXSwiZW1haWwiOlsiYWRhcy5zdGFzejFAZ21haWwuY29tIl19LCJzaWduX2luX3Byb3ZpZGVyIjoiZ29vZ2xlLmNvbSJ9fQ.Q78C9zEA4gqOz2_JGSjHSqxQ1f0nFUYPfHfRSmGvaZaB23-Em3jpKJLY6f-qUNNa4p0Gq3nYq65u0NVe3T1AGUNW9_hY_GOvH7IJtQH75F5EnwMxvB_LeADwFrAsGPUUmsmG011e4ngLBhsHxs8FLmlDw_PeAqd9ArwhwiWXBvxg_YEC1GkWfbaSwCN741c6q5Fe-N80uw-WvOlJH7L4EvGyjh6lzhV-gG010h26hJTSevderM41L5pcpM1LxchsarEoS3O0SRJ6c70T8GIHLnAHz7l2q23MgkPYlu9_sITxaNbUny7vceBELerJVYi44y6Naxv0b4YtodxlVA7nuw",
+      "YfFbq4qTCjZYMPZUZEZPzrkOM2k2"
+    ],
+    [
+      "aura_sess_YfFbq4qTCjZYMPZUZEZPzrkOM2k2_1788607538541",
+      "YfFbq4qTCjZYMPZUZEZPzrkOM2k2"
+    ],
+    [
+      "aura_sess_user-1788609190714_1788609190714",
+      "user-1788609190714"
+    ]
+  ],
+  "likes": [
+    {
+      "id": "like-1788609204539",
+      "fromUserId": "user-1788609190714",
+      "toUserId": "user-marcus",
+      "isSuperLike": false,
+      "createdAt": "2026-09-05T11:53:24.539Z"
+    }
+  ],
+  "matches": [
+    {
+      "id": "match-marcus",
+      "user1Id": "user-demo",
+      "user2Id": "user-marcus",
+      "createdAt": "2026-09-04T09:10:16.277Z",
+      "matchedProfile": {
+        "id": "prof-marcus",
+        "userId": "user-marcus",
+        "displayName": "Marcus",
+        "age": 28,
+        "identityRole": "Vers Top",
+        "location": "West Hollywood, CA",
+        "distanceKm": 1.2,
+        "bio": "Architect & design nerd. Looking for deep talks over espresso, late night gallery walks, and weekend road trips.",
+        "heightCm": 185,
+        "weightKg": 82,
+        "relationshipStatus": "Single",
+        "lookingFor": [
+          "Dating",
+          "Relationship"
+        ],
+        "tribes": [
+          "Jock",
+          "Clean Cut"
+        ],
+        "interests": [
+          "Architecture",
+          "Art Galleries",
+          "Espresso",
+          "Pilates",
+          "House Music"
+        ],
+        "photos": [
+          {
+            "id": "ph-m1",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczPR4yeRM2uLGE6hsRYzsHYODDWLNgkOJ_KXO5rGVClcHwjf4BndfNAC6-zVBJK0P8rLsbjXYMH0K4e2-a9OxEph2T0Hxx3qLvg87FTob6ndL-vjOnoT=w800",
+            "isPrimary": true
+          },
+          {
+            "id": "ph-m2",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczNmxN9GEP2_fYGPfUyy7Cv3BtQoXC1trbC6Zh6Xi08s1iza6BE_91-imtKhk_k3VMFeS5anLWFRJoZRhRJNUXucX_Jj8w1Sjkfe4FeFxXSjeD-enzr0=w800",
+            "isPrimary": false
+          },
+          {
+            "id": "ph-m3",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczPvu95LbkYdiFXxKg3lL64IeVBGPKYsyHBn_a5FmluSGyoA_VrrwoY9_WL-8n_uX64eO4KvalIeR3Lk933_EY9_bNgh0nqjSPQ9oPABaXWEQSf2iIIU=w800",
+            "isPrimary": false
+          }
+        ],
+        "verified": true,
+        "isOnline": true,
+        "lastActiveMinutesAgo": 2,
+        "instagramHandle": "@marcus.arch",
+        "spotifyTopArtist": "Rufus Du Sol"
+      }
+    },
+    {
+      "id": "match-julian",
+      "user1Id": "user-demo",
+      "user2Id": "user-julian",
+      "createdAt": "2026-09-03T09:10:16.277Z",
+      "matchedProfile": {
+        "id": "prof-julian",
+        "userId": "user-julian",
+        "displayName": "Julian",
+        "age": 25,
+        "identityRole": "Versatile",
+        "location": "Silver Lake, CA",
+        "distanceKm": 2.8,
+        "bio": "Software engineer by day, analog synth enthusiast by night. Let us grab matcha or catch an indie film.",
+        "heightCm": 178,
+        "weightKg": 73,
+        "relationshipStatus": "Single",
+        "lookingFor": [
+          "Friends",
+          "Dating",
+          "Right Now"
+        ],
+        "tribes": [
+          "Otter",
+          "Geek"
+        ],
+        "interests": [
+          "Synthesizers",
+          "Indie Cinema",
+          "Matcha",
+          "Cycling",
+          "Vinyl"
+        ],
+        "photos": [
+          {
+            "id": "ph-j1",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczPkSE3xTSOHndE0uATaPs1yAE9Oj-01tnAASP8HQHpg5Qv1BbX53Ylggbvbdi4rYKeOqODJj9imvIx4SWZcf-oVzHSPbMd2pUajuMBojtpvru1pHe0W=w800",
+            "isPrimary": true
+          },
+          {
+            "id": "ph-j2",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczObyL-dgIE4keKMZBbA_fA6gA8qriv5txlIqq-jE2YmPXjiK14pH68sXXbcHPSdyQqIN4ZqVXmIN8WZclgkkG9mEqLAbFf5FH8ganA_HosypPkfnfrK=w800",
+            "isPrimary": false
+          }
+        ],
+        "verified": true,
+        "isOnline": true,
+        "lastActiveMinutesAgo": 5,
+        "instagramHandle": "@julian.synth",
+        "spotifyTopArtist": "Fred again.."
+      }
+    }
+  ],
+  "blocks": [],
+  "reports": [
+    {
+      "id": "rep-1788609214104",
+      "reporterUserId": "user-1788609190714",
+      "reportedUserId": "user-alex",
+      "reason": "spam",
+      "details": "Test report during QA",
+      "status": "PENDING",
+      "createdAt": "2026-09-05T11:53:34.104Z",
+      "reportedProfile": {
+        "id": "prof-alex",
+        "userId": "user-alex",
+        "displayName": "Alex",
+        "age": 23,
+        "identityRole": "Vers Bottom",
+        "location": "Santa Monica, CA",
+        "distanceKm": 6.5,
+        "bio": "Graphic designer & surfer. Always down for beach sunset hangs or trying new ramen spots.",
+        "heightCm": 175,
+        "weightKg": 68,
+        "relationshipStatus": "Single",
+        "lookingFor": [
+          "Dating",
+          "Hookups"
+        ],
+        "tribes": [
+          "Twink",
+          "Clean Cut"
+        ],
+        "interests": [
+          "Surfing",
+          "Design",
+          "Ramen",
+          "Photography",
+          "Skateboarding"
+        ],
+        "photos": [
+          {
+            "id": "ph-a1",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczOzbZERgszqbRXj5NVpm5t-8GebZJ_TCk25nZzEbEhjXg172j9y3kuJ8RXzS78xSTAl9keefSfdv2szaRs00b-LrJdxm1TK8aqdahZTZ1S3bwaeTL1O=w800",
+            "isPrimary": true
+          },
+          {
+            "id": "ph-a2",
+            "url": "https://lh3.googleusercontent.com/pw/AP1GczMOwOr4NLeD14CqAF9LvZRbTUlemB9mmhrmFwtSXkUkNYQ0yNYD0KOJwgFdBsHuR2vhCbRZc44IhQ9ZCw1Nn57tORbzAA4wGdFJsTYTTk_ejWBX-Rn7=w800",
+            "isPrimary": false
+          }
+        ],
+        "verified": false,
+        "isOnline": true,
+        "lastActiveMinutesAgo": 1,
+        "instagramHandle": "@alex_surf"
+      }
+    }
+  ],
+  "moments": [
+    {
+      "id": "mom-1",
+      "userId": "user-marcus",
+      "mediaUrl": "https://lh3.googleusercontent.com/pw/AP1GczNAXb66YlO5yQ8PmeUHUx3WkIc3nOz9XptaMBahhgq2trfnJnrmV6mhFfGctFm1rq0jLCul0Ms_YBS7BlI6KwvewdBm0hhBI6FBkmYmvwH4RahKlhNA=w800",
+      "mediaType": "photo",
+      "caption": "Sunset vibes in West Hollywood 🌆✨",
+      "privacy": "everyone",
+      "createdAt": "2026-09-05T07:10:16.276Z",
+      "expiresAt": "2026-09-06T07:10:16.276Z",
+      "viewsCount": 42,
+      "likesCount": 18,
+      "hasLiked": false
+    },
+    {
+      "id": "mom-2",
+      "userId": "user-julian",
+      "mediaUrl": "https://lh3.googleusercontent.com/pw/AP1GczOq18W_9CDliG_8TYqjUXARXKFYGZ0bL5r7pL5cSxuYyTEwXzl5eYU8Rvnec7LFMG2zeQ6cE48VBQehAGAFziOz3woEqgd_8n3QDSrPL-GOMJEVvI4R=w800",
+      "mediaType": "photo",
+      "caption": "Late night studio sessions & analog synth jam 🎹🔥",
+      "privacy": "everyone",
+      "createdAt": "2026-09-05T04:10:16.276Z",
+      "expiresAt": "2026-09-06T04:10:16.276Z",
+      "viewsCount": 42,
+      "likesCount": 12,
+      "hasLiked": false
+    },
+    {
+      "id": "mom-3",
+      "userId": "user-mateo",
+      "mediaUrl": "https://lh3.googleusercontent.com/pw/AP1GczOsQ7AeZz_E24cxGEWQUBTeBDnowRXwmxaEwqdIQW9ieHFJVhizHqLBmKDl1hYfj5fRsUNASNjTSZnk9oSLGgoM-MMVGY-hnVkTo7NC2ixuK-_jLhtt=w800",
+      "mediaType": "photo",
+      "caption": "Fresh natural wine pairing menu ready for tonight! 🍷",
+      "privacy": "everyone",
+      "createdAt": "2026-09-05T01:40:16.276Z",
+      "expiresAt": "2026-09-06T01:40:16.276Z",
+      "viewsCount": 97,
+      "likesCount": 28,
+      "hasLiked": true
+    },
+    {
+      "id": "mom-4",
+      "userId": "user-alex",
+      "mediaUrl": "https://lh3.googleusercontent.com/pw/AP1GczOmkxPlfv8AuZEWf7JxAmSG9fa9EBZlAQVTLQ_TB9b42VRdKXrJ8099Y4W6T26s3JIIBPIfEp-v6DKsv8UqWLEpjaQNBqm2hd2OyGmeCrq6FiOYUg50=w800",
+      "mediaType": "photo",
+      "caption": "Golden hour at Santa Monica beach 🏄‍♂️🌊",
+      "privacy": "everyone",
+      "createdAt": "2026-09-05T08:10:16.276Z",
+      "expiresAt": "2026-09-06T08:10:16.276Z",
+      "viewsCount": 45,
+      "likesCount": 15,
+      "hasLiked": false
+    }
+  ],
+  "conversations": [
+    [
+      "conv-marcus",
+      {
+        "id": "conv-marcus",
+        "participantIds": [
+          "user-demo",
+          "user-marcus"
+        ],
+        "unreadCount": 1,
+        "otherParticipant": {
+          "id": "prof-marcus",
+          "userId": "user-marcus",
+          "displayName": "Marcus",
+          "age": 28,
+          "identityRole": "Vers Top",
+          "location": "West Hollywood, CA",
+          "distanceKm": 1.2,
+          "bio": "Architect & design nerd. Looking for deep talks over espresso, late night gallery walks, and weekend road trips.",
+          "heightCm": 185,
+          "weightKg": 82,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Dating",
+            "Relationship"
+          ],
+          "tribes": [
+            "Jock",
+            "Clean Cut"
+          ],
+          "interests": [
+            "Architecture",
+            "Art Galleries",
+            "Espresso",
+            "Pilates",
+            "House Music"
+          ],
+          "photos": [
+            {
+              "id": "ph-m1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPR4yeRM2uLGE6hsRYzsHYODDWLNgkOJ_KXO5rGVClcHwjf4BndfNAC6-zVBJK0P8rLsbjXYMH0K4e2-a9OxEph2T0Hxx3qLvg87FTob6ndL-vjOnoT=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-m2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczNmxN9GEP2_fYGPfUyy7Cv3BtQoXC1trbC6Zh6Xi08s1iza6BE_91-imtKhk_k3VMFeS5anLWFRJoZRhRJNUXucX_Jj8w1Sjkfe4FeFxXSjeD-enzr0=w800",
+              "isPrimary": false
+            },
+            {
+              "id": "ph-m3",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPvu95LbkYdiFXxKg3lL64IeVBGPKYsyHBn_a5FmluSGyoA_VrrwoY9_WL-8n_uX64eO4KvalIeR3Lk933_EY9_bNgh0nqjSPQ9oPABaXWEQSf2iIIU=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 2,
+          "instagramHandle": "@marcus.arch",
+          "spotifyTopArtist": "Rufus Du Sol"
+        },
+        "lastMessage": {
+          "id": "msg-1788609229888",
+          "conversationId": "conv-marcus",
+          "senderId": "user-demo",
+          "receiverId": "user-marcus",
+          "text": "Hey Marcus! Absolutely, let us meet up!",
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T11:53:49.888Z"
+        }
+      }
+    ],
+    [
+      "conv-julian",
+      {
+        "id": "conv-julian",
+        "participantIds": [
+          "user-demo",
+          "user-julian"
+        ],
+        "unreadCount": 0,
+        "otherParticipant": {
+          "id": "prof-julian",
+          "userId": "user-julian",
+          "displayName": "Julian",
+          "age": 25,
+          "identityRole": "Versatile",
+          "location": "Silver Lake, CA",
+          "distanceKm": 2.8,
+          "bio": "Software engineer by day, analog synth enthusiast by night. Let us grab matcha or catch an indie film.",
+          "heightCm": 178,
+          "weightKg": 73,
+          "relationshipStatus": "Single",
+          "lookingFor": [
+            "Friends",
+            "Dating",
+            "Right Now"
+          ],
+          "tribes": [
+            "Otter",
+            "Geek"
+          ],
+          "interests": [
+            "Synthesizers",
+            "Indie Cinema",
+            "Matcha",
+            "Cycling",
+            "Vinyl"
+          ],
+          "photos": [
+            {
+              "id": "ph-j1",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczPkSE3xTSOHndE0uATaPs1yAE9Oj-01tnAASP8HQHpg5Qv1BbX53Ylggbvbdi4rYKeOqODJj9imvIx4SWZcf-oVzHSPbMd2pUajuMBojtpvru1pHe0W=w800",
+              "isPrimary": true
+            },
+            {
+              "id": "ph-j2",
+              "url": "https://lh3.googleusercontent.com/pw/AP1GczObyL-dgIE4keKMZBbA_fA6gA8qriv5txlIqq-jE2YmPXjiK14pH68sXXbcHPSdyQqIN4ZqVXmIN8WZclgkkG9mEqLAbFf5FH8ganA_HosypPkfnfrK=w800",
+              "isPrimary": false
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 5,
+          "instagramHandle": "@julian.synth",
+          "spotifyTopArtist": "Fred again.."
+        },
+        "lastMessage": {
+          "id": "msg-j2",
+          "conversationId": "conv-julian",
+          "senderId": "user-demo",
+          "receiverId": "user-julian",
+          "text": "That synth setup you have looks unreal! What model is that synth?",
+          "status": "READ",
+          "createdAt": "2026-09-05T07:10:16.276Z"
+        }
+      }
+    ],
+    [
+      "conv-1788638588641",
+      {
+        "id": "conv-1788638588641",
+        "participantIds": [
+          "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "user-admin"
+        ],
+        "unreadCount": 0,
+        "otherParticipant": {
+          "id": "prof-admin",
+          "userId": "user-admin",
+          "displayName": "AURA Safety Admin",
+          "age": 30,
+          "identityRole": "Unspecified",
+          "location": "System Command",
+          "distanceKm": 0,
+          "bio": "Official AURA Safety & Community Moderation Team.",
+          "lookingFor": [
+            "Networking"
+          ],
+          "tribes": [
+            "Clean Cut"
+          ],
+          "interests": [
+            "Community Safety",
+            "Security",
+            "Moderation"
+          ],
+          "photos": [
+            {
+              "id": "ph-admin1",
+              "url": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800",
+              "isPrimary": true
+            }
+          ],
+          "verified": true,
+          "isOnline": true,
+          "lastActiveMinutesAgo": 0
+        },
+        "lastMessage": {
+          "id": "msg-1788638598763",
+          "conversationId": "conv-1788638588641",
+          "senderId": "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "receiverId": "user-admin",
+          "type": "PHOTO",
+          "media": {
+            "url": "https://images.unsplash.com/photo-1549490349-8643362247b5?auto=format&fit=crop&q=80&w=600"
+          },
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T20:03:18.763Z"
+        }
+      }
+    ]
+  ],
+  "messages": [
+    [
+      "conv-marcus",
+      [
+        {
+          "id": "msg-m1",
+          "conversationId": "conv-marcus",
+          "senderId": "user-demo",
+          "receiverId": "user-marcus",
+          "text": "Hey Marcus, awesome meeting you on AURA!",
+          "status": "READ",
+          "createdAt": "2026-09-05T08:10:16.276Z"
+        },
+        {
+          "id": "msg-m2",
+          "conversationId": "conv-marcus",
+          "senderId": "user-marcus",
+          "receiverId": "user-demo",
+          "text": "Hey Christian! Thanks, loved your photography shots on your profile. Up for grabbing an espresso this evening?",
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T08:58:16.276Z"
+        },
+        {
+          "id": "msg-1788609229888",
+          "conversationId": "conv-marcus",
+          "senderId": "user-demo",
+          "receiverId": "user-marcus",
+          "text": "Hey Marcus! Absolutely, let us meet up!",
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T11:53:49.888Z"
+        }
+      ]
+    ],
+    [
+      "conv-julian",
+      [
+        {
+          "id": "msg-j1",
+          "conversationId": "conv-julian",
+          "senderId": "user-julian",
+          "receiverId": "user-demo",
+          "text": "Hey! Nice to connect.",
+          "status": "READ",
+          "createdAt": "2026-09-05T06:10:16.276Z"
+        },
+        {
+          "id": "msg-j2",
+          "conversationId": "conv-julian",
+          "senderId": "user-demo",
+          "receiverId": "user-julian",
+          "text": "That synth setup you have looks unreal! What model is that synth?",
+          "status": "READ",
+          "createdAt": "2026-09-05T07:10:16.276Z"
+        }
+      ]
+    ],
+    [
+      "conv-1788638588641",
+      [
+        {
+          "id": "msg-1788638598760",
+          "conversationId": "conv-1788638588641",
+          "senderId": "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "receiverId": "user-admin",
+          "type": "PHOTO",
+          "media": {
+            "url": "https://images.unsplash.com/photo-1549490349-8643362247b5?auto=format&fit=crop&q=80&w=600"
+          },
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T20:03:18.760Z"
+        },
+        {
+          "id": "msg-1788638598763",
+          "conversationId": "conv-1788638588641",
+          "senderId": "YfFbq4qTCjZYMPZUZEZPzrkOM2k2",
+          "receiverId": "user-admin",
+          "type": "PHOTO",
+          "media": {
+            "url": "https://images.unsplash.com/photo-1549490349-8643362247b5?auto=format&fit=crop&q=80&w=600"
+          },
+          "status": "DELIVERED",
+          "createdAt": "2026-09-05T20:03:18.763Z"
+        }
+      ]
+    ]
+  ]
+}
