@@ -232,3 +232,108 @@ export interface AuthSession {
   token: string;
   user: UserAccount;
 }
+
+export type LanguageCode = 'en' | 'es' | 'de' | 'pl';
+
+export interface UserConsents {
+  necessaryCookies: boolean;
+  functionalCookies: boolean;
+  analyticsCookies: boolean;
+  explicitSpecialCategoryConsent: boolean; // Explicit GDPR Art. 9 consent for sexual orientation data
+  aiAssistanceConsent: boolean; // Consent to AI icebreakers/suggestions
+  locationProcessingConsent: boolean;
+  termsAcceptedVersion: string;
+  privacyPolicyAcceptedVersion: string;
+  updatedAt: string;
+}
+
+export interface SessionRecord {
+  token: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string;
+  userAgent?: string;
+  ipHash?: string;
+}
+
+export interface AdminAuditLog {
+  id: string;
+  adminId: string;
+  targetUserId?: string;
+  action: 'SUSPEND_USER' | 'RESTORE_USER' | 'DELETE_USER' | 'RESOLVE_REPORT' | 'DISMISS_REPORT' | 'APPEAL_DECISION' | 'VIEW_AUDIT_LOGS';
+  reason?: string;
+  legalBasis?: string;
+  details?: Record<string, any>;
+  createdAt: string;
+}
+
+export type DsaReportReason = 
+  | 'HATE_SPEECH'
+  | 'NON_CONSENSUAL_IMAGERY'
+  | 'MINOR_SAFETY'
+  | 'HARASSMENT_BULLYING'
+  | 'IMPERSONATION'
+  | 'ILLEGAL_GOODS_SERVICES'
+  | 'SPAM_SCAM'
+  | 'PRIVACY_VIOLATION'
+  | 'OTHER';
+
+export type ModerationDecisionType = 'SUSPEND_ACCOUNT' | 'REMOVE_CONTENT' | 'WARNING' | 'DISMISSED';
+
+export interface ModerationNotice {
+  id: string;
+  reportId?: string;
+  targetUserId: string;
+  decision: ModerationDecisionType;
+  reason: string;
+  legalBasis: string;
+  statementOfReasons: string;
+  createdAt: string;
+  appealStatus?: 'NONE' | 'PENDING' | 'UPHELD' | 'OVERTURNED';
+  appealDeadline: string; // 6 months under DSA Art. 20
+}
+
+export interface DsaAppealRecord {
+  id: string;
+  noticeId: string;
+  userId: string;
+  appealReason: string;
+  status: 'PENDING' | 'UPHELD' | 'OVERTURNED';
+  adminDecisionNotes?: string;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface GdprExportData {
+  exportTimestamp: string;
+  checksumSha256: string;
+  dataSubject: {
+    id: string;
+    email: string;
+    role: UserRole;
+    status: AccountStatus;
+    isAgeVerified18Plus: boolean;
+    createdAt: string;
+    updatedAt: string;
+  };
+  profile: UserProfile;
+  consents: UserConsents;
+  socialData: {
+    matchesCount: number;
+    matches: MatchRecord[];
+    likesCount: number;
+    likesGiven: LikeRecord[];
+    blocksCount: number;
+    blockedUserIds: string[];
+    reportsCount: number;
+    reportsSubmitted: ReportRecord[];
+  };
+  messages: {
+    conversationsCount: number;
+    messagesSent: Message[];
+  };
+  moments: {
+    publishedMoments: Moment[];
+  };
+}

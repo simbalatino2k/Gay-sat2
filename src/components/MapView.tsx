@@ -37,6 +37,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
+import { ErrorBoundary } from './ErrorBoundary';
 
 interface MapViewProps {
   authToken: string | null;
@@ -1259,20 +1260,45 @@ export const MapView: React.FC<MapViewProps> = ({
       {/* Main Map or Tactical Radar Renderer */}
       <div className="w-full h-full relative">
         {shouldUseLiveGoogleMaps ? (
-          <GoogleMapsLiveRenderer
-            apiKey={rawApiKey!}
-            cameraTarget={cameraTarget}
-            cameraZoom={cameraZoom}
-            userLocation={userLocation}
-            showMembers={showMembers}
-            profiles={profiles}
-            filteredVenues={filteredVenues}
-            selectedUser={selectedUser}
-            selectedVenue={selectedVenue}
-            setSelectedUser={setSelectedUser}
-            setSelectedVenue={setSelectedVenue}
-            onAuthError={() => setAuthErrorOccurred(true)}
-          />
+          <ErrorBoundary
+            onError={() => {
+              console.warn('Google Maps crashed via ErrorBoundary, falling back...');
+              setAuthErrorOccurred(true);
+            }}
+            fallback={
+              <RadarCanvasView
+                center={cameraTarget || { lat: 51.5074, lng: -0.1278 }}
+                zoom={cameraZoom}
+                userLocation={userLocation}
+                profiles={profiles}
+                venues={filteredVenues}
+                showMembers={showMembers}
+                selectedUser={selectedUser}
+                selectedVenue={selectedVenue}
+                onSelectUser={setSelectedUser}
+                onSelectVenue={setSelectedVenue}
+                onZoomIn={() => setCameraZoom(z => Math.min(20, z + 1))}
+                onZoomOut={() => setCameraZoom(z => Math.max(2, z - 1))}
+                onResetCenter={handleLocateMe}
+                authErrorOccurred={authErrorOccurred}
+              />
+            }
+          >
+            <GoogleMapsLiveRenderer
+              apiKey={rawApiKey!}
+              cameraTarget={cameraTarget}
+              cameraZoom={cameraZoom}
+              userLocation={userLocation}
+              showMembers={showMembers}
+              profiles={profiles}
+              filteredVenues={filteredVenues}
+              selectedUser={selectedUser}
+              selectedVenue={selectedVenue}
+              setSelectedUser={setSelectedUser}
+              setSelectedVenue={setSelectedVenue}
+              onAuthError={() => setAuthErrorOccurred(true)}
+            />
+          </ErrorBoundary>
         ) : (
           <RadarCanvasView
             center={cameraTarget}

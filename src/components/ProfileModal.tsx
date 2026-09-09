@@ -29,6 +29,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [loadingIce, setLoadingIce] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [reportReason, setReportReason] = useState('');
+  const [reportDetails, setReportDetails] = useState('');
 
   if (!isOpen || !profile) return null;
 
@@ -243,24 +244,41 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
         </div>
 
         {showReport && (
-          <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 space-y-2">
-            <input
-              type="text"
-              placeholder="Reason for report..."
+          <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 space-y-2.5">
+            <div className="text-xs font-bold text-amber-300">Notice & Action Form (DSA Article 16)</div>
+            <select
               value={reportReason}
               onChange={e => setReportReason(e.target.value)}
-              className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-amber-400"
+              className="w-full bg-black/60 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs text-white outline-none focus:border-amber-400"
+            >
+              <option value="">Select violation category...</option>
+              <option value="UNDERAGE_SUSPICION">Suspicion of Minor (&lt;18) - Immediate Priority</option>
+              <option value="NON_CONSENSUAL_MEDIA">Non-consensual sexual media</option>
+              <option value="HARASSMENT_OR_HATE">Harassment or discriminatory speech</option>
+              <option value="IMPERSONATION_OR_SCAM">Impersonation, bot, or financial scam</option>
+              <option value="COMMERCIAL_SOLICITATION">Commercial solicitation or prostitution</option>
+              <option value="TERMS_VIOLATION">Other terms of service violation</option>
+            </select>
+            <input
+              type="text"
+              placeholder="Additional details / context (optional)..."
+              value={reportDetails}
+              onChange={e => setReportDetails(e.target.value)}
+              className="w-full bg-black/60 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-amber-400"
             />
             <button
               onClick={() => {
-                if (reportReason.trim()) {
-                  onReport(profile, reportReason.trim());
+                if (reportReason) {
+                  onReport(profile, reportDetails ? `${reportReason}: ${reportDetails}` : reportReason);
                   setShowReport(false);
+                  setReportReason('');
+                  setReportDetails('');
                 }
               }}
-              className="w-full py-1.5 rounded-xl bg-amber-600 text-xs font-bold text-white shadow-md active:scale-95"
+              disabled={!reportReason}
+              className="w-full py-1.5 rounded-xl bg-amber-600 text-xs font-bold text-white shadow-md active:scale-95 disabled:opacity-50"
             >
-              Submit Report
+              Submit Official Notice (DSA Art. 16)
             </button>
           </div>
         )}

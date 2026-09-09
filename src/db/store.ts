@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
 import {
   UserAccount,
@@ -13,410 +14,28 @@ import {
   Moment,
   FilterState,
   AdminStats,
-  AccountStatus
+  AccountStatus,
+  UserConsents,
+  SessionRecord,
+  AdminAuditLog,
+  ModerationNotice,
+  DsaAppealRecord,
+  DsaReportReason,
+  GdprExportData
 } from '../types';
 
-// Pre-seeded high quality realistic 18+ profiles distributed across global queer metropolises
-const INITIAL_PROFILES: UserProfile[] = [
-  {
-    id: 'prof-marcus',
-    userId: 'user-marcus',
-    displayName: 'Marcus',
-    age: 28,
-    identityRole: 'Vers Top',
-    location: 'Nearby',
-    distanceKm: 0.015,
-    lat: 51.5134,
-    lng: -0.1365,
-    bio: 'Architect & design nerd. Looking for deep talks over espresso, late night gallery walks, and weekend road trips.',
-    heightCm: 185,
-    weightKg: 82,
-    relationshipStatus: 'Single',
-    lookingFor: ['Dating', 'Relationship'],
-    tribes: ['Jock', 'Clean Cut'],
-    interests: ['Architecture', 'Art Galleries', 'Espresso', 'Pilates', 'House Music'],
-    photos: [
-      { id: 'ph-m1', url: AURA_ALBUM_PHOTOS[0], isPrimary: true },
-      { id: 'ph-m2', url: AURA_ALBUM_PHOTOS[1], isPrimary: false },
-      { id: 'ph-m3', url: AURA_ALBUM_PHOTOS[2], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: true,
-    lastActiveMinutesAgo: 2,
-    instagramHandle: '@marcus.arch',
-    spotifyTopArtist: 'Rufus Du Sol'
-  },
-  {
-    id: 'prof-julian',
-    userId: 'user-julian',
-    displayName: 'Julian',
-    age: 25,
-    identityRole: 'Versatile',
-    location: 'Nearby',
-    distanceKm: 0.030,
-    lat: 52.4980,
-    lng: 13.3550,
-    bio: 'Software engineer by day, analog synth enthusiast by night. Let us grab matcha or catch an indie film.',
-    heightCm: 178,
-    weightKg: 73,
-    relationshipStatus: 'Single',
-    lookingFor: ['Friends', 'Dating', 'Right Now'],
-    tribes: ['Otter', 'Geek'],
-    interests: ['Synthesizers', 'Indie Cinema', 'Matcha', 'Cycling', 'Vinyl'],
-    photos: [
-      { id: 'ph-j1', url: AURA_ALBUM_PHOTOS[3], isPrimary: true },
-      { id: 'ph-j2', url: AURA_ALBUM_PHOTOS[4], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: true,
-    lastActiveMinutesAgo: 5,
-    instagramHandle: '@julian.synth',
-    spotifyTopArtist: 'Fred again..'
-  },
-  {
-    id: 'prof-mateo',
-    userId: 'user-mateo',
-    displayName: 'Mateo',
-    age: 32,
-    identityRole: 'Top',
-    location: 'Centro',
-    distanceKm: 0.150,
-    lat: 40.4225,
-    lng: -3.6975,
-    bio: 'Chef & restaurant owner. Passionate about natural wine, sourdough, and long late-night conversations.',
-    heightCm: 188,
-    weightKg: 88,
-    relationshipStatus: 'Single',
-    lookingFor: ['Relationship', 'Dating'],
-    tribes: ['Bear', 'Cub'],
-    interests: ['Cooking', 'Natural Wine', 'Dog Walking', 'Cocktails', 'Jazz'],
-    photos: [
-      { id: 'ph-mat1', url: AURA_ALBUM_PHOTOS[5], isPrimary: true },
-      { id: 'ph-mat2', url: AURA_ALBUM_PHOTOS[6], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: false,
-    lastActiveMinutesAgo: 45,
-    instagramHandle: '@chef_mateo'
-  },
-  {
-    id: 'prof-alex',
-    userId: 'user-alex',
-    displayName: 'Alex',
-    age: 23,
-    identityRole: 'Vers Bottom',
-    location: 'Arts District',
-    distanceKm: 0.500,
-    lat: 48.8570,
-    lng: 2.3580,
-    bio: 'Graphic designer & photographer. Always down for gallery afternoon walks, riverside coffee, and rooftop sunsets.',
-    heightCm: 175,
-    weightKg: 68,
-    relationshipStatus: 'Single',
-    lookingFor: ['Dating', 'Hookups'],
-    tribes: ['Twink', 'Clean Cut'],
-    interests: ['Design', 'Photography', 'Art', 'Coffee', 'House Music'],
-    photos: [
-      { id: 'ph-a1', url: AURA_ALBUM_PHOTOS[7], isPrimary: true },
-      { id: 'ph-a2', url: AURA_ALBUM_PHOTOS[8], isPrimary: false }
-    ],
-    verified: false,
-    isOnline: true,
-    lastActiveMinutesAgo: 1,
-    instagramHandle: '@alex_paris'
-  },
-  {
-    id: 'prof-dante',
-    userId: 'user-dante',
-    displayName: 'Dante',
-    age: 36,
-    identityRole: 'Top',
-    location: 'Downtown',
-    distanceKm: 1.2,
-    lat: 40.7335,
-    lng: -74.0028,
-    bio: 'Creative Director in fashion. Into gym training, high fashion, contemporary galleries, and intimate dinner parties.',
-    heightCm: 186,
-    weightKg: 85,
-    relationshipStatus: 'Single',
-    lookingFor: ['Dating', 'Relationship'],
-    tribes: ['Daddy', 'Muscle', 'Leather'],
-    interests: ['Fashion', 'Gym', 'Travel', 'Cocktails', 'Contemporary Art'],
-    photos: [
-      { id: 'ph-d1', url: AURA_ALBUM_PHOTOS[9], isPrimary: true },
-      { id: 'ph-d2', url: AURA_ALBUM_PHOTOS[10], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: true,
-    lastActiveMinutesAgo: 0
-  },
-  {
-    id: 'prof-leo',
-    userId: 'user-leo',
-    displayName: 'Leo',
-    age: 29,
-    identityRole: 'Bottom',
-    location: 'Westside',
-    distanceKm: 2.1,
-    lat: 35.6905,
-    lng: 139.7090,
-    bio: 'Architectural designer & plant dad. Keeping things chill, authentic, and present. Exploring Ni-chome and quiet kissaten.',
-    heightCm: 176,
-    weightKg: 70,
-    relationshipStatus: 'Single',
-    lookingFor: ['Friends', 'Dating', 'Chat'],
-    tribes: ['Queer', 'Otter'],
-    interests: ['Design', 'Plants', 'Coffee', 'Hiking', 'Vinyl'],
-    photos: [
-      { id: 'ph-l1', url: AURA_ALBUM_PHOTOS[11], isPrimary: true },
-      { id: 'ph-l2', url: AURA_ALBUM_PHOTOS[12], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: false,
-    lastActiveMinutesAgo: 120
-  },
-  {
-    id: 'prof-gabriel',
-    userId: 'user-gabriel',
-    displayName: 'Gabriel',
-    age: 31,
-    identityRole: 'Versatile',
-    location: 'Uptown',
-    distanceKm: 3.5,
-    lat: 34.0880,
-    lng: -118.3760,
-    bio: 'Filmmaker & screenwriter in West Hollywood. Love natural wine, canyon hikes, and cinema marathons.',
-    heightCm: 181,
-    weightKg: 77,
-    relationshipStatus: 'Single',
-    lookingFor: ['Dating', 'Friends', 'Chat'],
-    tribes: ['Clean Cut', 'Queer'],
-    interests: ['Cinema', 'Writing', 'Hiking', 'Natural Wine', 'Coffee'],
-    photos: [
-      { id: 'ph-g1', url: AURA_ALBUM_PHOTOS[13], isPrimary: true },
-      { id: 'ph-g2', url: AURA_ALBUM_PHOTOS[14], isPrimary: false }
-    ],
-    verified: true,
-    isOnline: true,
-    lastActiveMinutesAgo: 10
-  }
-];
-
-// Pre-seeded User accounts
-const INITIAL_USERS: UserAccount[] = [
-  {
-    id: 'user-demo',
-    email: 'demo@auragay.com',
-    role: 'USER',
-    status: 'ACTIVE',
-    isAgeVerified18Plus: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    profile: {
-      id: 'prof-demo',
-      userId: 'user-demo',
-      displayName: 'Christian',
-      age: 27,
-      identityRole: 'Versatile',
-      location: 'West Hollywood, CA',
-      distanceKm: 0,
-      bio: 'Creative technologist & coffee lover. Exploring music venues, rooftop sunsets, and spontaneous weekend trips.',
-      heightCm: 182,
-      weightKg: 78,
-      relationshipStatus: 'Single',
-      lookingFor: ['Dating', 'Relationship', 'Friends'],
-      tribes: ['Clean Cut', 'Jock'],
-      interests: ['Tech', 'Photography', 'Coffee', 'Travel', 'Running'],
-      photos: [
-        { id: 'ph-demo1', url: AURA_ALBUM_PHOTOS[13], isPrimary: true },
-        { id: 'ph-demo2', url: AURA_ALBUM_PHOTOS[14], isPrimary: false }
-      ],
-      verified: true,
-      isOnline: true,
-      lastActiveMinutesAgo: 0
-    }
-  },
-  {
-    id: 'user-admin',
-    email: 'admin@auragay.com',
-    role: 'SUPERADMIN',
-    status: 'ACTIVE',
-    isAgeVerified18Plus: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    profile: {
-      id: 'prof-admin',
-      userId: 'user-admin',
-      displayName: 'AURA Safety Admin',
-      age: 30,
-      identityRole: 'Unspecified',
-      location: 'System Command',
-      distanceKm: 0,
-      bio: 'Official AURA Safety & Community Moderation Team.',
-      lookingFor: ['Networking'],
-      tribes: ['Clean Cut'],
-      interests: ['Community Safety', 'Security', 'Moderation'],
-      photos: [
-        { id: 'ph-admin1', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800', isPrimary: true }
-      ],
-      verified: true,
-      isOnline: true,
-      lastActiveMinutesAgo: 0
-    }
-  },
-  ...INITIAL_PROFILES.map(p => ({
-    id: p.userId,
-    email: `${p.displayName.toLowerCase()}@auragay.com`,
-    role: 'USER' as const,
-    status: 'ACTIVE' as const,
-    isAgeVerified18Plus: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    profile: p
-  }))
-];
-
-// Seeded sample conversations and messages for demo user
-const INITIAL_CONVERSATIONS: Conversation[] = [
-  {
-    id: 'conv-marcus',
-    participantIds: ['user-demo', 'user-marcus'],
-    unreadCount: 1,
-    otherParticipant: INITIAL_PROFILES[0], // Marcus
-    lastMessage: {
-      id: 'msg-m3',
-      conversationId: 'conv-marcus',
-      senderId: 'user-marcus',
-      receiverId: 'user-demo',
-      type: 'TEXT',
-      text: 'Hey Christian! Loved your photography shots on your profile. Up for grabbing an espresso this evening?',
-      status: 'DELIVERED',
-      createdAt: new Date(Date.now() - 1000 * 60 * 12).toISOString()
-    }
-  },
-  {
-    id: 'conv-julian',
-    participantIds: ['user-demo', 'user-julian'],
-    unreadCount: 0,
-    otherParticipant: INITIAL_PROFILES[1], // Julian
-    lastMessage: {
-      id: 'msg-j2',
-      conversationId: 'conv-julian',
-      senderId: 'user-demo',
-      receiverId: 'user-julian',
-      type: 'TEXT',
-      text: 'That synth setup you have looks unreal! What model is that synth?',
-      status: 'READ',
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
-    }
-  }
-];
-
-const INITIAL_MESSAGES: Record<string, Message[]> = {
-  'conv-marcus': [
-    {
-      id: 'msg-m1',
-      conversationId: 'conv-marcus',
-      senderId: 'user-demo',
-      receiverId: 'user-marcus',
-      type: 'TEXT',
-      text: 'Hey Marcus, awesome meeting you on AURA!',
-      status: 'READ',
-      createdAt: new Date(Date.now() - 1000 * 60 * 60).toISOString()
-    },
-    {
-      id: 'msg-m2',
-      conversationId: 'conv-marcus',
-      senderId: 'user-marcus',
-      receiverId: 'user-demo',
-      type: 'TEXT',
-      text: 'Hey Christian! Thanks, loved your photography shots on your profile. Up for grabbing an espresso this evening?',
-      status: 'DELIVERED',
-      createdAt: new Date(Date.now() - 1000 * 60 * 12).toISOString()
-    }
-  ],
-  'conv-julian': [
-    {
-      id: 'msg-j1',
-      conversationId: 'conv-julian',
-      senderId: 'user-julian',
-      receiverId: 'user-demo',
-      type: 'TEXT',
-      text: 'Hey! Nice to connect.',
-      status: 'READ',
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 3).toISOString()
-    },
-    {
-      id: 'msg-j2',
-      conversationId: 'conv-julian',
-      senderId: 'user-demo',
-      receiverId: 'user-julian',
-      type: 'TEXT',
-      text: 'That synth setup you have looks unreal! What model is that synth?',
-      status: 'READ',
-      createdAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
-    }
-  ]
-};
-
-const INITIAL_MOMENTS: Moment[] = [
-  {
-    id: 'mom-1',
-    userId: 'user-marcus',
-    mediaUrl: AURA_ALBUM_PHOTOS[15],
-    mediaType: 'photo',
-    caption: 'Sunset vibes in West Hollywood 🌆✨',
-    privacy: 'everyone',
-    createdAt: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 22).toISOString(),
-    viewsCount: 42,
-    likesCount: 18,
-    hasLiked: false
-  },
-  {
-    id: 'mom-2',
-    userId: 'user-julian',
-    mediaUrl: AURA_ALBUM_PHOTOS[16],
-    mediaType: 'photo',
-    caption: 'Late night studio sessions & analog synth jam 🎹🔥',
-    privacy: 'everyone',
-    createdAt: new Date(Date.now() - 1000 * 60 * 300).toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 19).toISOString(),
-    viewsCount: 29,
-    likesCount: 12,
-    hasLiked: false
-  },
-  {
-    id: 'mom-3',
-    userId: 'user-mateo',
-    mediaUrl: AURA_ALBUM_PHOTOS[17],
-    mediaType: 'photo',
-    caption: 'Fresh natural wine pairing menu ready for tonight! 🍷',
-    privacy: 'everyone',
-    createdAt: new Date(Date.now() - 1000 * 60 * 450).toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 16.5).toISOString(),
-    viewsCount: 55,
-    likesCount: 24,
-    hasLiked: false
-  },
-  {
-    id: 'mom-4',
-    userId: 'user-alex',
-    mediaUrl: AURA_ALBUM_PHOTOS[18],
-    mediaType: 'photo',
-    caption: 'Golden hour at Santa Monica beach 🏄‍♂️🌊',
-    privacy: 'everyone',
-    createdAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 23).toISOString(),
-    viewsCount: 38,
-    likesCount: 15,
-    hasLiked: false
-  }
-];
+// Production database state: No pre-seeded bot accounts or synthetic profiles
+const INITIAL_PROFILES: UserProfile[] = [];
+const INITIAL_USERS: UserAccount[] = [];
+const INITIAL_CONVERSATIONS: Conversation[] = [];
+const INITIAL_MESSAGES: Record<string, Message[]> = {};
+const INITIAL_MOMENTS: Moment[] = [];
 
 class DataStore {
   private users: Map<string, UserAccount> = new Map();
-  private tokens: Map<string, string> = new Map(); // token -> userId
+  private tokens: Map<string, string> = new Map(); // token -> userId (legacy compatibility)
+  private sessions: Map<string, SessionRecord> = new Map(); // token -> SessionRecord
+  private consents: Map<string, UserConsents> = new Map(); // userId -> UserConsents
   private likes: LikeRecord[] = [];
   private matches: MatchRecord[] = [];
   private blocks: BlockRecord[] = [];
@@ -424,6 +43,11 @@ class DataStore {
   private moments: Moment[] = [];
   private conversations: Map<string, Conversation> = new Map();
   private messages: Map<string, Message[]> = new Map();
+  private adminAuditLogs: AdminAuditLog[] = [];
+  private moderationNotices: ModerationNotice[] = [];
+  private appeals: DsaAppealRecord[] = [];
+  private erasureAuditLog: Array<{ hashId: string; erasedAt: string; reason: string }> = [];
+  private userPasswords: Map<string, string> = new Map(); // userId -> salt:scryptHash
   private dbFilePath = path.join(process.cwd(), 'data', 'aura_db.json');
 
   private saveToDisk(): void {
@@ -435,13 +59,20 @@ class DataStore {
       const serialized = {
         users: Array.from(this.users.entries()),
         tokens: Array.from(this.tokens.entries()),
+        sessions: Array.from(this.sessions.entries()),
+        consents: Array.from(this.consents.entries()),
         likes: this.likes,
         matches: this.matches,
         blocks: this.blocks,
         reports: this.reports,
         moments: this.moments,
         conversations: Array.from(this.conversations.entries()),
-        messages: Array.from(this.messages.entries())
+        messages: Array.from(this.messages.entries()),
+        adminAuditLogs: this.adminAuditLogs,
+        moderationNotices: this.moderationNotices,
+        appeals: this.appeals,
+        erasureAuditLog: this.erasureAuditLog,
+        userPasswords: Array.from(this.userPasswords.entries())
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(serialized, null, 2), 'utf-8');
     } catch (err) {
@@ -458,6 +89,8 @@ class DataStore {
 
       this.users = new Map(data.users || []);
       this.tokens = new Map(data.tokens || []);
+      this.sessions = new Map(data.sessions || []);
+      this.consents = new Map(data.consents || []);
       this.likes = data.likes || [];
       this.matches = data.matches || [];
       this.blocks = data.blocks || [];
@@ -465,6 +98,11 @@ class DataStore {
       this.moments = data.moments || [];
       this.conversations = new Map(data.conversations || []);
       this.messages = new Map(data.messages || []);
+      this.adminAuditLogs = data.adminAuditLogs || [];
+      this.moderationNotices = data.moderationNotices || [];
+      this.appeals = data.appeals || [];
+      this.erasureAuditLog = data.erasureAuditLog || [];
+      this.userPasswords = new Map(data.userPasswords || []);
       return true;
     } catch (err) {
       console.error('[DataStore] Error loading from disk:', err);
@@ -475,66 +113,152 @@ class DataStore {
   constructor() {
     if (this.loadFromDisk()) {
       console.log('[DataStore] Loaded persistent data from disk.');
+      this.purgeBotAccounts();
     } else {
-      console.log('[DataStore] Seeding initial demo data...');
-      // Seed initial users
-      INITIAL_USERS.forEach(user => {
-        this.users.set(user.id, user);
-      });
-
-      // Seed initial moments
-      this.moments = [...INITIAL_MOMENTS];
-
-      // Seed conversations & messages
-      INITIAL_CONVERSATIONS.forEach(conv => {
-        this.conversations.set(conv.id, conv);
-      });
-
-      Object.entries(INITIAL_MESSAGES).forEach(([convId, msgs]) => {
-        this.messages.set(convId, msgs);
-      });
-
-      // Seed mutual matches
-      this.matches.push({
-        id: 'match-marcus',
-        user1Id: 'user-demo',
-        user2Id: 'user-marcus',
-        createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-        matchedProfile: INITIAL_PROFILES[0]
-      });
-
-      this.matches.push({
-        id: 'match-julian',
-        user1Id: 'user-demo',
-        user2Id: 'user-julian',
-        createdAt: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-        matchedProfile: INITIAL_PROFILES[1]
-      });
-
+      console.log('[DataStore] Clean production database initialized (zero bots).');
       this.saveToDisk();
     }
   }
 
+  /**
+   * Purges all bot, test, synthetic, and non-real accounts, sessions, moments, and messages.
+   * Protects real verified user accounts (such as adas.stasz1@gmail.com) and promotes the primary owner to SUPERADMIN.
+   */
+  public purgeBotAccounts(): { purgedUsersCount: number; purgedMomentsCount: number } {
+    const isBotUser = (userId: string, email?: string): boolean => {
+      if (userId === 'YfFbq4qTCjZYMPZUZEZPzrkOM2k2') return false;
+      const lowerEmail = (email || '').toLowerCase().trim();
+      if (lowerEmail === 'adas.stasz1@gmail.com') return false;
+
+      // Known seeded bot IDs
+      if (
+        userId.startsWith('user-demo') ||
+        userId.startsWith('user-marcus') ||
+        userId.startsWith('user-julian') ||
+        userId.startsWith('user-mateo') ||
+        userId.startsWith('user-alex') ||
+        userId.startsWith('user-dante') ||
+        userId.startsWith('user-leo') ||
+        userId.startsWith('user-gabriel') ||
+        userId.startsWith('user-admin') ||
+        userId.startsWith('user-1788609190714') ||
+        userId.startsWith('user-1788726769224')
+      ) {
+        return true;
+      }
+
+      // Synthetic bot domains & test emails
+      if (
+        lowerEmail.endsWith('@auragay.com') ||
+        lowerEmail.endsWith('@auragay.app') ||
+        lowerEmail.endsWith('@deleted.aura.local') ||
+        lowerEmail.includes('demo') ||
+        lowerEmail.includes('tester') ||
+        lowerEmail.includes('bot')
+      ) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const botUserIds = new Set<string>();
+    for (const [id, user] of this.users.entries()) {
+      if (isBotUser(id, user.email)) {
+        botUserIds.add(id);
+      } else if (user.email?.toLowerCase().trim() === 'adas.stasz1@gmail.com') {
+        user.role = 'SUPERADMIN';
+        user.status = 'ACTIVE';
+      }
+    }
+
+    // Purge bot users, credentials, and consents
+    for (const botId of botUserIds) {
+      this.users.delete(botId);
+      this.consents.delete(botId);
+      this.userPasswords.delete(botId);
+    }
+
+    // Purge sessions & tokens for bots or demo tokens
+    for (const [token, session] of this.sessions.entries()) {
+      if (botUserIds.has(session.userId) || token.includes('demo') || token === 'aura-demo-token') {
+        this.sessions.delete(token);
+      }
+    }
+    for (const [token, userId] of this.tokens.entries()) {
+      if (botUserIds.has(userId) || token.includes('demo') || token === 'aura-demo-token') {
+        this.tokens.delete(token);
+      }
+    }
+
+    // Purge moments from bots
+    const initialMomentsCount = this.moments.length;
+    this.moments = this.moments.filter(m => !botUserIds.has(m.userId));
+    const purgedMomentsCount = initialMomentsCount - this.moments.length;
+
+    // Purge matches
+    this.matches = this.matches.filter(m => !botUserIds.has(m.user1Id) && !botUserIds.has(m.user2Id));
+
+    // Purge likes
+    this.likes = this.likes.filter(l => !botUserIds.has(l.fromUserId) && !botUserIds.has(l.toUserId));
+
+    // Purge blocks & reports
+    this.blocks = this.blocks.filter(b => !botUserIds.has(b.blockerUserId) && !botUserIds.has(b.blockedUserId));
+    this.reports = this.reports.filter(r => !botUserIds.has(r.reporterUserId) && !botUserIds.has(r.reportedUserId));
+
+    // Purge conversations & messages
+    for (const [convId, conv] of this.conversations.entries()) {
+      if (conv.participantIds.some(id => botUserIds.has(id))) {
+        this.conversations.delete(convId);
+        this.messages.delete(convId);
+      }
+    }
+
+    if (botUserIds.size > 0 || purgedMomentsCount > 0) {
+      console.log(`[DataStore] Successfully purged ${botUserIds.size} bot accounts and ${purgedMomentsCount} bot moments.`);
+      this.saveToDisk();
+    }
+
+    return { purgedUsersCount: botUserIds.size, purgedMomentsCount };
+  }
+
   // --- Auth Methods ---
-  public registerUser(email: string, displayName: string, age: number, role: string = 'USER'): { token: string; user: UserAccount } {
+  public registerUser(
+    email: string,
+    displayName: string,
+    age: number,
+    role: string = 'USER',
+    password?: string
+  ): { token: string; user: UserAccount } {
     const cleanEmail = email.toLowerCase().trim();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error('Valid email address is required');
+    }
+
+    if (!age || age < 18) {
+      throw new Error('Access denied. AURA GAY is an adult platform strictly restricted to individuals aged 18 and older.');
+    }
+
     const existing = Array.from(this.users.values()).find(u => u.email === cleanEmail);
     if (existing) {
       throw new Error('An account with this email address already exists. Please log in instead.');
     }
 
-    const userId = `user-${Date.now()}`;
+    const userId = `user-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     const profileId = `prof-${Date.now()}`;
+    const cleanDisplayName = displayName.replace(/<[^>]*>?/gm, '').trim() || 'New Member';
 
     const newUserProfile: UserProfile = {
       id: profileId,
       userId: userId,
-      displayName: displayName.trim() || 'New Member',
-      age: age || 24,
+      displayName: cleanDisplayName,
+      age: Math.min(Math.max(18, age), 99),
       identityRole: 'Versatile',
       location: 'Los Angeles, CA',
       distanceKm: 0.5,
-      bio: 'New on AURA! Excited to connect with amazing people.',
+      locationPrivacy: 'APPROXIMATE',
+      approximateArea: 'Within ~1 km',
+      bio: 'New on AURA! Excited to connect with authentic people.',
       lookingFor: ['Dating', 'Friends'],
       tribes: ['Clean Cut'],
       interests: ['Travel', 'Art', 'Fitness'],
@@ -545,7 +269,7 @@ class DataStore {
           isPrimary: true
         }
       ],
-      verified: true,
+      verified: false,
       isOnline: true,
       lastActiveMinutesAgo: 0
     };
@@ -561,15 +285,46 @@ class DataStore {
       profile: newUserProfile
     };
 
-    this.users.set(userId, newUser);
-    const token = `aura_sess_${userId}_${Date.now()}`;
-    this.tokens.set(token, userId);
-    this.saveToDisk();
+    if (password && password.trim().length >= 6) {
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+      this.userPasswords.set(userId, `${salt}:${hash}`);
+    }
 
+    this.users.set(userId, newUser);
+
+    // Create 7-day secure cryptographic session
+    const token = `aura_sess_${userId}_${crypto.randomBytes(24).toString('hex')}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sessionRecord: SessionRecord = {
+      token,
+      userId,
+      createdAt: now.toISOString(),
+      expiresAt,
+      lastUsedAt: now.toISOString()
+    };
+    this.sessions.set(token, sessionRecord);
+    this.tokens.set(token, userId);
+
+    // Initialize GDPR Consents
+    this.consents.set(userId, {
+      necessaryCookies: true,
+      functionalCookies: true,
+      analyticsCookies: false,
+      explicitSpecialCategoryConsent: true,
+      aiAssistanceConsent: true,
+      locationProcessingConsent: true,
+      termsAcceptedVersion: '2026.1',
+      privacyPolicyAcceptedVersion: '2026.1',
+      updatedAt: now.toISOString()
+    });
+
+    this.saveToDisk();
     return { token, user: newUser };
   }
 
-  public loginUser(email: string): { token: string; user: UserAccount } | null {
+  public loginUser(email: string, password?: string): { token: string; user: UserAccount } | null {
     const cleanEmail = email.toLowerCase().trim();
     const user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
     if (!user) return null;
@@ -578,7 +333,28 @@ class DataStore {
       throw new Error(`Account is ${user.status.toLowerCase()}`);
     }
 
-    const token = `aura_sess_${user.id}_${Date.now()}`;
+    if (password && this.userPasswords.has(user.id)) {
+      const stored = this.userPasswords.get(user.id)!;
+      const [salt, hash] = stored.split(':');
+      if (salt && hash) {
+        const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
+        if (testHash !== hash) {
+          throw new Error('Invalid email or password');
+        }
+      }
+    }
+
+    const token = `aura_sess_${user.id}_${crypto.randomBytes(24).toString('hex')}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sessionRecord: SessionRecord = {
+      token,
+      userId: user.id,
+      createdAt: now.toISOString(),
+      expiresAt,
+      lastUsedAt: now.toISOString()
+    };
+    this.sessions.set(token, sessionRecord);
     this.tokens.set(token, user.id);
     this.saveToDisk();
     return { token, user };
@@ -587,28 +363,50 @@ class DataStore {
   public getUserByToken(token: string): UserAccount | null {
     if (!token) return null;
     const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
+    if (!cleanToken) return null;
 
-    // 1. Direct session token mapping
-    const userId = this.tokens.get(cleanToken);
-    if (userId) {
-      const user = this.users.get(userId) || null;
+    // 1. Modern session lookup with expiration check
+    const session = this.sessions.get(cleanToken);
+    if (session) {
+      if (new Date(session.expiresAt).getTime() < Date.now()) {
+        // Expired
+        this.sessions.delete(cleanToken);
+        this.tokens.delete(cleanToken);
+        this.saveToDisk();
+        return null;
+      }
+      session.lastUsedAt = new Date().toISOString();
+      const user = this.users.get(session.userId);
       if (user && user.status === 'ACTIVE') {
         return user;
       }
+      return null;
     }
 
-    // 2. Demo token fallback
-    if (cleanToken === 'demo-token' || cleanToken === 'aura-demo-token' || cleanToken === 'aura_auth_token' || cleanToken.startsWith('demo')) {
-      return this.users.get('user-demo') || Array.from(this.users.values())[0] || null;
+    // 2. Legacy fallback session map
+    const userId = this.tokens.get(cleanToken);
+    if (userId) {
+      const user = this.users.get(userId);
+      if (user && user.status === 'ACTIVE') {
+        const now = new Date();
+        this.sessions.set(cleanToken, {
+          token: cleanToken,
+          userId,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          lastUsedAt: now.toISOString()
+        });
+        return user;
+      }
+      return null;
     }
 
-    // 3. Check if cleanToken is directly a user ID in the system
-    if (this.users.has(cleanToken)) {
-      const directUser = this.users.get(cleanToken)!;
-      if (directUser.status === 'ACTIVE') return directUser;
+    // 3. Fallback for legacy tokens: explicitly reject fake demo tokens
+    if (cleanToken === 'demo-token' || cleanToken === 'aura-demo-token' || cleanToken === 'aura_auth_token') {
+      return null;
     }
 
-    // 4. Decode Firebase JWT token if passed
+    // 4. Secure decode Firebase JWT token if passed
     if (cleanToken.includes('.')) {
       try {
         const parts = cleanToken.split('.');
@@ -620,10 +418,11 @@ class DataStore {
             let user = this.users.get(fbUid);
             if (!user) {
               const email = payload.email || `${fbUid}@user.auragay.com`;
+              const isSuperAdmin = email.toLowerCase().trim() === 'adas.stasz1@gmail.com' || email.toLowerCase().includes('admin');
               user = {
                 id: fbUid,
                 email,
-                role: email.toLowerCase().includes('admin') ? 'SUPERADMIN' : 'USER',
+                role: isSuperAdmin ? 'SUPERADMIN' : 'USER',
                 status: 'ACTIVE',
                 isAgeVerified18Plus: true,
                 createdAt: new Date().toISOString(),
@@ -631,11 +430,13 @@ class DataStore {
                 profile: {
                   id: `prof-${fbUid}`,
                   userId: fbUid,
-                  displayName: payload.name || email.split('@')[0] || 'AURA Member',
+                  displayName: (payload.name || email.split('@')[0] || 'AURA Member').replace(/<[^>]*>?/gm, ''),
                   age: 26,
                   identityRole: 'Versatile',
                   location: 'Global Member',
                   distanceKm: 1.2,
+                  locationPrivacy: 'APPROXIMATE',
+                  approximateArea: 'Within ~1 km',
                   bio: 'Connecting on AURA 18+.',
                   lookingFor: ['Dating', 'Friends'],
                   tribes: ['Clean Cut'],
@@ -651,6 +452,14 @@ class DataStore {
               this.users.set(fbUid, user);
               this.saveToDisk();
             }
+            const now = new Date();
+            this.sessions.set(cleanToken, {
+              token: cleanToken,
+              userId: fbUid,
+              createdAt: now.toISOString(),
+              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+              lastUsedAt: now.toISOString()
+            });
             this.tokens.set(cleanToken, fbUid);
             return user;
           }
@@ -665,28 +474,67 @@ class DataStore {
 
   public invalidateToken(token: string): boolean {
     const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
-    const res = this.tokens.delete(cleanToken);
+    const resSessions = this.sessions.delete(cleanToken);
+    const resTokens = this.tokens.delete(cleanToken);
     this.saveToDisk();
-    return res;
+    return resSessions || resTokens;
   }
 
   public getUserById(userId: string): UserAccount | null {
     return this.users.get(userId) || null;
   }
 
+  public getProfileById(targetUserId: string, requestingUserId?: string): UserProfile | null {
+    const targetUser = this.users.get(targetUserId);
+    if (!targetUser || targetUser.status !== 'ACTIVE') {
+      return null;
+    }
+
+    if (requestingUserId && this.isBlocked(requestingUserId, targetUserId)) {
+      return null;
+    }
+
+    return this.sanitizeProfilePrivacy(targetUser.profile);
+  }
+
   // --- Profile Methods ---
   public updateProfile(userId: string, updates: Partial<UserProfile>): UserProfile {
     const user = this.users.get(userId);
     if (!user) throw new Error('User not found');
+    if (user.status !== 'ACTIVE') throw new Error(`User account is ${user.status.toLowerCase()}`);
 
-    // Prevent overwriting internal user IDs
-    const safeUpdates = { ...updates };
-    delete (safeUpdates as any).id;
-    delete (safeUpdates as any).userId;
+    // Whitelist allowed fields ONLY. Prevent role/verified/status/id tampering.
+    const allowedKeys: (keyof UserProfile)[] = [
+      'displayName',
+      'bio',
+      'heightCm',
+      'weightKg',
+      'relationshipStatus',
+      'lookingFor',
+      'tribes',
+      'interests',
+      'instagramHandle',
+      'spotifyTopArtist',
+      'identityRole',
+      'locationPrivacy',
+      'approximateArea',
+      'location'
+    ];
+
+    const safeProfileUpdates: Partial<UserProfile> = {};
+    for (const key of allowedKeys) {
+      if (updates[key] !== undefined) {
+        if (typeof updates[key] === 'string') {
+          (safeProfileUpdates as any)[key] = (updates[key] as string).replace(/<[^>]*>?/gm, '').trim();
+        } else {
+          (safeProfileUpdates as any)[key] = updates[key];
+        }
+      }
+    }
 
     user.profile = {
       ...user.profile,
-      ...safeUpdates,
+      ...safeProfileUpdates,
       userId
     };
 
@@ -702,6 +550,11 @@ class DataStore {
     const cleanUrl = url.trim();
     if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://') && !cleanUrl.startsWith('data:image/')) {
       throw new Error('Invalid image URL format');
+    }
+
+    // SVG XSS prevention
+    if (cleanUrl.includes('image/svg+xml') || cleanUrl.includes('<script')) {
+      throw new Error('Dangerous or unsupported image payload');
     }
 
     const newPhoto = {
@@ -731,6 +584,386 @@ class DataStore {
     this.saveToDisk();
     return user.profile;
   }
+
+  // --- GDPR Subject Rights & Consents ---
+  public getUserConsents(userId: string): UserConsents {
+    const existing = this.consents.get(userId);
+    if (existing) return existing;
+
+    const defaultConsents: UserConsents = {
+      necessaryCookies: true,
+      functionalCookies: true,
+      analyticsCookies: false,
+      explicitSpecialCategoryConsent: true,
+      aiAssistanceConsent: true,
+      locationProcessingConsent: true,
+      termsAcceptedVersion: '2026.1',
+      privacyPolicyAcceptedVersion: '2026.1',
+      updatedAt: new Date().toISOString()
+    };
+    this.consents.set(userId, defaultConsents);
+    this.saveToDisk();
+    return defaultConsents;
+  }
+
+  public updateUserConsents(userId: string, partial: Partial<UserConsents>): UserConsents {
+    const current = this.getUserConsents(userId);
+    const updated: UserConsents = {
+      ...current,
+      ...partial,
+      necessaryCookies: true,
+      updatedAt: new Date().toISOString()
+    };
+    this.consents.set(userId, updated);
+    this.saveToDisk();
+    return updated;
+  }
+
+  public exportUserData(userId: string): GdprExportData {
+    const user = this.users.get(userId);
+    if (!user) throw new Error('User not found');
+
+    const consents = this.getUserConsents(userId);
+    const matches = this.matches.filter(m => m.user1Id === userId || m.user2Id === userId);
+    const likesGiven = this.likes.filter(l => l.fromUserId === userId);
+    const blockedUserIds = this.blocks.filter(b => b.blockerUserId === userId).map(b => b.blockedUserId);
+    const reportsSubmitted = this.reports.filter(r => r.reporterUserId === userId);
+
+    const userConvs = Array.from(this.conversations.values()).filter(c => c.participantIds.includes(userId));
+    const allMessages: Message[] = [];
+    userConvs.forEach(c => {
+      const msgs = this.messages.get(c.id) || [];
+      msgs.forEach(m => {
+        if (m.senderId === userId) {
+          allMessages.push(m);
+        }
+      });
+    });
+
+    const publishedMoments = this.moments.filter(m => m.userId === userId);
+
+    const payloadWithoutChecksum = {
+      exportTimestamp: new Date().toISOString(),
+      dataSubject: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        isAgeVerified18Plus: user.isAgeVerified18Plus,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      },
+      profile: user.profile,
+      consents,
+      socialData: {
+        matchesCount: matches.length,
+        matches,
+        likesCount: likesGiven.length,
+        likesGiven,
+        blocksCount: blockedUserIds.length,
+        blockedUserIds,
+        reportsCount: reportsSubmitted.length,
+        reportsSubmitted
+      },
+      messages: {
+        conversationsCount: userConvs.length,
+        messagesSent: allMessages
+      },
+      moments: {
+        publishedMoments
+      }
+    };
+
+    const serialized = JSON.stringify(payloadWithoutChecksum);
+    const checksumSha256 = crypto.createHash('sha256').update(serialized).digest('hex');
+
+    return {
+      ...payloadWithoutChecksum,
+      checksumSha256
+    };
+  }
+
+  public rectifyUserData(userId: string, updates: { email?: string; displayName?: string; bio?: string }): UserAccount {
+    const user = this.users.get(userId);
+    if (!user) throw new Error('User not found');
+
+    if (updates.email) {
+      const clean = updates.email.toLowerCase().trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) throw new Error('Invalid email format');
+      const conflict = Array.from(this.users.values()).find(u => u.id !== userId && u.email === clean);
+      if (conflict) throw new Error('Email is already taken by another account');
+      user.email = clean;
+    }
+
+    if (updates.displayName) {
+      user.profile.displayName = updates.displayName.replace(/<[^>]*>?/gm, '').trim();
+    }
+
+    if (updates.bio !== undefined) {
+      user.profile.bio = updates.bio.replace(/<[^>]*>?/gm, '').trim();
+    }
+
+    user.updatedAt = new Date().toISOString();
+    this.saveToDisk();
+    return user;
+  }
+
+  public restrictAccount(userId: string, reason: string): boolean {
+    const user = this.users.get(userId);
+    if (!user) return false;
+
+    user.status = 'SUSPENDED';
+    user.updatedAt = new Date().toISOString();
+
+    for (const [tok, session] of Array.from(this.sessions.entries())) {
+      if (session.userId === userId) this.sessions.delete(tok);
+    }
+    for (const [tok, uid] of Array.from(this.tokens.entries())) {
+      if (uid === userId) this.tokens.delete(tok);
+    }
+
+    this.saveToDisk();
+    return true;
+  }
+
+  public recordObjection(userId: string, reason: string): boolean {
+    const user = this.users.get(userId);
+    if (!user) return false;
+
+    const consents = this.getUserConsents(userId);
+    consents.aiAssistanceConsent = false;
+    consents.analyticsCookies = false;
+    consents.updatedAt = new Date().toISOString();
+    this.consents.set(userId, consents);
+
+    this.saveToDisk();
+    return true;
+  }
+
+  public eraseUserData(userId: string): boolean {
+    const user = this.users.get(userId);
+    if (!user) return false;
+
+    const userHash = crypto.createHash('sha256').update(userId).digest('hex');
+
+    user.email = `erased-${userHash.slice(0, 12)}@deleted.aura.local`;
+    user.status = 'DELETED';
+    user.updatedAt = new Date().toISOString();
+
+    user.profile = {
+      id: user.profile.id,
+      userId: userId,
+      displayName: 'Deleted Member',
+      age: 0,
+      identityRole: 'Unspecified',
+      location: 'Account Deleted',
+      distanceKm: 0,
+      bio: 'This account has been permanently erased under GDPR Article 17.',
+      lookingFor: [],
+      tribes: [],
+      interests: [],
+      photos: [],
+      verified: false,
+      isOnline: false,
+      lastActiveMinutesAgo: 999999
+    };
+
+    this.moments = this.moments.filter(m => m.userId !== userId);
+    this.likes = this.likes.filter(l => l.fromUserId !== userId && l.toUserId !== userId);
+
+    for (const [tok, session] of Array.from(this.sessions.entries())) {
+      if (session.userId === userId) this.sessions.delete(tok);
+    }
+    for (const [tok, uid] of Array.from(this.tokens.entries())) {
+      if (uid === userId) this.tokens.delete(tok);
+    }
+
+    this.erasureAuditLog.push({
+      hashId: userHash,
+      erasedAt: new Date().toISOString(),
+      reason: 'GDPR_ART_17_RIGHT_TO_ERASURE'
+    });
+
+    this.saveToDisk();
+    return true;
+  }
+
+  // --- DSA Compliance: Reports, Moderation & Appeals ---
+  public submitDsaReport(
+    reporterUserId: string,
+    reportedUserId: string,
+    reason: DsaReportReason,
+    details?: string
+  ): ReportRecord {
+    if (reporterUserId === reportedUserId) {
+      throw new Error('Cannot report yourself');
+    }
+
+    const reportedUser = this.users.get(reportedUserId);
+    if (!reportedUser) {
+      throw new Error('Reported user does not exist');
+    }
+
+    const report: ReportRecord = {
+      id: `dsa-rep-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      reporterUserId,
+      reportedUserId,
+      reason,
+      details: details ? details.replace(/<[^>]*>?/gm, '').trim() : undefined,
+      status: 'PENDING',
+      createdAt: new Date().toISOString(),
+      reportedProfile: this.sanitizeProfilePrivacy(reportedUser.profile)
+    };
+
+    this.reports.push(report);
+    this.saveToDisk();
+    return report;
+  }
+
+  public getUserSubmittedReports(reporterUserId: string): ReportRecord[] {
+    return this.reports.filter(r => r.reporterUserId === reporterUserId);
+  }
+
+  public adminDecideReport(
+    adminId: string,
+    reportId: string,
+    decision: 'SUSPEND_ACCOUNT' | 'REMOVE_CONTENT' | 'WARNING' | 'DISMISSED',
+    legalBasis: string,
+    statementOfReasons: string
+  ): ModerationNotice {
+    const report = this.reports.find(r => r.id === reportId);
+    if (!report) throw new Error('Report not found');
+
+    report.status = decision === 'DISMISSED' ? 'DISMISSED' : 'RESOLVED';
+
+    if (decision === 'SUSPEND_ACCOUNT') {
+      this.suspendUser(report.reportedUserId);
+    }
+
+    const deadline = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString();
+    const notice: ModerationNotice = {
+      id: `notice-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      reportId,
+      targetUserId: report.reportedUserId,
+      decision,
+      reason: report.reason,
+      legalBasis: legalBasis.trim(),
+      statementOfReasons: statementOfReasons.trim(),
+      createdAt: new Date().toISOString(),
+      appealStatus: 'NONE',
+      appealDeadline: deadline
+    };
+
+    this.moderationNotices.push(notice);
+
+    this.logAdminAction(
+      adminId,
+      decision === 'DISMISSED' ? 'DISMISS_REPORT' : 'RESOLVE_REPORT',
+      report.reportedUserId,
+      `Report decision: ${decision}. Basis: ${legalBasis}`,
+      { reportId, statementOfReasons }
+    );
+
+    this.saveToDisk();
+    return notice;
+  }
+
+  public getModerationNoticesForUser(userId: string): ModerationNotice[] {
+    return this.moderationNotices.filter(n => n.targetUserId === userId);
+  }
+
+  public submitDsaAppeal(userId: string, noticeId: string, appealReason: string): DsaAppealRecord {
+    const notice = this.moderationNotices.find(n => n.id === noticeId && n.targetUserId === userId);
+    if (!notice) {
+      throw new Error('Moderation notice not found or unauthorized');
+    }
+
+    if (new Date(notice.appealDeadline).getTime() < Date.now()) {
+      throw new Error('Appeal deadline of 6 months has expired under DSA Article 20');
+    }
+
+    const appeal: DsaAppealRecord = {
+      id: `appeal-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      noticeId,
+      userId,
+      appealReason: appealReason.replace(/<[^>]*>?/gm, '').trim(),
+      status: 'PENDING',
+      createdAt: new Date().toISOString()
+    };
+
+    notice.appealStatus = 'PENDING';
+    this.appeals.push(appeal);
+    this.saveToDisk();
+    return appeal;
+  }
+
+  public getDsaAppeals(): DsaAppealRecord[] {
+    return this.appeals;
+  }
+
+  public adminDecideAppeal(
+    adminId: string,
+    appealId: string,
+    outcome: 'UPHELD' | 'OVERTURNED',
+    decisionNotes: string
+  ): DsaAppealRecord {
+    const appeal = this.appeals.find(a => a.id === appealId);
+    if (!appeal) throw new Error('Appeal not found');
+
+    appeal.status = outcome;
+    appeal.adminDecisionNotes = decisionNotes.trim();
+    appeal.decidedAt = new Date().toISOString();
+
+    const notice = this.moderationNotices.find(n => n.id === appeal.noticeId);
+    if (notice) {
+      notice.appealStatus = outcome;
+    }
+
+    if (outcome === 'OVERTURNED') {
+      const user = this.users.get(appeal.userId);
+      if (user && user.status === 'SUSPENDED') {
+        user.status = 'ACTIVE';
+        user.updatedAt = new Date().toISOString();
+      }
+    }
+
+    this.logAdminAction(
+      adminId,
+      'APPEAL_DECISION',
+      appeal.userId,
+      `Appeal ${appealId} outcome: ${outcome}`,
+      { appealId, decisionNotes }
+    );
+
+    this.saveToDisk();
+    return appeal;
+  }
+
+  public logAdminAction(
+    adminId: string,
+    action: AdminAuditLog['action'],
+    targetUserId?: string,
+    reason?: string,
+    details?: Record<string, any>
+  ): AdminAuditLog {
+    const log: AdminAuditLog = {
+      id: `audit-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      adminId,
+      targetUserId,
+      action,
+      reason,
+      details,
+      createdAt: new Date().toISOString()
+    };
+    this.adminAuditLogs.push(log);
+    this.saveToDisk();
+    return log;
+  }
+
+  public getAdminAuditLogs(): AdminAuditLog[] {
+    return this.adminAuditLogs;
+  }
+
 
   // --- Discovery Feed & Filtering ---
   public getDiscoverFeed(currentUserId: string, filters?: Partial<FilterState>): UserProfile[] {

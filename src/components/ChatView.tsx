@@ -304,7 +304,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       previewData = { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', durationSeconds: 15 };
     } else if (action === 'STAR_VIDEO') {
       // Short video for demo
-      previewData = { url: 'https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4' };
+      previewData = { url: 'https://placeholdervideo.dev/640x360' };
     }
 
     setMediaPreview({ type: action, data: previewData });

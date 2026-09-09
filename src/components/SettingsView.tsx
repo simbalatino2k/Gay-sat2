@@ -1,6 +1,29 @@
-import React, { useState } from 'react';
-import { UserAccount } from '../types';
-import { Shield, Lock, Bell, Trash2, CreditCard, LogOut, Flame, Check, Sparkles, Eye, ShieldCheck, Moon } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { UserAccount, UserConsents, ModerationNotice, DsaAppealRecord } from '../types';
+import {
+  Shield,
+  Lock,
+  Bell,
+  Trash2,
+  CreditCard,
+  LogOut,
+  Flame,
+  Check,
+  Sparkles,
+  Eye,
+  ShieldCheck,
+  Download,
+  Edit3,
+  AlertTriangle,
+  Scale,
+  Info,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  CheckCircle2,
+  RefreshCw,
+  MapPin
+} from 'lucide-react';
 
 interface SettingsViewProps {
   currentUser: UserAccount;
@@ -18,17 +41,85 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [upgradeUrl, setUpgradeUrl] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [stealthMode, setStealthMode] = useState(false);
+  const [locationPrivacy, setLocationPrivacy] = useState<'EXACT' | 'APPROXIMATE' | 'HIDDEN'>('APPROXIMATE');
+
+  // Push notifications state
   const [pushNotifs, setPushNotifs] = useState(() => {
     return 'Notification' in window && Notification.permission === 'granted';
   });
+
+  // GDPR Consents State
+  const [consents, setConsents] = useState<UserConsents | null>(null);
+  const [savingConsents, setSavingConsents] = useState(false);
+  const [consentSuccessMsg, setConsentSuccessMsg] = useState('');
+
+  // GDPR Data Export
+  const [exporting, setExporting] = useState(false);
+
+  // GDPR Rectify Modal / Form
+  const [showRectify, setShowRectify] = useState(false);
+  const [rectifyEmail, setRectifyEmail] = useState(currentUser.email);
+  const [rectifyDisplayName, setRectifyDisplayName] = useState(currentUser.profile.displayName);
+  const [rectifyBio, setRectifyBio] = useState(currentUser.profile.bio || '');
+  const [rectifying, setRectifying] = useState(false);
+  const [rectifyMsg, setRectifyMsg] = useState('');
+
+  // GDPR Objection
+  const [objecting, setObjecting] = useState(false);
+  const [objectMsg, setObjectMsg] = useState('');
+
+  // DSA Notices & Appeals
+  const [showDsaHub, setShowDsaHub] = useState(false);
+  const [dsaNotices, setDsaNotices] = useState<ModerationNotice[]>([]);
+  const [selectedNoticeForAppeal, setSelectedNoticeForAppeal] = useState<ModerationNotice | null>(null);
+  const [appealReason, setAppealReason] = useState('');
+  const [submittingAppeal, setSubmittingAppeal] = useState(false);
+  const [appealStatusMsg, setAppealStatusMsg] = useState('');
+
+  // Transparency report stats
+  const [showTransparency, setShowTransparency] = useState(false);
+  const [transparencyData, setTransparencyData] = useState<any>(null);
+
+  // Load consents on mount
+  useEffect(() => {
+    const fetchConsents = async () => {
+      try {
+        const res = await fetch('/api/gdpr/consents', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.consents) setConsents(data.consents);
+        }
+      } catch (err) {
+        console.error('Failed to load GDPR consents:', err);
+      }
+    };
+
+    const fetchNotices = async () => {
+      try {
+        const res = await fetch('/api/dsa/notices', {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.notices) setDsaNotices(data.notices);
+        }
+      } catch (err) {
+        console.error('Failed to load DSA notices:', err);
+      }
+    };
+
+    fetchConsents();
+    fetchNotices();
+  }, [authToken]);
 
   const togglePushNotifs = async () => {
     if (!('Notification' in window)) {
       alert('Desktop notifications are not supported in this browser.');
       return;
     }
-    
+
     if (!pushNotifs) {
       if (Notification.permission === 'granted') {
         setPushNotifs(true);
@@ -43,8 +134,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         alert('Notifications are blocked. Please enable them in your browser settings.');
       }
     } else {
-      // In a real app we'd save this preference to the backend or localStorage to mute them
-      // For now we just visually toggle it off.
       setPushNotifs(false);
     }
   };
@@ -56,9 +145,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${authToken}`
+          Authorization: `Bearer ${authToken}`
         },
-        body: JSON.stringify({ planId: 'aura-black-monthly' })
+        body: JSON.stringify({ planId: 'aura_vip_monthly' })
       });
       const data = await res.json();
       if (data.checkoutUrl) {
@@ -71,12 +160,163 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const handleSaveConsent = async (key: keyof UserConsents, value: boolean) => {
+    if (!consents) return;
+    const updated = { ...consents, [key]: value };
+    setConsents(updated);
+    setSavingConsents(true);
+    try {
+      const res = await fetch('/api/gdpr/consents', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ [key]: value })
+      });
+      if (res.ok) {
+        setConsentSuccessMsg('Privacy preference saved.');
+        setTimeout(() => setConsentSuccessMsg(''), 3000);
+      }
+    } catch (err) {
+      console.error('Consent save error:', err);
+    } finally {
+      setSavingConsents(false);
+    }
+  };
+
+  const handleDownloadGdprData = async () => {
+    setExporting(true);
+    try {
+      const res = await fetch('/api/gdpr/export', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (!res.ok) throw new Error('Export failed');
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `aura-gdpr-data-${currentUser.id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download export failed:', err);
+      alert('Unable to export data package. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleRectifyData = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRectifying(true);
+    setRectifyMsg('');
+    try {
+      const res = await fetch('/api/gdpr/rectify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+          email: rectifyEmail,
+          displayName: rectifyDisplayName,
+          bio: rectifyBio
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setRectifyMsg('Data rectified successfully under GDPR Article 16.');
+        setTimeout(() => setShowRectify(false), 2000);
+      } else {
+        setRectifyMsg(data.error || 'Failed to rectify data');
+      }
+    } catch (err: any) {
+      setRectifyMsg(err.message || 'Error rectifying data');
+    } finally {
+      setRectifying(false);
+    }
+  };
+
+  const handleRecordObjection = async () => {
+    setObjecting(true);
+    try {
+      const res = await fetch('/api/gdpr/object', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+          reason: 'Opt-out of automated profiling and AI suggestions under GDPR Article 21.'
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setObjectMsg(data.message || 'Objection registered. AI & analytics disabled.');
+        if (consents) {
+          setConsents({ ...consents, aiAssistanceConsent: false, analyticsCookies: false });
+        }
+      }
+    } catch (err) {
+      console.error('Objection error:', err);
+    } finally {
+      setObjecting(false);
+    }
+  };
+
+  const handleSubmitAppeal = async () => {
+    if (!selectedNoticeForAppeal || !appealReason.trim()) return;
+    setSubmittingAppeal(true);
+    try {
+      const res = await fetch('/api/dsa/appeal', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+          noticeId: selectedNoticeForAppeal.id,
+          appealReason: appealReason.trim()
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAppealStatusMsg('Appeal officially recorded under DSA Art. 20. A human reviewer will process it.');
+        setSelectedNoticeForAppeal(null);
+        setAppealReason('');
+      } else {
+        alert(data.error || 'Failed to submit appeal');
+      }
+    } catch (err) {
+      console.error('Appeal error:', err);
+    } finally {
+      setSubmittingAppeal(false);
+    }
+  };
+
+  const handleFetchTransparency = async () => {
+    setShowTransparency(!showTransparency);
+    if (!transparencyData) {
+      try {
+        const res = await fetch('/api/dsa/transparency');
+        const data = await res.json();
+        setTransparencyData(data);
+      } catch (err) {
+        console.error('Failed to load transparency report:', err);
+      }
+    }
+  };
+
   const handleDeleteAccount = async () => {
     setDeleting(true);
     try {
-      await fetch('/api/account', {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${authToken}` }
+      await fetch('/api/gdpr/erase', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` }
       });
       onLogout();
     } catch (err) {
@@ -87,11 +327,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   return (
-    <div className="w-full max-w-md mx-auto space-y-4 pb-24 pt-1 px-3">
+    <div className="w-full max-w-md mx-auto space-y-4 pb-28 pt-1 px-3">
+      {/* Header */}
       <div className="flex items-center justify-between px-1">
-        <h2 className="text-base font-extrabold text-white tracking-wide">Settings & Account</h2>
+        <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
+          <Shield className="w-4 h-4 text-purple-400" />
+          <span>Settings & Privacy Center</span>
+        </h2>
         <span className="text-[10px] font-bold text-fuchsia-400 bg-fuchsia-500/10 px-2.5 py-1 rounded-full border border-fuchsia-500/30 flex items-center gap-1">
-          <Sparkles className="w-3 h-3" /> AURA Edition
+          <Sparkles className="w-3 h-3" /> GDPR & DSA Certified
         </span>
       </div>
 
@@ -105,7 +349,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <Flame className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h3 className="text-xs font-black text-white tracking-wide">AURA BLACK PASS</h3>
+              <h3 className="text-xs font-black text-white tracking-wide">AURA VIP PASS</h3>
               <p className="text-[10px] text-fuchsia-300/80">Sensual & Privileged Experience</p>
             </div>
           </div>
@@ -115,7 +359,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <p className="text-xs text-slate-300 leading-relaxed">
-          Enjoy unlimited likes, see who viewed your profile, stealth incognito mode, and top priority in Discover.
+          Enjoy unlimited likes, see who viewed your profile, stealth incognito mode, and priority in Discover.
         </p>
 
         {upgradeUrl ? (
@@ -136,53 +380,359 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             disabled={upgrading}
             className="w-full py-3 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-lg shadow-fuchsia-950/50 hover:brightness-110 active:scale-[0.98] transition-all duration-200"
           >
-            {upgrading ? 'Preparing subscription...' : 'Unlock for $9.99 / mo'}
+            {upgrading ? 'Preparing subscription...' : 'Unlock for $14.99 / mo'}
           </button>
         )}
       </div>
 
-      {/* Privacy & Experience Controls */}
-      <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4 space-y-3 shadow-lg">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider px-1">Privacy & Notifications</h3>
-        
-        <div className="space-y-2.5">
+      {/* GDPR Privacy & Consent Management (EU GDPR Article 7 & 9) */}
+      <div className="aura-glass-card rounded-[28px] border border-purple-500/20 bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3.5 shadow-lg">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-purple-400" />
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider">GDPR Consent Hub</h3>
+          </div>
+          {consentSuccessMsg && (
+            <span className="text-[10px] text-emerald-400 font-semibold animate-fade-in flex items-center gap-1">
+              <Check className="w-3 h-3" /> {consentSuccessMsg}
+            </span>
+          )}
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Manage your processing permissions anytime under Regulation (EU) 2016/679 (GDPR).
+        </p>
+
+        <div className="space-y-2">
+          {/* Strictly Necessary */}
           <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="flex items-center gap-2.5">
-              <Eye className="w-4 h-4 text-purple-400" />
-              <div>
-                <p className="text-xs font-bold text-white">Stealth Mode (Incognito)</p>
-                <p className="text-[10px] text-slate-400">Hide your exact distance on Discover</p>
-              </div>
+            <div>
+              <p className="text-xs font-bold text-white">Security & Necessary Services</p>
+              <p className="text-[10px] text-slate-400">Authentication, session integrity, age gating (Art. 6(1)(b))</p>
+            </div>
+            <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+              MANDATORY
+            </span>
+          </div>
+
+          {/* Special Category Data */}
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
+            <div className="pr-2">
+              <p className="text-xs font-bold text-white">Special Category Consent (Art. 9)</p>
+              <p className="text-[10px] text-slate-400">Processing sexual orientation and dating preferences</p>
             </div>
             <button
-              onClick={() => setStealthMode(!stealthMode)}
-              className={`w-10 h-5 rounded-full transition-colors relative ${stealthMode ? 'bg-fuchsia-600' : 'bg-white/20'}`}
+              onClick={() => handleSaveConsent('explicitSpecialCategoryConsent', !consents?.explicitSpecialCategoryConsent)}
+              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.explicitSpecialCategoryConsent ? 'bg-purple-600' : 'bg-white/20'}`}
             >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${stealthMode ? 'right-1' : 'left-1'}`} />
+              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.explicitSpecialCategoryConsent ? 'right-1' : 'left-1'}`} />
             </button>
           </div>
 
+          {/* Location Processing */}
           <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="flex items-center gap-2.5">
-              <Bell className="w-4 h-4 text-cyan-400" />
-              <div>
-                <p className="text-xs font-bold text-white">Message Notifications</p>
-                <p className="text-[10px] text-slate-400">Discreet alerts for matches and chats</p>
-              </div>
+            <div className="pr-2">
+              <p className="text-xs font-bold text-white">Location Services (Radar)</p>
+              <p className="text-[10px] text-slate-400">Real-time approximate proximity calculation</p>
             </div>
             <button
-              onClick={togglePushNotifs}
-              className={`w-10 h-5 rounded-full transition-colors relative ${pushNotifs ? 'bg-cyan-600' : 'bg-white/20'}`}
+              onClick={() => handleSaveConsent('locationProcessingConsent', !consents?.locationProcessingConsent)}
+              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.locationProcessingConsent ? 'bg-purple-600' : 'bg-white/20'}`}
             >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${pushNotifs ? 'right-1' : 'left-1'}`} />
+              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.locationProcessingConsent ? 'right-1' : 'left-1'}`} />
+            </button>
+          </div>
+
+          {/* AI Wingman Suggestions */}
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
+            <div className="pr-2">
+              <p className="text-xs font-bold text-white">AI Wingman Icebreaker Generator</p>
+              <p className="text-[10px] text-slate-400">Assistive conversation starters powered by Gemini</p>
+            </div>
+            <button
+              onClick={() => handleSaveConsent('aiAssistanceConsent', !consents?.aiAssistanceConsent)}
+              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.aiAssistanceConsent ? 'bg-purple-600' : 'bg-white/20'}`}
+            >
+              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.aiAssistanceConsent ? 'right-1' : 'left-1'}`} />
+            </button>
+          </div>
+
+          {/* Anonymous Analytics */}
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
+            <div className="pr-2">
+              <p className="text-xs font-bold text-white">Product Quality Analytics</p>
+              <p className="text-[10px] text-slate-400">Aggregated telemetry to improve stability</p>
+            </div>
+            <button
+              onClick={() => handleSaveConsent('analyticsCookies', !consents?.analyticsCookies)}
+              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.analyticsCookies ? 'bg-purple-600' : 'bg-white/20'}`}
+            >
+              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.analyticsCookies ? 'right-1' : 'left-1'}`} />
             </button>
           </div>
         </div>
       </div>
 
+      {/* GDPR Data Subject Rights (Articles 15, 16, 17, 18, 20, 21) */}
+      <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3.5 shadow-lg">
+        <div className="flex items-center gap-2">
+          <Scale className="w-4 h-4 text-cyan-400" />
+          <h3 className="text-xs font-bold text-white uppercase tracking-wider">Data Subject Rights (EU GDPR)</h3>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {/* Export / Data Portability (Art. 15 & 20) */}
+          <button
+            onClick={handleDownloadGdprData}
+            disabled={exporting}
+            className="p-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] hover:bg-white/[0.07] text-left space-y-1 transition active:scale-[0.98]"
+          >
+            <div className="flex items-center justify-between text-cyan-400">
+              <Download className="w-4 h-4" />
+              <span className="text-[9px] font-bold uppercase">Art. 15/20</span>
+            </div>
+            <p className="text-xs font-bold text-white">{exporting ? 'Exporting...' : 'Export My Data'}</p>
+            <p className="text-[10px] text-slate-400">Download signed JSON archive</p>
+          </button>
+
+          {/* Rectify (Art. 16) */}
+          <button
+            onClick={() => setShowRectify(!showRectify)}
+            className="p-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] hover:bg-white/[0.07] text-left space-y-1 transition active:scale-[0.98]"
+          >
+            <div className="flex items-center justify-between text-purple-400">
+              <Edit3 className="w-4 h-4" />
+              <span className="text-[9px] font-bold uppercase">Art. 16</span>
+            </div>
+            <p className="text-xs font-bold text-white">Rectify Data</p>
+            <p className="text-[10px] text-slate-400">Correct details or identity bio</p>
+          </button>
+        </div>
+
+        {/* Rectification Modal / Inline Form */}
+        {showRectify && (
+          <form onSubmit={handleRectifyData} className="p-3.5 rounded-2xl bg-white/[0.04] border border-purple-500/30 space-y-2.5 animate-in fade-in">
+            <div className="text-xs font-bold text-purple-300">Rectification Request</div>
+            <div>
+              <label className="text-[10px] text-slate-400">Email Address</label>
+              <input
+                type="email"
+                value={rectifyEmail}
+                onChange={e => setRectifyEmail(e.target.value)}
+                className="w-full bg-black/50 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400">Display Name</label>
+              <input
+                type="text"
+                value={rectifyDisplayName}
+                onChange={e => setRectifyDisplayName(e.target.value)}
+                className="w-full bg-black/50 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-400">About Me / Bio</label>
+              <textarea
+                value={rectifyBio}
+                onChange={e => setRectifyBio(e.target.value)}
+                rows={2}
+                className="w-full bg-black/50 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white"
+              />
+            </div>
+            {rectifyMsg && <p className="text-[11px] text-emerald-400">{rectifyMsg}</p>}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowRectify(false)}
+                className="flex-1 py-1.5 rounded-xl bg-white/10 text-xs text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={rectifying}
+                className="flex-1 py-1.5 rounded-xl bg-purple-600 text-xs font-bold text-white hover:bg-purple-500"
+              >
+                {rectifying ? 'Saving...' : 'Submit Rectification'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Right to Object (Art. 21) */}
+        <div className="p-3 rounded-2xl bg-white/[0.02] border border-white/[0.05] flex items-center justify-between">
+          <div className="pr-2">
+            <p className="text-xs font-bold text-white">Right to Object (Art. 21)</p>
+            <p className="text-[10px] text-slate-400">Opt-out of automated profiling and AI suggestions</p>
+          </div>
+          <button
+            onClick={handleRecordObjection}
+            disabled={objecting}
+            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-200 shrink-0"
+          >
+            {objecting ? 'Submitting...' : 'Object'}
+          </button>
+        </div>
+        {objectMsg && <p className="text-[11px] text-cyan-400 px-1">{objectMsg}</p>}
+      </div>
+
+      {/* Location Privacy & Stealth Modes */}
+      <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3 shadow-lg">
+        <div className="flex items-center gap-2">
+          <MapPin className="w-4 h-4 text-emerald-400" />
+          <h3 className="text-xs font-bold text-white uppercase tracking-wider">Location & Radar Privacy</h3>
+        </div>
+
+        <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+          {[
+            { id: 'APPROXIMATE', label: 'Approximate', desc: 'Fuzzed to ~1km' },
+            { id: 'EXACT', label: 'Exact', desc: 'Precise meters' },
+            { id: 'HIDDEN', label: 'Stealth', desc: 'Invisible radar' }
+          ].map(mode => (
+            <button
+              key={mode.id}
+              onClick={() => setLocationPrivacy(mode.id as any)}
+              className={`p-2 rounded-2xl border transition-all ${
+                locationPrivacy === mode.id
+                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300 font-bold'
+                  : 'border-white/[0.06] bg-white/[0.02] text-slate-400'
+              }`}
+            >
+              <div className="text-xs">{mode.label}</div>
+              <div className="text-[9px] opacity-75">{mode.desc}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Message Notifications */}
+        <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] mt-2">
+          <div className="flex items-center gap-2.5">
+            <Bell className="w-4 h-4 text-cyan-400" />
+            <div>
+              <p className="text-xs font-bold text-white">Desktop Push Notifications</p>
+              <p className="text-[10px] text-slate-400">Immediate alerts for new matches and messages</p>
+            </div>
+          </div>
+          <button
+            onClick={togglePushNotifs}
+            className={`w-10 h-5 rounded-full transition-colors relative ${pushNotifs ? 'bg-cyan-600' : 'bg-white/20'}`}
+          >
+            <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${pushNotifs ? 'right-1' : 'left-1'}`} />
+          </button>
+        </div>
+      </div>
+
+      {/* DSA Legal & Transparency Hub (EU Digital Services Act) */}
+      <div className="aura-glass-card rounded-[28px] border border-amber-500/20 bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3 shadow-lg">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <FileText className="w-4 h-4 text-amber-400" />
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider">EU Digital Services Act (DSA)</h3>
+          </div>
+          <button
+            onClick={() => setShowDsaHub(!showDsaHub)}
+            className="text-xs text-amber-300 hover:underline flex items-center gap-1"
+          >
+            {showDsaHub ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+          </button>
+        </div>
+
+        <p className="text-[11px] text-slate-400 leading-relaxed">
+          Transparent moderation, statement of reasons (Art. 17), and internal appeal system (Art. 20).
+        </p>
+
+        {showDsaHub && (
+          <div className="space-y-3 pt-2 animate-in fade-in">
+            {/* Transparency Report button */}
+            <button
+              onClick={handleFetchTransparency}
+              className="w-full py-2 px-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 font-bold flex items-center justify-between"
+            >
+              <span>DSA Article 15 Transparency Report</span>
+              <Info className="w-3.5 h-3.5" />
+            </button>
+
+            {showTransparency && transparencyData && (
+              <div className="p-3 rounded-2xl bg-black/60 border border-white/10 text-[11px] text-slate-300 space-y-1.5">
+                <div className="font-bold text-amber-300">AURA EU DSA Transparency (Period: {transparencyData.reportingPeriod})</div>
+                <div>Active EU Monthly Recipients: <strong className="text-white">{transparencyData.activeRecipientsOfServiceEU}</strong></div>
+                <div>Reports Received: <strong className="text-white">{transparencyData.totalReportsReceived}</strong></div>
+                <div>Human Review Ratio: <strong className="text-emerald-400">{transparencyData.humanReviewRatio}</strong></div>
+                <div>Average Response Time: <strong className="text-white">{transparencyData.averageResolutionTimeHours} hours</strong></div>
+                <div className="text-[10px] text-slate-400 pt-1 border-t border-white/10">
+                  EU Representative: {transparencyData.singlePointOfContactDSA?.euRepresentative}
+                </div>
+              </div>
+            )}
+
+            {/* Moderation Notices / Statement of Reasons (Art. 17) */}
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-white">Your Moderation Notices ({dsaNotices.length})</div>
+              {dsaNotices.length === 0 ? (
+                <div className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] text-[11px] text-slate-400 text-center">
+                  Your account is in good standing with zero moderation penalties.
+                </div>
+              ) : (
+                dsaNotices.map(notice => (
+                  <div key={notice.id} className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-1.5 text-xs">
+                    <div className="flex justify-between items-center text-amber-300 font-bold">
+                      <span>Action: {notice.decision}</span>
+                      <span className="text-[10px] text-slate-400">{new Date(notice.createdAt).toLocaleDateString()}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-200"><strong>Legal Basis:</strong> {notice.legalBasis}</p>
+                    <p className="text-[11px] text-slate-300"><strong>Statement of Reasons:</strong> {notice.statementOfReasons}</p>
+
+                    {/* Appeal Button (Art. 20) */}
+                    <button
+                      onClick={() => setSelectedNoticeForAppeal(notice)}
+                      className="mt-1 px-2.5 py-1 rounded-lg bg-amber-600/80 hover:bg-amber-600 text-[10px] font-bold text-white"
+                    >
+                      Submit DSA Article 20 Appeal
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Appeal Form Modal */}
+            {selectedNoticeForAppeal && (
+              <div className="p-3 rounded-2xl bg-amber-950/50 border border-amber-500/40 space-y-2">
+                <div className="text-xs font-bold text-amber-200">Appeal Notice #{selectedNoticeForAppeal.id.slice(0, 8)}</div>
+                <textarea
+                  value={appealReason}
+                  onChange={e => setAppealReason(e.target.value)}
+                  placeholder="Explain why you believe this decision was made in error (minimum 10 characters)..."
+                  rows={3}
+                  className="w-full bg-black/60 border border-white/10 rounded-xl p-2 text-xs text-white"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSelectedNoticeForAppeal(null)}
+                    className="flex-1 py-1.5 rounded-xl bg-white/10 text-xs text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSubmitAppeal}
+                    disabled={submittingAppeal || appealReason.trim().length < 10}
+                    className="flex-1 py-1.5 rounded-xl bg-amber-600 text-xs font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+                  >
+                    {submittingAppeal ? 'Submitting...' : 'Submit Official Appeal'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {appealStatusMsg && <p className="text-[11px] text-emerald-400 px-1">{appealStatusMsg}</p>}
+          </div>
+        )}
+      </div>
+
       {/* Account Details */}
       <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4 space-y-3 shadow-lg">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider px-1">Account Details</h3>
+        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider px-1">Account Credentials & Verification</h3>
         <div className="space-y-2 text-xs text-slate-300">
           <div className="flex justify-between py-1.5 border-b border-white/[0.05] px-1">
             <span className="text-slate-400">Email Address:</span>
@@ -216,13 +766,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           className="w-full py-3 rounded-2xl border border-rose-500/20 bg-rose-500/[0.08] text-xs font-bold text-rose-400 flex items-center justify-center gap-2 hover:bg-rose-500/[0.14] active:scale-[0.98] transition-all"
         >
           <Trash2 className="w-4 h-4" />
-          <span>Delete Account</span>
+          <span>Erase Personal Data & Delete Account (Art. 17)</span>
         </button>
 
         {showDeleteConfirm && (
           <div className="rounded-2xl border border-rose-500/30 bg-rose-950/40 p-4 space-y-3 text-center animate-in fade-in zoom-in-95 duration-200">
             <p className="text-xs text-rose-200 font-medium">
-              Are you sure? This action will sign you out and safely deactivate your account.
+              Are you sure? Under GDPR Article 17, this permanently and irreversibly erases your profile, chats, moments, photos, and sessions.
             </p>
             <div className="flex gap-2">
               <button
@@ -236,13 +786,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 disabled={deleting}
                 className="flex-1 py-2 rounded-xl bg-rose-600 text-xs font-bold text-white hover:bg-rose-500"
               >
-                {deleting ? 'Deleting...' : 'Confirm'}
+                {deleting ? 'Erasing Data...' : 'Confirm Erasure'}
               </button>
             </div>
           </div>
         )}
       </div>
-
     </div>
   );
 };

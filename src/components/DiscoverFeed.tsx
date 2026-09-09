@@ -284,13 +284,13 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
         }}
         onReport={async (p, reason) => {
           try {
-            await fetch('/api/reports', {
+            await fetch('/api/dsa/report', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authToken}`
               },
-              body: JSON.stringify({ reportedUserId: p.userId, reason })
+              body: JSON.stringify({ reportedUserId: p.userId, reason, details: reason })
             });
           } catch (e) {
             console.error(e);
