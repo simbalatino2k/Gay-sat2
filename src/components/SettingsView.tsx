@@ -22,26 +22,41 @@ import {
   FileText,
   CheckCircle2,
   RefreshCw,
-  MapPin
+  MapPin,
+  CheckCircle,
+  Zap
 } from 'lucide-react';
+import { AdSlot } from './ads';
+import { getAdConsent, saveAdConsent } from '../config/adsConfig';
 
 interface SettingsViewProps {
   currentUser: UserAccount;
   authToken: string;
   onLogout: () => void;
   onSelectTab?: (tab: any) => void;
+  onUpdateUser?: (updated: UserAccount) => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   currentUser,
   authToken,
-  onLogout
+  onLogout,
+  onSelectTab,
+  onUpdateUser
 }) => {
   const [upgrading, setUpgrading] = useState(false);
   const [upgradeUrl, setUpgradeUrl] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [adConsent, setAdConsent] = useState(() => getAdConsent());
   const [locationPrivacy, setLocationPrivacy] = useState<'EXACT' | 'APPROXIMATE' | 'HIDDEN'>('APPROXIMATE');
+
+  const handleUpdateAdConsent = (personalized: boolean) => {
+    const updated = saveAdConsent({ allowPersonalizedAds: personalized });
+    setAdConsent(updated);
+    setConsentSuccessMsg('Ad privacy preference updated.');
+    setTimeout(() => setConsentSuccessMsg(''), 3000);
+  };
 
   // Push notifications state
   const [pushNotifs, setPushNotifs] = useState(() => {
@@ -362,6 +377,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Enjoy unlimited likes, see who viewed your profile, stealth incognito mode, and priority in Discover.
         </p>
 
+        {/* Ad-Free Guarantee Badge */}
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-purple-950/40 border border-purple-500/20 text-[11px] text-fuchsia-200">
+          <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span><strong>100% Ad-Free Guarantee:</strong> Premium members experience zero sponsored content across Discover and Radar.</span>
+        </div>
+
+        {/* Current VIP Status */}
+        <div className="flex items-center justify-between pt-1">
+          <span className="text-xs text-slate-300">
+            Membership: {currentUser.isPremium ? <strong className="text-emerald-400">ACTIVE VIP (Ad-Free)</strong> : <span className="text-slate-400">Standard Tier (Subtle Ads)</span>}
+          </span>
+          {currentUser.isPremium && (
+            <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full">
+              Verified Active
+            </span>
+          )}
+        </div>
+
         {upgradeUrl ? (
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-center space-y-2">
             <p className="text-xs font-bold text-emerald-300">Stripe checkout session ready!</p>
@@ -413,6 +446,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
               MANDATORY
             </span>
+          </div>
+
+          {/* ePrivacy Directive / Ad Personalization */}
+          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
+            <div className="pr-2">
+              <p className="text-xs font-bold text-white">Ad Personalization (ePrivacy / GDPR)</p>
+              <p className="text-[10px] text-slate-400">Contextual interest matching without third-party cross-site trackers</p>
+            </div>
+            <button
+              onClick={() => handleUpdateAdConsent(!adConsent.allowPersonalizedAds)}
+              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${adConsent.allowPersonalizedAds ? 'bg-purple-600' : 'bg-white/20'}`}
+            >
+              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${adConsent.allowPersonalizedAds ? 'right-1' : 'left-1'}`} />
+            </button>
           </div>
 
           {/* Special Category Data */}
@@ -472,6 +519,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Subtle Native Ad in Settings (between major sections) */}
+      <AdSlot
+        placement="settings"
+        format="wide-card"
+        currentUser={currentUser}
+        onOpenPrivacy={() => {}}
+      />
 
       {/* GDPR Data Subject Rights (Articles 15, 16, 17, 18, 20, 21) */}
       <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3.5 shadow-lg">
@@ -753,6 +808,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {/* Account Actions */}
       <div className="space-y-2 pt-1">
+        {(currentUser.role === 'ADMIN' || currentUser.role === 'SUPERADMIN') && onSelectTab && (
+          <button
+            onClick={() => onSelectTab('admin')}
+            className="w-full py-3 rounded-2xl border border-fuchsia-500/30 bg-gradient-to-r from-purple-500/15 to-fuchsia-500/15 text-xs font-bold text-fuchsia-300 flex items-center justify-center gap-2 hover:bg-fuchsia-500/25 active:scale-[0.98] transition-all shadow-[0_0_15px_rgba(217,70,239,0.2)]"
+          >
+            <Shield className="w-4 h-4 text-fuchsia-400" />
+            <span>Open Admin & DSA Moderation Dashboard</span>
+          </button>
+        )}
+
         <button
           onClick={onLogout}
           className="w-full py-3 rounded-2xl border border-white/[0.08] bg-white/[0.04] text-xs font-bold text-slate-200 flex items-center justify-center gap-2 hover:bg-white/[0.08] active:scale-[0.98] transition-all"
@@ -772,7 +837,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {showDeleteConfirm && (
           <div className="rounded-2xl border border-rose-500/30 bg-rose-950/40 p-4 space-y-3 text-center animate-in fade-in zoom-in-95 duration-200">
             <p className="text-xs text-rose-200 font-medium">
-              Are you sure? Under GDPR Article 17, this permanently and irreversibly erases your profile, chats, moments, photos, and sessions.
+              Are you sure? Under GDPR Article 17, this permanently and irreversibly erases your profile, chats, photos, and sessions.
             </p>
             <div className="flex gap-2">
               <button

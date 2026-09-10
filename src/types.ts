@@ -62,6 +62,8 @@ export interface UserProfile {
   lastActiveMinutesAgo: number;
   instagramHandle?: string;
   spotifyTopArtist?: string;
+  isPremium?: boolean;
+  premiumTier?: string;
 }
 
 export interface QueerVenue {
@@ -88,6 +90,8 @@ export interface UserAccount {
   createdAt: string;
   updatedAt: string;
   profile: UserProfile;
+  isPremium?: boolean;
+  premiumExpiresAt?: string;
 }
 
 export interface LikeRecord {
@@ -336,4 +340,41 @@ export interface GdprExportData {
   moments: {
     publishedMoments: Moment[];
   };
+}
+
+// Native Ad Monetization Architecture Types
+export type AdPlacement = 'discover' | 'moments' | 'radar' | 'settings';
+
+export interface NativeAd {
+  id: string;
+  placement: AdPlacement;
+  brandName: string;
+  tagline: string;
+  headline: string;
+  description: string;
+  ctaText: string;
+  ctaUrl: string;
+  imageUrl: string;
+  iconUrl?: string;
+  advertiserDomain: string;
+  category: string;
+  isNonPersonalizedOnly?: boolean;
+}
+
+export interface AdConsentState {
+  consentGiven: boolean;
+  allowPersonalizedAds: boolean;
+  allowAnalytics: boolean;
+  updatedAt: string;
+}
+
+export type AdAnalyticsEventType = 'ad_impression' | 'ad_click' | 'ad_slot_available' | 'ad_load_failed';
+
+export interface AdAnalyticsEvent {
+  eventType: AdAnalyticsEventType;
+  adId: string;
+  placement: AdPlacement;
+  timestamp: string;
+  isPersonalized: boolean;
+  provider: string;
 }

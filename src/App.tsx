@@ -3,10 +3,8 @@ import { UserAccount, UserProfile, FilterState } from './types';
 import { AgeGateModal } from './components/AgeGateModal';
 import { Navigation, NavTab } from './components/Navigation';
 import { DiscoverFeed } from './components/DiscoverFeed';
-import { FilterSheet } from './components/FilterSheet';
 import { MatchesView } from './components/MatchesView';
 import { ChatView } from './components/ChatView';
-import { MomentsView } from './components/MomentsView';
 import { ProfileEditor } from './components/ProfileEditor';
 import { ProfileModal } from './components/ProfileModal';
 import { SettingsView } from './components/SettingsView';
@@ -14,7 +12,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { OnboardingFlow } from './components/OnboardingFlow';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { MapView } from './components/MapView';
-import { Shield, Sparkles, SlidersHorizontal, Compass, Heart, MessageSquare, User, Settings, Lock, Radio, MapPin } from 'lucide-react';
+import { Shield, ShieldCheck, Sparkles, SlidersHorizontal, Compass, Heart, MessageSquare, User, Settings, Lock, Radio, MapPin } from 'lucide-react';
 import { AuraLogo, AuraLogoIcon } from './components/AuraLogo';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -231,7 +229,6 @@ export default function App() {
               {[
                 { id: 'discover', label: 'Nearby Discover', icon: Compass, color: 'text-purple-400' },
                 { id: 'map', label: 'Google Maps Radar', icon: MapPin, color: 'text-amber-400', badge: 'MAP' },
-                { id: 'moments', label: '24h Moments', icon: Sparkles, color: 'text-fuchsia-400', badge: 'LIVE' },
                 { id: 'matches', label: 'My Matches', icon: Heart, color: 'text-rose-400' },
                 { id: 'chat', label: 'Direct Messages', icon: MessageSquare, color: 'text-cyan-400' },
                 { id: 'profile', label: 'My Identity Profile', icon: User, color: 'text-purple-300' },
@@ -344,9 +341,16 @@ export default function App() {
             {activeTab === 'discover' && (
               <DiscoverFeed
                 authToken={token}
+                currentUser={currentUser}
                 onLikeProfile={(prof) => setSelectedProfile(prof)}
                 onOpenChat={handleOpenChatWithUser}
                 onSwitchToMap={() => setActiveTab('map')}
+                onOpenPremium={() => setActiveTab('settings')}
+                filter={filters}
+                onFilterChange={setFilters}
+                isFilterOpen={isFilterOpen}
+                onOpenFilters={() => setIsFilterOpen(true)}
+                onCloseFilters={() => setIsFilterOpen(false)}
               />
             )}
 
@@ -355,19 +359,12 @@ export default function App() {
                 authToken={token}
                 onOpenProfile={(prof) => setSelectedProfile(prof)}
                 onOpenChat={handleOpenChatWithUser}
+                onOpenPremium={() => setActiveTab('settings')}
               />
             )}
 
             {activeTab === 'matches' && (
               <MatchesView
-                authToken={token}
-                onOpenChat={handleOpenChatWithUser}
-              />
-            )}
-
-            {activeTab === 'moments' && (
-              <MomentsView
-                currentUser={currentUser}
                 authToken={token}
                 onOpenChat={handleOpenChatWithUser}
               />
@@ -398,6 +395,7 @@ export default function App() {
                 authToken={token}
                 onLogout={handleLogout}
                 onSelectTab={(tab: NavTab) => setActiveTab(tab)}
+                onUpdateUser={(updated) => setCurrentUser(updated)}
               />
             )}
 
@@ -450,11 +448,11 @@ export default function App() {
 
             <div className="p-4 rounded-2xl bg-gradient-to-br from-purple-900/30 to-fuchsia-900/30 border border-fuchsia-500/20 space-y-2 text-left">
               <div className="flex items-center gap-1.5 text-xs font-bold text-fuchsia-200">
-                <Sparkles className="w-4 h-4 text-fuchsia-400" />
-                <span>24h Moments Active</span>
+                <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                <span>Verified Safe Spaces</span>
               </div>
               <p className="text-[11px] text-slate-300 leading-relaxed">
-                Post ephemeral photo & text moments to local members in your area.
+                Explore real-time radar, verified local queer profiles, and private encrypted chat.
               </p>
             </div>
           </div>
@@ -496,17 +494,6 @@ export default function App() {
           }}
         />
       )}
-
-      {/* Discovery Filter Sheet */}
-      <FilterSheet
-        isOpen={isFilterOpen}
-        filter={filters}
-        onClose={() => setIsFilterOpen(false)}
-        onApply={(newFilters) => {
-          setFilters(newFilters);
-          setIsFilterOpen(false);
-        }}
-      />
     </div>
   );
 }

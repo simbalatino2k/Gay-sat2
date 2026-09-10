@@ -43,8 +43,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [showMediaMenu, setShowMediaMenu] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [mediaPreview, setMediaPreview] = useState<{type: string, data: any} | null>(null);
+  const [uploadingChatPhoto, setUploadingChatPhoto] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -285,25 +287,58 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
+  const handleChatFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingChatPhoto(true);
+    try {
+      const formData = new FormData();
+      formData.append('media', file);
+      const res = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
+        body: formData
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Upload failed');
+      }
+      setMediaPreview({
+        type: 'PHOTO',
+        data: { url: data.media.url }
+      });
+    } catch (err: any) {
+      console.error('Chat photo upload error:', err);
+      alert(err.message || 'Failed to upload photo.');
+    } finally {
+      setUploadingChatPhoto(false);
+      if (chatFileInputRef.current) {
+        chatFileInputRef.current.value = '';
+      }
+    }
+  };
+
   const handleSelectMediaAction = (action: 'PHOTO' | 'LINK' | 'LOCATION' | 'STICKER' | 'VOICE' | 'STAR_VIDEO') => {
     if (action === 'STICKER') {
       setShowStickerPicker(true);
       return;
     }
 
-    // Generate dummy preview data for the demo based on the action
-    let previewData: any = {};
     if (action === 'PHOTO') {
-      previewData = { url: 'https://images.unsplash.com/photo-1549490349-8643362247b5?auto=format&fit=crop&q=80&w=600' };
-    } else if (action === 'LINK') {
+      chatFileInputRef.current?.click();
+      return;
+    }
+
+    // Generate preview data based on the action
+    let previewData: any = {};
+    if (action === 'LINK') {
       previewData = { url: 'https://auragay.com/events/nyc', domain: 'auragay.com', title: 'AURA Black Party NYC' };
     } else if (action === 'LOCATION') {
       previewData = { lat: 40.7128, lng: -74.0060, approximateArea: 'SoHo District', distanceKm: 0.8 };
     } else if (action === 'VOICE') {
-      // Short audio asset for demo
       previewData = { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', durationSeconds: 15 };
     } else if (action === 'STAR_VIDEO') {
-      // Short video for demo
       previewData = { url: 'https://placeholdervideo.dev/640x360' };
     }
 
@@ -691,6 +726,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
               <Send className="w-4 h-4" />
             </button>
           </form>
+
+          <input
+            ref={chatFileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            onChange={handleChatFileUpload}
+            className="hidden"
+          />
 
           {mediaPreview && (
             <MediaPreview

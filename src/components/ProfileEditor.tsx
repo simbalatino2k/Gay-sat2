@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
-import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles } from 'lucide-react';
+import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
 
 interface ProfileEditorProps {
@@ -37,6 +37,68 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   const [showAlbumPicker, setShowAlbumPicker] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Client-side validations
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!allowedTypes.includes(file.type)) {
+      setUploadError('Invalid format. Please select a JPG, PNG, WEBP, or GIF image.');
+      return;
+    }
+
+    if (file.size > 8 * 1024 * 1024) {
+      setUploadError('Image exceeds the 8 MB maximum size limit.');
+      return;
+    }
+
+    if (photos.length >= 6) {
+      setUploadError('Gallery limit reached (max 6 photos). Remove one to upload.');
+      return;
+    }
+
+    setUploadingPhoto(true);
+    setUploadError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('media', file);
+
+      const res = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`
+        },
+        body: formData
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
+      const newPhoto = {
+        id: `ph-upload-${Date.now()}`,
+        url: data.media.url,
+        isPrimary: photos.length === 0
+      };
+
+      setPhotos(prev => [...prev, newPhoto]);
+    } catch (err: any) {
+      setUploadError(err.message || 'Failed to upload photo. Please try again.');
+    } finally {
+      setUploadingPhoto(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
 
   const handleAddTag = () => {
     if (!newTagInput.trim()) return;
@@ -211,10 +273,47 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
             ))}
           </div>
 
-          <div className="flex gap-2">
+          {uploadError && (
+            <div className="flex items-center gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{uploadError}</span>
+            </div>
+          )}
+
+          {/* Real Media Upload Button (Mobile Camera & Gallery) */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingPhoto || photos.length >= 6}
+              className="flex-1 py-2.5 px-3 rounded-xl bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 text-xs font-bold text-white shadow-md shadow-purple-950/40 flex items-center justify-center gap-2 transition disabled:opacity-50 active:scale-95"
+            >
+              {uploadingPhoto ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Uploading securely...</span>
+                </>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>Upload Photo (Camera / Gallery)</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="flex gap-2 pt-1">
             <input
               type="text"
-              placeholder="Image URL..."
+              placeholder="Or paste an Image URL..."
               value={newPhotoUrl}
               onChange={e => setNewPhotoUrl(e.target.value)}
               className="flex-1 aura-glass-input rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 outline-none transition"
@@ -224,7 +323,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               onClick={handleAddPhoto}
               className="aura-btn-primary px-4 py-2 rounded-xl text-xs font-bold text-white shadow-md shadow-purple-950/50 transition"
             >
-              Add
+              Add URL
             </button>
           </div>
         </div>

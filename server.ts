@@ -2,16 +2,34 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import multer from 'multer';
 import { store } from './src/db/store';
 import { QUEER_VENUES, getVenuesNearLocation, searchVenues } from './src/data/queerVenues';
 import { AURA_STICKERS } from './src/data/auraStickers';
+import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
+import { initStorage, uploadUserMedia, getLocalMediaFile } from './src/lib/storage';
+
+// Initialize Media Storage subsystem
+initStorage();
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 } // 8 MB limit
+});
 
 // Initialize Express App
 const app = express();
 const PORT = 3000;
 
-// Security & Parsing Middlewares
-app.use(express.json({ limit: '10mb' }));
+// Security & Parsing Middlewares with rawBody capture for webhook signature verification
+app.use(
+  express.json({
+    limit: '10mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Hardened Production Security Headers Middleware
@@ -22,12 +40,15 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader(
     'Permissions-Policy',
-    'camera=(), microphone=(), payment=*, geolocation=(self)'
+    'camera=(self), microphone=(), payment=*, geolocation=(self)'
   );
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src 'self' https: wss:; worker-src 'self' blob:;"
   );
+  if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  }
   next();
 });
 
@@ -57,6 +78,33 @@ function rateLimiter(req: Request, res: Response, next: NextFunction) {
 
 app.use('/api', rateLimiter);
 
+// Dedicated Authentication Rate Limiter (Protection against credential stuffing & brute-force)
+const authRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const AUTH_WINDOW_MS = 5 * 60 * 1000; // 5 minutes window
+const MAX_AUTH_ATTEMPTS = 5; // Max 5 attempts per 5 minutes
+
+function authRateLimiter(req: Request, res: Response, next: NextFunction) {
+  const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  let record = authRateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    authRateLimitMap.set(ip, { count: 1, resetTime: now + AUTH_WINDOW_MS });
+    return next();
+  }
+
+  if (record.count >= MAX_AUTH_ATTEMPTS) {
+    const retryAfterSeconds = Math.ceil((record.resetTime - now) / 1000);
+    res.setHeader('Retry-After', retryAfterSeconds);
+    return res.status(429).json({
+      error: 'Too many authentication attempts. For your security, please wait a few minutes before trying again.'
+    });
+  }
+
+  record.count += 1;
+  next();
+}
+
 // Custom Auth Request Interface
 interface AuthenticatedRequest extends Request {
   user?: ReturnType<typeof store.getUserByToken>;
@@ -83,6 +131,19 @@ function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextF
 
   req.user = user;
   req.token = token;
+  next();
+}
+
+function optionalAuthenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers['authorization'];
+  if (authHeader) {
+    const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+    const user = store.getUserByToken(token);
+    if (user && user.status === 'ACTIVE') {
+      req.user = user;
+      req.token = token;
+    }
+  }
   next();
 }
 
@@ -120,11 +181,12 @@ app.get('/api/health', (req: Request, res: Response) => {
 });
 
 // Auth: Register
-app.post('/api/auth/register', (req: Request, res: Response) => {
+app.post('/api/auth/register', authRateLimiter, (req: Request, res: Response) => {
   try {
-    const { email, displayName, age, is18PlusAccepted, password } = req.body;
+    const { email, displayName, age, is18PlusAccepted, isAgeVerified18Plus, password } = req.body;
 
-    if (!is18PlusAccepted) {
+    const isConfirmed18 = is18PlusAccepted === true || isAgeVerified18Plus === true;
+    if (!isConfirmed18) {
       return res.status(400).json({ error: 'You must confirm you are 18 years of age or older to use AURA.' });
     }
 
@@ -132,12 +194,12 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'A valid email address is required.' });
     }
 
-    const numAge = Number(age);
+    const numAge = age ? Number(age) : 18;
     if (isNaN(numAge) || numAge < 18) {
       return res.status(400).json({ error: 'AURA GAY 18+ is strictly reserved for adults 18 years of age and older.' });
     }
 
-    const cleanName = (displayName || '').toString().trim();
+    const cleanName = (displayName || email.split('@')[0] || 'AURA Member').toString().trim();
     if (!cleanName || cleanName.length < 2) {
       return res.status(400).json({ error: 'Display name must be at least 2 characters long.' });
     }
@@ -150,7 +212,7 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
 });
 
 // Auth: Login
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', authRateLimiter, (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
     if (!email || typeof email !== 'string') {
@@ -166,6 +228,97 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Login failed' });
   }
+});
+
+// Auth: Forgot Password (Initiate recovery flow)
+app.post('/api/auth/forgot-password', authRateLimiter, (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ error: 'Please provide a valid email address.' });
+    }
+
+    const result = store.createPasswordReset(email.trim());
+
+    // Prevent account enumeration by always returning a consistent success confirmation
+    const responsePayload: any = {
+      success: true,
+      message: 'If an account exists with that email, password reset instructions have been generated.'
+    };
+
+    // In development or testing, include the reset token directly to facilitate automated tests and local setup
+    if (process.env.NODE_ENV !== 'production' && result) {
+      responsePayload.devResetToken = result.token;
+      responsePayload.expiresAt = result.expiresAt;
+    }
+
+    res.json(responsePayload);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to process password recovery request.' });
+  }
+});
+
+// Auth: Reset Password (Execute token verification & update)
+app.post('/api/auth/reset-password', authRateLimiter, (req: Request, res: Response) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({ error: 'Password recovery token is required.' });
+    }
+
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+    }
+
+    const success = store.resetPasswordWithToken(token.trim(), newPassword);
+    if (!success) {
+      return res.status(400).json({ error: 'Password recovery link is invalid or has expired.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Password successfully updated. You may now log in with your new credentials.'
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Password reset failed.' });
+  }
+});
+
+// Media: Secure Upload Endpoint (GCS / Private Container Storage)
+app.post('/api/media/upload', authenticateToken, upload.single('media'), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No media file received. Please provide an image file.' });
+    }
+
+    const result = await uploadUserMedia(
+      req.file.buffer,
+      req.file.mimetype,
+      req.file.originalname,
+      req.user!.id
+    );
+
+    res.json({
+      success: true,
+      media: result
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Media upload failed.' });
+  }
+});
+
+// Media: Authenticated / Sandboxed Delivery Endpoint
+app.get('/api/media/files/:filename', (req: Request, res: Response) => {
+  const filename = Array.isArray(req.params.filename) ? req.params.filename[0] : (req.params.filename as string);
+  const fileInfo = getLocalMediaFile(filename);
+  if (!fileInfo) {
+    return res.status(404).json({ error: 'Media object not found.' });
+  }
+  res.setHeader('Content-Type', fileInfo.mimeType);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'");
+  res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+  res.sendFile(fileInfo.path);
 });
 
 // Auth: Get Current Profile
@@ -812,6 +965,23 @@ Rules:
 app.post('/api/ai/icebreaker', authenticateToken, handleAIIcebreaker);
 app.post('/api/ai/propositions', authenticateToken, handleAIIcebreaker);
 
+// Helper to resolve canonical application URL (no hardcoded localhost)
+const getCanonicalBaseUrl = (req: Request): string => {
+  if (process.env.APP_BASE_URL) {
+    return process.env.APP_BASE_URL.replace(/\/+$/, '');
+  }
+  const origin = req.headers.origin;
+  if (origin && typeof origin === 'string' && !origin.includes('localhost:3000')) {
+    return origin.replace(/\/+$/, '');
+  }
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  if (host) {
+    return `${proto}://${host}`.replace(/\/+$/, '');
+  }
+  return 'https://aura18.app';
+};
+
 // Payments / Subscription Checkout (Supports both create-checkout-session and checkout-session)
 const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -819,12 +989,13 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
     const stripeKey = process.env.STRIPE_SECRET_KEY;
 
     if (!stripeKey) {
-      const mockCheckoutUrl = `${req.headers.origin || 'http://localhost:3000'}/?payment=preview_success`;
-      return res.json({
-        url: mockCheckoutUrl,
-        checkoutUrl: mockCheckoutUrl,
-        preview: true,
-        message: 'Stripe payments simulated in preview mode. Set STRIPE_SECRET_KEY to activate live checkout.'
+      if (process.env.NODE_ENV === 'production') {
+        return res.status(503).json({
+          error: 'Stripe payments are not configured on this production instance. Please set STRIPE_SECRET_KEY.'
+        });
+      }
+      return res.status(400).json({
+        error: 'STRIPE_SECRET_KEY is not configured in this environment.'
       });
     }
 
@@ -832,24 +1003,35 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
     const Stripe = (await import('stripe')).default;
     const stripe = new Stripe(stripeKey);
 
+    const isAnnual = planId === 'aura_vip_annual';
+    const baseUrl = getCanonicalBaseUrl(req);
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
+      client_reference_id: req.user!.id,
+      metadata: {
+        userId: req.user!.id,
+        planId
+      },
       line_items: [
         {
           price_data: {
             currency: 'usd',
             product_data: {
-              name: planId === 'aura_vip_annual' ? 'AURA VIP Pass (Annual)' : 'AURA VIP Pass (Monthly)',
+              name: isAnnual ? 'AURA VIP Pass (Annual)' : 'AURA VIP Pass (Monthly)',
               description: 'Unlimited likes, see who liked you, stealth mode, and AI icebreaker priority.'
             },
-            unit_amount: planId === 'aura_vip_annual' ? 9999 : 1499
+            unit_amount: isAnnual ? 9999 : 1499,
+            recurring: {
+              interval: isAnnual ? 'year' : 'month'
+            }
           },
           quantity: 1
         }
       ],
       mode: 'subscription',
-      success_url: `${req.headers.origin || 'http://localhost:3000'}/?payment=success`,
-      cancel_url: `${req.headers.origin || 'http://localhost:3000'}/?payment=cancelled`
+      success_url: `${baseUrl}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/?payment=cancelled`
     });
 
     res.json({ url: session.url, checkoutUrl: session.url });
@@ -859,6 +1041,116 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
 };
 app.post('/api/payments/create-checkout-session', authenticateToken, handleCheckout);
 app.post('/api/payments/checkout-session', authenticateToken, handleCheckout);
+
+// Stripe Webhook Endpoint (Protected by cryptographic signature and idempotent processing)
+app.post('/api/payments/webhook', async (req: Request, res: Response) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!sig || !webhookSecret) {
+    console.error('[Stripe Webhook] Missing stripe-signature or STRIPE_WEBHOOK_SECRET');
+    return res.status(400).json({ error: 'Webhook secret or signature missing' });
+  }
+
+  const rawBody = (req as any).rawBody;
+  if (!rawBody) {
+    return res.status(400).json({ error: 'Raw body payload required for signature verification' });
+  }
+
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) {
+    return res.status(503).json({ error: 'Stripe service unavailable' });
+  }
+
+  let event: any;
+  try {
+    const Stripe = (await import('stripe')).default;
+    const stripe = new Stripe(stripeKey);
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+  } catch (err: any) {
+    console.error('[Stripe Webhook] Signature verification failed:', err.message);
+    return res.status(400).json({ error: `Webhook signature verification failed: ${err.message}` });
+  }
+
+  // Idempotency check: Ignore already processed events
+  if (store.isStripeEventProcessed(event.id)) {
+    return res.json({ received: true, message: 'Event already processed' });
+  }
+
+  store.recordStripeEvent(event.id, event.type);
+  console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        const customerId = session.customer as string;
+        const subscriptionId = session.subscription as string;
+        const userId = session.client_reference_id || session.metadata?.userId;
+        const planId = session.metadata?.planId || 'aura_vip_monthly';
+
+        if (userId) {
+          store.recordStripeSubscription(userId, customerId, subscriptionId, planId, 'active');
+          console.log(`[Stripe Webhook] Activated VIP for user ${userId}`);
+        } else if (customerId) {
+          const user = store.findUserByStripeCustomerId(customerId);
+          if (user) {
+            store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, 'active');
+            console.log(`[Stripe Webhook] Activated VIP for user ${user.id} via customer ID`);
+          }
+        }
+        break;
+      }
+
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated': {
+        const sub = event.data.object;
+        const customerId = sub.customer as string;
+        const subscriptionId = sub.id as string;
+        const status = sub.status; // 'active', 'trialing', 'past_due', 'canceled', etc.
+        const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+        const planId = sub.metadata?.planId || 'aura_vip_monthly';
+        const userId = sub.metadata?.userId;
+
+        let user = userId ? store.getUserById(userId) : null;
+        if (!user && customerId) {
+          user = store.findUserByStripeCustomerId(customerId);
+        }
+        if (!user && subscriptionId) {
+          user = store.findUserByStripeSubscriptionId(subscriptionId);
+        }
+
+        if (user) {
+          store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, status, periodEnd);
+          console.log(`[Stripe Webhook] Updated subscription for user ${user.id}: status=${status}`);
+        }
+        break;
+      }
+
+      case 'customer.subscription.deleted':
+      case 'invoice.payment_failed': {
+        const obj = event.data.object;
+        const customerId = obj.customer as string;
+        const subscriptionId = (obj.subscription || obj.id) as string;
+
+        let user = store.findUserByStripeCustomerId(customerId) || store.findUserByStripeSubscriptionId(subscriptionId);
+        if (user) {
+          store.recordStripeSubscription(user.id, customerId, subscriptionId, 'none', 'canceled');
+          console.log(`[Stripe Webhook] Deactivated VIP for user ${user.id} following cancellation or payment failure`);
+        }
+        break;
+      }
+
+      default:
+        console.log(`[Stripe Webhook] Unhandled event type ${event.type}`);
+    }
+
+    res.json({ received: true });
+  } catch (err: any) {
+    console.error('[Stripe Webhook] Error executing webhook handler:', err);
+    res.status(500).json({ error: 'Internal webhook handling error' });
+  }
+});
 
 // Admin: Analytics & Moderation Dashboard
 app.get('/api/admin/stats', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
@@ -953,6 +1245,39 @@ app.post('/api/admin/purge-bots', authenticateToken, requireAdmin, (req: Authent
   res.json({ success: true, ...result });
 });
 
+// --- Monetization & Native Advertising Architecture (GDPR & ePrivacy Compliant) ---
+
+// Inventory Endpoint: returns native ads for placement, or empty if user is Premium
+app.get('/api/ads/inventory', optionalAuthenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  const placement = (req.query.placement as any) || 'discover';
+  const allowPersonalized = req.query.allowPersonalized === 'true';
+
+  // Strict Premium Ad-Free Guarantee:
+  if (req.user?.isPremium || req.user?.role === 'SUPERADMIN') {
+    return res.json({ ads: [], isPremium: true, adFree: true });
+  }
+
+  const ads = getAdsForPlacement(placement, allowPersonalized);
+  res.json({ ads, isPremium: false, adFree: false });
+});
+
+// Privacy-Safe Ad Telemetry: Logs aggregate interaction counts with NO personal data
+const adTelemetryBuffer: Array<{ eventType: string; adId: string; placement: string; timestamp: string }> = [];
+
+app.post('/api/ads/telemetry', (req: Request, res: Response) => {
+  const { eventType, adId, placement, timestamp } = req.body || {};
+  if (eventType && placement) {
+    if (adTelemetryBuffer.length > 500) adTelemetryBuffer.shift();
+    adTelemetryBuffer.push({
+      eventType: String(eventType),
+      adId: String(adId || 'unknown'),
+      placement: String(placement),
+      timestamp: String(timestamp || new Date().toISOString()),
+    });
+  }
+  res.json({ success: true });
+});
+
 // Explicit 404 Catch-All for any /api/* route:
 // This guarantees that ANY missing or invalid API route returns JSON, NEVER the HTML index.html
 app.all('/api/*', (req: Request, res: Response) => {
@@ -962,8 +1287,12 @@ app.all('/api/*', (req: Request, res: Response) => {
 // Vite Server Integration (Dev vs Prod)
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: isHmrDisabled ? false : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

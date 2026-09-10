@@ -39,6 +39,77 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Password Recovery State
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [resetStep, setResetStep] = useState<'request' | 'submit'>('request');
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [resetMsg, setResetMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+
+  const handleRequestPasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetEmail.trim()) return;
+    setResetLoading(true);
+    setResetMsg(null);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: resetEmail.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to request password reset.');
+      }
+      if (data.devResetToken) {
+        setResetToken(data.devResetToken);
+      }
+      setResetMsg({
+        type: 'success',
+        text: data.message || 'If an account exists with this email, recovery instructions have been sent.'
+      });
+      setResetStep('submit');
+    } catch (err: any) {
+      setResetMsg({ type: 'error', text: err.message || 'Error processing request.' });
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleExecutePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetToken.trim() || !newPassword.trim()) return;
+    setResetLoading(true);
+    setResetMsg(null);
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: resetToken.trim(), newPassword: newPassword.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Password reset failed.');
+      }
+      setResetMsg({
+        type: 'success',
+        text: 'Your password has been updated! You may now log in.'
+      });
+      setTimeout(() => {
+        setShowForgotPassword(false);
+        setResetStep('request');
+        setResetMsg(null);
+        setIsLogin(true);
+      }, 2000);
+    } catch (err: any) {
+      setResetMsg({ type: 'error', text: err.message || 'Failed to reset password.' });
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   const handleGoogleAuth = async () => {
     setLoading(true);
     setError(null);
@@ -70,10 +141,13 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
       }
       setSuccess(true);
       setTimeout(() => {
+        if (data?.token) {
+          localStorage.setItem('aura_auth_token', data.token);
+          localStorage.setItem('aura_token', data.token);
+        }
         if (isLogin) {
           onComplete(data);
         } else {
-          localStorage.setItem('aura_token', data.token);
           setStep('profile');
           setSuccess(false);
         }
@@ -82,20 +156,34 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
       // Fallback to local server auth if Firebase Auth fails or is disabled
       try {
         const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
+        const bodyPayload = isLogin
+          ? { email, password }
+          : {
+              email,
+              password,
+              displayName: email.split('@')[0] || 'AURA Member',
+              age: 18,
+              is18PlusAccepted: true,
+              isAgeVerified18Plus: true
+            };
+
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password, isAgeVerified18Plus: true })
+          body: JSON.stringify(bodyPayload)
         });
         const fallbackData = await res.json();
         if (!res.ok) throw new Error(fallbackData.error || err.message || 'Nie udało się zalogować');
 
         setSuccess(true);
         setTimeout(() => {
+          if (fallbackData?.token) {
+            localStorage.setItem('aura_auth_token', fallbackData.token);
+            localStorage.setItem('aura_token', fallbackData.token);
+          }
           if (isLogin) {
             onComplete(fallbackData);
           } else {
-            localStorage.setItem('aura_token', fallbackData.token);
             setStep('profile');
             setSuccess(false);
           }
@@ -112,7 +200,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const token = localStorage.getItem('aura_token');
+    const token = localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
 
     try {
       const profileUpdates = {
@@ -148,10 +236,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
       if (data.user) {
         setSuccess(true);
         setTimeout(() => {
+          if (token) {
+            localStorage.setItem('aura_auth_token', token);
+            localStorage.setItem('aura_token', token);
+          }
           onComplete({ token: token!, user: data.user });
         }, 500);
       } else {
         // If local API didn't return user, use fallback or navigate
+        if (token) {
+          localStorage.setItem('aura_auth_token', token);
+          localStorage.setItem('aura_token', token);
+        }
         onComplete({ token: token || 'aura_session', user: { id: auth.currentUser?.uid || 'user-new', profile: profileUpdates } });
       }
     } catch (err: any) {
@@ -198,7 +294,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
             </div>
 
             <p className="text-xs text-slate-400 font-medium leading-relaxed max-w-xs hidden sm:block">
-              Connect with verified local profiles, share 24h moments, and enjoy private encrypted chat.
+              Connect with verified local profiles, explore live radar, and enjoy private encrypted chat.
             </p>
 
             <div className="hidden md:flex flex-col gap-2 pt-2 text-left w-full text-[11px] text-slate-300">
@@ -208,7 +304,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
               </div>
               <div className="flex items-center gap-2 p-2.5 rounded-xl bg-white/[0.03] border border-white/5">
                 <Sparkles className="w-4 h-4 text-fuchsia-400 shrink-0" />
-                <span>Interactive Grid & 24h Moments</span>
+                <span>Interactive Grid & Live Radar</span>
               </div>
             </div>
           </div>
@@ -229,159 +325,299 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
 
             {step === 'auth' ? (
               <div className="space-y-4">
-                {/* Google Sign-In CTA */}
-                <button
-                  type="button"
-                  onClick={handleGoogleAuth}
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold text-white transition-all duration-200 active:scale-[0.98] shadow-lg shadow-black/20 group"
-                >
-                  <svg className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" viewBox="0 0 24 24">
-                    <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.2 9 5 12 5z" />
-                    <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z" />
-                    <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.8s.7 5.1 1.9 7.5l3.7-2.9c-.6-.7-1.1-1.7-1.1-2.9z" />
-                    <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.2-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z" />
-                  </svg>
-                  <span>Zaloguj się przez Google</span>
-                </button>
+                {showForgotPassword ? (
+                  /* Password Recovery View */
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+                      <div>
+                        <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                          <Lock className="w-4 h-4 text-fuchsia-400" />
+                          <span>Password Recovery</span>
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          {resetStep === 'request' ? 'Request a secure recovery token' : 'Set your new password'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowForgotPassword(false);
+                          setResetMsg(null);
+                        }}
+                        className="text-xs text-slate-400 hover:text-white transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
 
-                <div className="relative flex items-center justify-center my-2">
-                  <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
-                  <span className="relative px-3 bg-[#090b12] text-[10px] uppercase tracking-wider text-slate-400 font-bold rounded-full border border-white/5">lub adresem email</span>
-                </div>
-
-                <form onSubmit={handleAuthSubmit} className="space-y-4">
-                  {/* Segmented Tab Switcher */}
-                <div className="relative flex rounded-2xl bg-black/40 p-1 border border-white/10">
-                  <button
-                    type="button"
-                    onClick={() => { setIsLogin(true); setError(null); }}
-                    className={`relative z-10 flex-1 py-2 text-xs font-bold transition-colors duration-200 ${
-                      isLogin ? 'text-white' : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    Sign In
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setIsLogin(false); setError(null); }}
-                    className={`relative z-10 flex-1 py-2 text-xs font-bold transition-colors duration-200 ${
-                      !isLogin ? 'text-white' : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    Create Account
-                  </button>
-
-                  {/* Animated Active Pill Indicator */}
-                  <motion.div
-                    className="absolute inset-y-1 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 shadow-md shadow-fuchsia-500/30"
-                    initial={false}
-                    animate={{
-                      left: isLogin ? '4px' : '50%',
-                      width: 'calc(50% - 4px)'
-                    }}
-                    transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                  />
-                </div>
-
-                {/* Form Inputs */}
-                <div className="space-y-3.5">
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center justify-between">
-                      <span className="flex items-center gap-1.5">
-                        <Mail className="w-3.5 h-3.5 text-fuchsia-400" />
-                        <span>Email Address</span>
-                      </span>
-                      {email.length > 0 && email.includes('@') && !error && (
-                        <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
-                          <Check className="w-3 h-3" /> Valid
-                        </span>
-                      )}
-                    </label>
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={e => {
-                        setEmail(e.target.value);
-                        if (error) setError(null);
-                      }}
-                      placeholder="alex@domain.com"
-                      className={`w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none transition-all ${
-                        error
-                          ? 'animate-pulse-red border-rose-500/80 bg-rose-950/10'
-                          : success
-                          ? 'animate-pulse-green border-emerald-400/80 bg-emerald-950/10'
-                          : email.length > 0 && email.includes('@')
-                          ? 'border-emerald-500/50 focus:border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.15)]'
-                          : ''
-                      }`}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center justify-between">
-                      <span className="flex items-center gap-1.5">
-                        <Lock className="w-3.5 h-3.5 text-fuchsia-400" />
-                        <span>Password</span>
-                      </span>
-                      {password.length >= 6 && !error && (
-                        <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
-                          <Check className="w-3 h-3" /> Ready
-                        </span>
-                      )}
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      value={password}
-                      onChange={e => {
-                        setPassword(e.target.value);
-                        if (error) setError(null);
-                      }}
-                      placeholder="••••••••"
-                      className={`w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none transition-all ${
-                        error
-                          ? 'animate-pulse-red border-rose-500/80 bg-rose-950/10'
-                          : success
-                          ? 'animate-pulse-green border-emerald-400/80 bg-emerald-950/10'
-                          : password.length >= 6
-                          ? 'border-emerald-500/50 focus:border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.15)]'
-                          : ''
-                      }`}
-                    />
-                  </div>
-                </div>
-
-                {/* Primary CTA Button */}
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full relative py-4 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 bg-[length:200%_auto] text-xs font-black uppercase tracking-wider text-white shadow-xl shadow-purple-950/60 hover:brightness-110 active:scale-[0.98] transition-all duration-300 disabled:opacity-50 animate-breathe-glow overflow-hidden group"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:animate-shimmer-pass" />
-                  
-                  <span className="relative z-10 flex items-center justify-center gap-2">
-                    {success ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-300 animate-bounce" />
-                        <span>Success! Redirecting...</span>
-                      </>
-                    ) : loading ? (
-                      <>
-                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        <span>Authenticating...</span>
-                      </>
-                    ) : (
-                      <>
-                        <span>{isLogin ? 'Sign In to AURA' : 'Continue to Profile'}</span>
-                        <ChevronRight className="w-4 h-4 text-cyan-200" />
-                      </>
+                    {resetMsg && (
+                      <div className={`p-3 rounded-2xl text-xs flex items-start gap-2 ${
+                        resetMsg.type === 'success'
+                          ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+                          : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+                      }`}>
+                        <span>{resetMsg.text}</span>
+                      </div>
                     )}
-                  </span>
-                </button>
-              </form>
-            </div>
+
+                    {resetStep === 'request' ? (
+                      <form onSubmit={handleRequestPasswordReset} className="space-y-3.5">
+                        <div>
+                          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 block">
+                            Account Email
+                          </label>
+                          <input
+                            type="email"
+                            required
+                            value={resetEmail}
+                            onChange={e => setResetEmail(e.target.value)}
+                            placeholder="alex@domain.com"
+                            className="w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none"
+                          />
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={resetLoading || !resetEmail.trim()}
+                          className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-purple-600 to-fuchsia-600 text-xs font-bold text-white shadow-lg shadow-purple-950/50 hover:brightness-110 active:scale-95 transition disabled:opacity-50"
+                        >
+                          {resetLoading ? 'Sending...' : 'Send Recovery Token'}
+                        </button>
+
+                        <div className="text-center pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setResetStep('submit')}
+                            className="text-[11px] text-fuchsia-300 hover:underline"
+                          >
+                            Already have a recovery token? Enter it here
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <form onSubmit={handleExecutePasswordReset} className="space-y-3.5">
+                        <div>
+                          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 block">
+                            Recovery Token
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={resetToken}
+                            onChange={e => setResetToken(e.target.value)}
+                            placeholder="Paste your recovery token"
+                            className="w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white font-mono placeholder:text-slate-500 outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 block">
+                            New Password (min. 8 characters)
+                          </label>
+                          <input
+                            type="password"
+                            required
+                            minLength={8}
+                            value={newPassword}
+                            onChange={e => setNewPassword(e.target.value)}
+                            placeholder="••••••••"
+                            className="w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none"
+                          />
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={resetLoading || !resetToken.trim() || newPassword.length < 8}
+                          className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-purple-600 to-fuchsia-600 text-xs font-bold text-white shadow-lg shadow-purple-950/50 hover:brightness-110 active:scale-95 transition disabled:opacity-50"
+                        >
+                          {resetLoading ? 'Updating...' : 'Set New Password & Return to Login'}
+                        </button>
+
+                        <div className="text-center pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setResetStep('request')}
+                            className="text-[11px] text-slate-400 hover:text-white transition-colors"
+                          >
+                            Need a new recovery token?
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    {/* Google Sign-In CTA */}
+                    <button
+                      type="button"
+                      onClick={handleGoogleAuth}
+                      disabled={loading}
+                      className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold text-white transition-all duration-200 active:scale-[0.98] shadow-lg shadow-black/20 group"
+                    >
+                      <svg className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" viewBox="0 0 24 24">
+                        <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.2 9 5 12 5z" />
+                        <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z" />
+                        <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.8s.7 5.1 1.9 7.5l3.7-2.9c-.6-.7-1.1-1.7-1.1-2.9z" />
+                        <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.2-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z" />
+                      </svg>
+                      <span>Zaloguj się przez Google</span>
+                    </button>
+
+                    <div className="relative flex items-center justify-center my-2">
+                      <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+                      <span className="relative px-3 bg-[#090b12] text-[10px] uppercase tracking-wider text-slate-400 font-bold rounded-full border border-white/5">lub adresem email</span>
+                    </div>
+
+                    <form onSubmit={handleAuthSubmit} className="space-y-4">
+                      {/* Segmented Tab Switcher */}
+                      <div className="relative flex rounded-2xl bg-black/40 p-1 border border-white/10">
+                        <button
+                          type="button"
+                          onClick={() => { setIsLogin(true); setError(null); }}
+                          className={`relative z-10 flex-1 py-2 text-xs font-bold transition-colors duration-200 ${
+                            isLogin ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Sign In
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setIsLogin(false); setError(null); }}
+                          className={`relative z-10 flex-1 py-2 text-xs font-bold transition-colors duration-200 ${
+                            !isLogin ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Create Account
+                        </button>
+
+                        {/* Animated Active Pill Indicator */}
+                        <motion.div
+                          className="absolute inset-y-1 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 shadow-md shadow-fuchsia-500/30"
+                          initial={false}
+                          animate={{
+                            left: isLogin ? '4px' : '50%',
+                            width: 'calc(50% - 4px)'
+                          }}
+                          transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                        />
+                      </div>
+
+                      {/* Form Inputs */}
+                      <div className="space-y-3.5">
+                        <div>
+                          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5">
+                              <Mail className="w-3.5 h-3.5 text-fuchsia-400" />
+                              <span>Email Address</span>
+                            </span>
+                            {email.length > 0 && email.includes('@') && !error && (
+                              <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                                <Check className="w-3 h-3" /> Valid
+                              </span>
+                            )}
+                          </label>
+                          <input
+                            type="email"
+                            required
+                            value={email}
+                            onChange={e => {
+                              setEmail(e.target.value);
+                              if (error) setError(null);
+                            }}
+                            placeholder="alex@domain.com"
+                            className={`w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none transition-all ${
+                              error
+                                ? 'animate-pulse-red border-rose-500/80 bg-rose-950/10'
+                                : success
+                                ? 'animate-pulse-green border-emerald-400/80 bg-emerald-950/10'
+                                : email.length > 0 && email.includes('@')
+                                ? 'border-emerald-500/50 focus:border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.15)]'
+                                : ''
+                            }`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider mb-1 flex items-center justify-between">
+                            <span className="flex items-center gap-1.5">
+                              <Lock className="w-3.5 h-3.5 text-fuchsia-400" />
+                              <span>Password</span>
+                            </span>
+                            {password.length >= 6 && !error && (
+                              <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                                <Check className="w-3 h-3" /> Ready
+                              </span>
+                            )}
+                          </label>
+                          <input
+                            type="password"
+                            required
+                            value={password}
+                            onChange={e => {
+                              setPassword(e.target.value);
+                              if (error) setError(null);
+                            }}
+                            placeholder="••••••••"
+                            className={`w-full aura-glass-input rounded-2xl px-4 py-3 text-xs text-white placeholder:text-slate-500 outline-none transition-all ${
+                              error
+                                ? 'animate-pulse-red border-rose-500/80 bg-rose-950/10'
+                                : success
+                                ? 'animate-pulse-green border-emerald-400/80 bg-emerald-950/10'
+                                : password.length >= 6
+                                ? 'border-emerald-500/50 focus:border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.15)]'
+                                : ''
+                            }`}
+                          />
+                        </div>
+
+                        {isLogin && (
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowForgotPassword(true);
+                                setResetEmail(email);
+                                setError(null);
+                              }}
+                              className="text-[11px] text-fuchsia-300/80 hover:text-white transition-colors underline-offset-2 hover:underline"
+                            >
+                              Forgot password?
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Primary CTA Button */}
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full relative py-4 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 bg-[length:200%_auto] text-xs font-black uppercase tracking-wider text-white shadow-xl shadow-purple-950/60 hover:brightness-110 active:scale-[0.98] transition-all duration-300 disabled:opacity-50 animate-breathe-glow overflow-hidden group"
+                      >
+                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:animate-shimmer-pass" />
+                        
+                        <span className="relative z-10 flex items-center justify-center gap-2">
+                          {success ? (
+                            <>
+                              <Check className="w-4 h-4 text-emerald-300 animate-bounce" />
+                              <span>Success! Redirecting...</span>
+                            </>
+                          ) : loading ? (
+                            <>
+                              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              <span>Authenticating...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>{isLogin ? 'Sign In to AURA' : 'Continue to Profile'}</span>
+                              <ChevronRight className="w-4 h-4 text-cyan-200" />
+                            </>
+                          )}
+                        </span>
+                      </button>
+                    </form>
+                  </>
+                )}
+              </div>
             ) : (
               /* Profile Setup Step */
               <form onSubmit={handleProfileSubmit} className="space-y-3.5">

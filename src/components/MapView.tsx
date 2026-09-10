@@ -38,11 +38,14 @@ import {
 } from 'lucide-react';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { ErrorBoundary } from './ErrorBoundary';
+import { AdSlot } from './ads';
+import { getVenuesNearLocation } from '../data/queerVenues';
 
 interface MapViewProps {
   authToken: string | null;
   onOpenProfile: (profile: UserProfile) => void;
   onOpenChat: (userId: string) => void;
+  onOpenPremium?: () => void;
 }
 
 type LayerFilter = 'all' | 'members' | 'bars' | 'clubs' | 'cafes' | 'community';
@@ -68,91 +71,260 @@ const GLOBAL_CITY_PRESETS: CityPreset[] = [
   { name: 'Los Angeles', country: 'US', lat: 34.0886, lng: -118.3812, zoom: 13 }
 ];
 
-// Luxury Night AURA Google Maps Palette: Black base, charcoal roads, restrained violet highways, muted text
+// Custom AURA Dark-Neon Google Maps Theme: Ultra-deep #050507 black base, violet/purple road hierarchy,
+// subtle lavender typography, near-black violet-tinted water, and high-contrast marker visibility.
 const AURA_MAP_STYLES: google.maps.MapTypeStyle[] = [
-  { elementType: 'geometry', stylers: [{ color: '#07080f' }] },
-  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#7a809b' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#07080f' }, { weight: 2 }] },
+  // 1. Global Reset & Base Canvas
+  { elementType: 'geometry', stylers: [{ color: '#050507' }] },
+  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] }, // Strip bright commercial & default icons
+  { elementType: 'labels.text.fill', stylers: [{ color: '#7e6f96' }] }, // Muted default label color
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#050507' }, { weight: 3 }] },
+
+  // 2. Administrative Boundaries & Locality Labels
   {
     featureType: 'administrative',
     elementType: 'geometry',
-    stylers: [{ color: '#1a1d33' }]
+    stylers: [{ color: '#160d2a' }]
   },
   {
     featureType: 'administrative.country',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#311a54' }]
+    stylers: [{ color: '#311459' }]
+  },
+  {
+    featureType: 'administrative.province',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#220d3f' }]
   },
   {
     featureType: 'administrative.locality',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#c084fc' }]
+    stylers: [{ color: '#D8B4FE' }] // Subtle lavender labels
   },
+  {
+    featureType: 'administrative.locality',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+  {
+    featureType: 'administrative.neighborhood',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#a78bfa' }] // Muted secondary lavender
+  },
+  {
+    featureType: 'administrative.neighborhood',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+  {
+    featureType: 'administrative.land_parcel',
+    stylers: [{ visibility: 'off' }]
+  },
+
+  // 3. Landscape & Almost-Black Buildings
+  {
+    featureType: 'landscape',
+    elementType: 'geometry',
+    stylers: [{ color: '#050507' }]
+  },
+  {
+    featureType: 'landscape.man_made',
+    elementType: 'geometry',
+    stylers: [{ color: '#090810' }] // Almost-black buildings
+  },
+  {
+    featureType: 'landscape.man_made',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#150f24' }]
+  },
+  {
+    featureType: 'landscape.natural',
+    elementType: 'geometry',
+    stylers: [{ color: '#050507' }]
+  },
+  {
+    featureType: 'landscape.natural.terrain',
+    elementType: 'geometry',
+    stylers: [{ color: '#050507' }]
+  },
+
+  // 4. Points of Interest (POIs) - Neutralized Greens & Clutter
   {
     featureType: 'poi',
     elementType: 'geometry',
-    stylers: [{ color: '#0c0e1c' }]
+    stylers: [{ color: '#090810' }]
   },
   {
     featureType: 'poi',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#68598a' }]
+    stylers: [{ color: '#65557e' }] // Muted secondary labels
+  },
+  {
+    featureType: 'poi',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
   },
   {
     featureType: 'poi.park',
     elementType: 'geometry',
-    stylers: [{ color: '#0b0f1e' }]
+    stylers: [{ color: '#07060e' }] // Replaces bright greens with near-black depth
   },
   {
     featureType: 'poi.park',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#564c78' }]
+    stylers: [{ color: '#56466f' }]
   },
+  {
+    featureType: 'poi.business',
+    stylers: [{ visibility: 'off' }] // Remove yellow/blue commercial clutter
+  },
+
+  // 5. Roads - Tailored Violet & Purple Hierarchy
+  // Secondary roads & general road geometry: #5B21B6
   {
     featureType: 'road',
     elementType: 'geometry',
-    stylers: [{ color: '#131627' }]
+    stylers: [{ color: '#5B21B6' }]
   },
   {
     featureType: 'road',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#1b1f36' }]
+    stylers: [{ color: '#15062c' }, { weight: 1 }]
   },
   {
     featureType: 'road',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#585e78' }]
+    stylers: [{ color: '#7a6b95' }] // Muted secondary road labels
   },
+  {
+    featureType: 'road',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+
+  // Small/local roads: dark purple #2E1065
+  {
+    featureType: 'road.local',
+    elementType: 'geometry',
+    stylers: [{ color: '#2E1065' }]
+  },
+  {
+    featureType: 'road.local',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#0f0420' }, { weight: 1 }]
+  },
+  {
+    featureType: 'road.local',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#63537b' }]
+  },
+  {
+    featureType: 'road.local',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 2 }]
+  },
+
+  // Main roads (arterials): #7C3AED
+  {
+    featureType: 'road.arterial',
+    elementType: 'geometry',
+    stylers: [{ color: '#7C3AED' }]
+  },
+  {
+    featureType: 'road.arterial',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#200747' }, { weight: 1 }]
+  },
+  {
+    featureType: 'road.arterial',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#c4b5fd' }]
+  },
+  {
+    featureType: 'road.arterial',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+
+  // Highways: bright violet #8B5CF6
   {
     featureType: 'road.highway',
     elementType: 'geometry',
-    stylers: [{ color: '#25173d' }]
+    stylers: [{ color: '#8B5CF6' }]
   },
   {
     featureType: 'road.highway',
     elementType: 'geometry.stroke',
-    stylers: [{ color: '#3d1663' }]
+    stylers: [{ color: '#2e085c' }, { weight: 1.5 }]
   },
   {
     featureType: 'road.highway',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#c084fc' }]
+    stylers: [{ color: '#D8B4FE' }] // Subtle lavender labels
   },
+  {
+    featureType: 'road.highway',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+  {
+    featureType: 'road.highway.controlled_access',
+    elementType: 'geometry',
+    stylers: [{ color: '#8B5CF6' }]
+  },
+  {
+    featureType: 'road.highway.controlled_access',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#390b73' }, { weight: 1.5 }]
+  },
+
+  // 6. Transit Network
   {
     featureType: 'transit',
     elementType: 'geometry',
-    stylers: [{ color: '#101326' }]
+    stylers: [{ color: '#100a20' }]
   },
+  {
+    featureType: 'transit.line',
+    elementType: 'geometry',
+    stylers: [{ color: '#26104e' }]
+  },
+  {
+    featureType: 'transit.station',
+    elementType: 'geometry',
+    stylers: [{ color: '#160e2a' }]
+  },
+  {
+    featureType: 'transit.station',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#7f719b' }]
+  },
+  {
+    featureType: 'transit.station',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
+  },
+
+  // 7. Water - Near-black with slight violet tint
   {
     featureType: 'water',
     elementType: 'geometry',
-    stylers: [{ color: '#030408' }]
+    stylers: [{ color: '#090715' }]
+  },
+  {
+    featureType: 'water',
+    elementType: 'geometry.fill',
+    stylers: [{ color: '#090715' }]
   },
   {
     featureType: 'water',
     elementType: 'labels.text.fill',
-    stylers: [{ color: '#392e66' }]
+    stylers: [{ color: '#4b3c6b' }]
+  },
+  {
+    featureType: 'water',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#050507' }, { weight: 3 }]
   }
 ];
 
@@ -235,24 +407,24 @@ const MemberMarkerItem: React.FC<{
         onSelect();
       }}
       className={`relative cursor-pointer transition-all duration-300 group select-none ${
-        isSelected ? 'scale-115 z-40' : 'hover:scale-105 z-20'
+        isSelected ? 'scale-115 z-40' : 'hover:scale-110 z-20'
       }`}
     >
-      {/* Violet / Magenta outer glow aura */}
+      {/* High-visibility Neon Outer Glow Aura */}
       <div
-        className={`absolute -inset-1.5 rounded-full transition-all duration-300 blur-sm ${
+        className={`absolute -inset-2 rounded-full transition-all duration-300 blur-sm ${
           isSelected
-            ? 'bg-gradient-to-r from-fuchsia-500 via-purple-600 to-violet-600 opacity-90 shadow-[0_0_24px_rgba(217,70,239,0.85)] scale-110'
-            : 'bg-purple-600/35 opacity-40 group-hover:opacity-80 group-hover:shadow-[0_0_16px_rgba(168,85,247,0.55)]'
+            ? 'bg-gradient-to-r from-fuchsia-500 via-purple-500 to-violet-500 opacity-95 shadow-[0_0_28px_rgba(217,70,239,0.95)] scale-110'
+            : 'bg-gradient-to-r from-purple-500 to-fuchsia-500 opacity-50 group-hover:opacity-90 group-hover:shadow-[0_0_20px_rgba(192,132,252,0.85)]'
         }`}
       />
 
-      {/* Black glass container with AURA LED perimeter */}
+      {/* Black glass container with vibrant AURA LED perimeter */}
       <ProfileAuraFrame
         isOnline={profile.isOnline}
         intensity={isSelected ? 'prominent' : 'subtle'}
-        className={`relative w-11 h-11 rounded-full transition-all ${
-          isSelected ? 'scale-110 ring-2 ring-fuchsia-400 shadow-[0_0_20px_rgba(217,70,239,0.5)]' : ''
+        className={`relative w-11 h-11 rounded-full transition-all drop-shadow-[0_4px_16px_rgba(0,0,0,0.95)] ring-2 ${
+          isSelected ? 'scale-110 ring-fuchsia-400 shadow-[0_0_22px_rgba(217,70,239,0.75)]' : 'ring-purple-400/60 group-hover:ring-fuchsia-400'
         }`}
       >
         <img
@@ -264,30 +436,30 @@ const MemberMarkerItem: React.FC<{
 
         {/* Verification Shield Badge */}
         {profile.verified && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#0a0c18] border border-cyan-400/80 flex items-center justify-center text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.6)] z-10">
+          <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#050507] border border-cyan-400 flex items-center justify-center text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.8)] z-10">
             <ShieldCheck className="w-2.5 h-2.5" />
           </span>
         )}
 
-        {/* Subtle Green/Emerald Online Pulse */}
+        {/* Emerald Online Pulse */}
         {profile.isOnline && (
           <span className="absolute bottom-0 right-0 flex h-3 w-3 z-10">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-400 border border-[#0a0c18]" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-80" />
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-400 border border-[#050507] shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
           </span>
         )}
       </ProfileAuraFrame>
 
-      {/* Name and Approximate Distance Tag */}
+      {/* High-contrast Name and Distance Badge */}
       <div
-        className={`absolute -bottom-5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full backdrop-blur-md text-[10px] font-semibold whitespace-nowrap transition-all shadow-lg flex items-center gap-1 ${
+        className={`absolute -bottom-5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full backdrop-blur-md text-[10px] font-semibold whitespace-nowrap transition-all shadow-xl flex items-center gap-1.5 border ${
           isSelected
-            ? 'bg-[#0f0d22]/95 border border-fuchsia-500/60 text-fuchsia-200 shadow-[0_0_12px_rgba(217,70,239,0.4)]'
-            : 'bg-[#080914]/90 border border-white/10 text-slate-300 group-hover:border-purple-500/40 group-hover:text-purple-200'
+            ? 'bg-[#050507] border-fuchsia-400 text-fuchsia-100 shadow-[0_0_14px_rgba(217,70,239,0.7)]'
+            : 'bg-[#050507]/95 border-purple-500/40 text-slate-100 group-hover:border-purple-400 group-hover:text-purple-200'
         }`}
       >
         <span>{profile.displayName}</span>
-        <span className="text-[9px] text-purple-300 font-normal">
+        <span className="text-[9px] text-purple-300 font-medium">
           • {profile.approximateArea || formatDistance(profile.distanceKm)}
         </span>
       </div>
@@ -307,30 +479,30 @@ const VenueMarkerItem: React.FC<{
         return {
           icon: Music,
           gradient: 'from-fuchsia-600 via-purple-600 to-violet-800',
-          glow: 'rgba(217, 70, 239, 0.6)',
-          border: 'border-fuchsia-400/50'
+          glow: 'rgba(217, 70, 239, 0.8)',
+          border: 'border-fuchsia-400'
         };
       case 'bar':
         return {
           icon: Beer,
           gradient: 'from-purple-600 via-indigo-600 to-slate-900',
-          glow: 'rgba(168, 85, 247, 0.6)',
-          border: 'border-purple-400/50'
+          glow: 'rgba(168, 85, 247, 0.8)',
+          border: 'border-purple-400'
         };
       case 'cafe':
         return {
           icon: Coffee,
           gradient: 'from-rose-600 via-purple-700 to-slate-900',
-          glow: 'rgba(244, 63, 94, 0.55)',
-          border: 'border-rose-400/50'
+          glow: 'rgba(244, 63, 94, 0.75)',
+          border: 'border-rose-400'
         };
       case 'community':
       default:
         return {
           icon: HeartHandshake,
           gradient: 'from-cyan-600 via-purple-700 to-slate-900',
-          glow: 'rgba(6, 182, 212, 0.55)',
-          border: 'border-cyan-400/50'
+          glow: 'rgba(6, 182, 212, 0.75)',
+          border: 'border-cyan-400'
         };
     }
   };
@@ -345,28 +517,28 @@ const VenueMarkerItem: React.FC<{
         onSelect();
       }}
       className={`relative cursor-pointer transition-all duration-300 group flex flex-col items-center select-none ${
-        isSelected ? 'scale-115 z-40' : 'hover:scale-105 z-20'
+        isSelected ? 'scale-115 z-40' : 'hover:scale-110 z-20'
       }`}
     >
       <div
-        className={`w-9 h-9 rounded-2xl p-0.5 backdrop-blur-md shadow-xl transition-all flex items-center justify-center ${
+        className={`w-10 h-10 rounded-2xl p-0.5 backdrop-blur-md shadow-2xl transition-all flex items-center justify-center drop-shadow-[0_4px_18px_rgba(0,0,0,0.95)] ${
           isSelected
-            ? 'ring-2 ring-fuchsia-400 shadow-[0_0_22px_rgba(217,70,239,0.8)]'
-            : 'hover:shadow-[0_0_14px_rgba(168,85,247,0.5)]'
-        } bg-[#090b16] border ${config.border}`}
+            ? 'ring-2 ring-fuchsia-400 shadow-[0_0_26px_rgba(217,70,239,0.9)] scale-105'
+            : 'hover:shadow-[0_0_18px_rgba(168,85,247,0.7)] ring-1 ring-white/25 hover:ring-purple-400'
+        } bg-[#050507] border ${config.border}`}
       >
         <div
           className={`w-full h-full rounded-[14px] bg-gradient-to-tr ${config.gradient} flex items-center justify-center text-white shadow-inner`}
         >
-          <IconComponent className="w-4 h-4" />
+          <IconComponent className="w-4 h-4 drop-shadow-[0_1px_3px_rgba(0,0,0,0.7)]" />
         </div>
       </div>
 
       <span
-        className={`mt-1 px-2 py-0.5 rounded-full backdrop-blur-md text-[9px] font-bold tracking-tight whitespace-nowrap shadow-md transition-all ${
+        className={`mt-1.5 px-2.5 py-0.5 rounded-full backdrop-blur-md text-[9px] font-bold tracking-tight whitespace-nowrap shadow-xl transition-all border ${
           isSelected
-            ? 'bg-[#0f0d22]/95 border border-fuchsia-500/60 text-fuchsia-200'
-            : 'bg-[#080914]/90 border border-white/10 text-slate-300 group-hover:text-purple-200 group-hover:border-purple-500/30'
+            ? 'bg-[#050507] border-fuchsia-400 text-fuchsia-100 shadow-[0_0_14px_rgba(217,70,239,0.7)]'
+            : 'bg-[#050507]/95 border-purple-500/40 text-slate-100 group-hover:text-purple-200 group-hover:border-purple-400'
         }`}
       >
         {venue.name}
@@ -390,20 +562,29 @@ const GoogleMapsLiveRendererContent: React.FC<{
 }> = (props) => {
   const status = useApiLoadingStatus();
 
+  const isAdvancedMarkerSupported = typeof window !== 'undefined' &&
+    Boolean(
+      (window as any).google?.maps?.marker?.AdvancedMarkerElement &&
+      (window as any).google?.maps?.Map
+    );
+
   useEffect(() => {
     if (status === APILoadingStatus.AUTH_FAILURE || status === APILoadingStatus.FAILED) {
       console.warn('Google Maps loading status failed:', status);
       props.onAuthError();
+    } else if (status === APILoadingStatus.LOADED && !isAdvancedMarkerSupported) {
+      console.warn('AdvancedMarkerElement not available in current Maps session. Falling back to radar.');
+      props.onAuthError();
     }
-  }, [status, props.onAuthError]);
+  }, [status, isAdvancedMarkerSupported, props.onAuthError]);
 
   const initialCenter = useMemo(() => {
     return props.cameraTarget || { lat: 51.5074, lng: -0.1278 };
   }, []);
 
-  if (status !== APILoadingStatus.LOADED) {
+  if (status !== APILoadingStatus.LOADED || !isAdvancedMarkerSupported) {
     return (
-      <div className="w-full h-full flex items-center justify-center bg-[#07080f]">
+      <div className="w-full h-full flex items-center justify-center bg-[#050507]">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 rounded-full border-2 border-fuchsia-500/30 border-t-fuchsia-400 animate-spin" />
           <span className="text-[10px] text-fuchsia-300 font-bold tracking-widest uppercase animate-pulse">Establishing Secure Uplink...</span>
@@ -429,12 +610,12 @@ const GoogleMapsLiveRendererContent: React.FC<{
 
         {/* Current User Approximate Privacy Ring & Center Dot */}
         {props.userLocation && (
-          <AdvancedMarker position={props.userLocation} title="Your Location (Protected Radius)">
-            <div className="relative flex items-center justify-center pointer-events-none">
+          <AdvancedMarker position={props.userLocation} title="Your Location (Protected Radius)" zIndex={100}>
+            <div className="relative flex items-center justify-center pointer-events-none drop-shadow-[0_0_16px_rgba(217,70,239,0.9)]">
               {/* Approximate ~1.5km Privacy Boundary Illusion */}
-              <span className="absolute w-14 h-14 rounded-full bg-fuchsia-500/15 border border-fuchsia-500/30 animate-pulse" />
-              <span className="absolute w-8 h-8 rounded-full bg-purple-500/25 border border-purple-400/40" />
-              <span className="w-3.5 h-3.5 rounded-full bg-gradient-to-tr from-fuchsia-400 to-purple-400 border-2 border-white shadow-[0_0_12px_rgba(217,70,239,0.9)]" />
+              <span className="absolute w-16 h-16 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/50 animate-pulse" />
+              <span className="absolute w-9 h-9 rounded-full bg-purple-500/30 border border-purple-300/60" />
+              <span className="w-4 h-4 rounded-full bg-gradient-to-tr from-fuchsia-400 via-purple-300 to-white border-2 border-white shadow-[0_0_16px_rgba(217,70,239,1)] ring-2 ring-purple-600" />
             </div>
           </AdvancedMarker>
         )}
@@ -485,6 +666,25 @@ const GoogleMapsLiveRendererContent: React.FC<{
   );
 };
 
+// Global listener registry for Google Maps auth failures (e.g. gm_authFailure callback)
+const authFailureListeners = new Set<() => void>();
+if (typeof window !== 'undefined') {
+  const prevAuthFailure = (window as unknown as { gm_authFailure?: () => void }).gm_authFailure;
+  (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
+    console.warn('Google Maps authentication failed (InvalidKeyMapError / gm_authFailure). Switching to interactive radar mode.');
+    authFailureListeners.forEach(listener => {
+      try {
+        listener();
+      } catch {}
+    });
+    if (typeof prevAuthFailure === 'function') {
+      try {
+        prevAuthFailure();
+      } catch {}
+    }
+  };
+}
+
 // Google Maps Interactive Live Tile Renderer
 const GoogleMapsLiveRenderer: React.FC<{
   apiKey: string;
@@ -500,11 +700,28 @@ const GoogleMapsLiveRenderer: React.FC<{
   setSelectedVenue: (v: QueerVenue | null) => void;
   onAuthError: () => void;
 }> = (props) => {
+  useEffect(() => {
+    const handleAuthFail = () => props.onAuthError();
+    authFailureListeners.add(handleAuthFail);
+    return () => {
+      authFailureListeners.delete(handleAuthFail);
+    };
+  }, [props.onAuthError]);
+
   return (
     <APIProvider
       apiKey={props.apiKey}
       libraries={['places', 'marker']}
-      onError={() => props.onAuthError()}
+      onError={() => {
+        console.warn('APIProvider failed to load Google Maps SDK. Switching to radar fallback.');
+        props.onAuthError();
+      }}
+      onLoad={() => {
+        if (typeof window !== 'undefined' && !(window as any).google?.maps?.marker?.AdvancedMarkerElement) {
+          console.warn('Google Maps loaded without AdvancedMarkerElement, switching to radar fallback.');
+          props.onAuthError();
+        }
+      }}
     >
       <GoogleMapsLiveRendererContent {...props} />
     </APIProvider>
@@ -620,7 +837,7 @@ const RadarCanvasView: React.FC<{
       onPointerLeave={handlePointerUp}
       className={`w-full h-full relative overflow-hidden select-none touch-none cursor-${
         isDragging ? 'grabbing' : 'grab'
-      } bg-[#060812]`}
+      } bg-[#050507]`}
     >
       {/* Background Radar Grid */}
       <div className="absolute inset-0 pointer-events-none">
@@ -821,19 +1038,36 @@ const RadarCanvasView: React.FC<{
   );
 };
 
+// Safe helper to strip any invalid/control characters from auth tokens
+const getSafeAuthHeader = (token?: string | null): Record<string, string> => {
+  if (!token || typeof token !== 'string') return {};
+  const sanitized = token.replace(/[\r\n\t\0]/g, '').trim();
+  if (!sanitized || sanitized === 'null' || sanitized === 'undefined' || sanitized === '""') return {};
+  if (!/^[\x21-\x7E]+$/.test(sanitized)) return {};
+  return { Authorization: `Bearer ${sanitized}` };
+};
+
+// Strictly validates whether the provided string matches a genuine Google Maps Platform API key structure.
+// Valid Google Cloud API keys start with 'AIza' (e.g. AIzaSy...) and consist of alphanumeric characters,
+// underscores, and hyphens (typically 39 characters). Bogus strings like package names ('@vis.gl/...'),
+// URLs, or placeholder words are rejected upfront to avoid triggering Google Maps InvalidKeyMapError.
+const isValidGoogleMapsKey = (key?: string | null): boolean => {
+  if (!key || typeof key !== 'string') return false;
+  const trimmed = key.trim();
+  if (!trimmed.startsWith('AIza')) return false;
+  if (trimmed.length < 35 || trimmed.length > 45) return false;
+  if (!/^AIza[0-9A-Za-z_-]{31,}$/.test(trimmed)) return false;
+  return true;
+};
+
 export const MapView: React.FC<MapViewProps> = ({
   authToken,
   onOpenProfile,
-  onOpenChat
+  onOpenChat,
+  onOpenPremium
 }) => {
   const rawApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-  const isKeyConfigured = Boolean(
-    rawApiKey &&
-    rawApiKey.trim().length > 0 &&
-    rawApiKey !== 'undefined' &&
-    rawApiKey !== 'null' &&
-    rawApiKey !== 'YOUR_API_KEY'
-  );
+  const isKeyConfigured = isValidGoogleMapsKey(rawApiKey);
 
   const [authErrorOccurred, setAuthErrorOccurred] = useState(false);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
@@ -866,12 +1100,13 @@ export const MapView: React.FC<MapViewProps> = ({
   const handleUpdatePrivacyMode = (newMode: LocationPrivacyMode) => {
     setPrivacyMode(newMode);
     setIsPrivacyModalOpen(false);
-    if (authToken) {
+    const authHeader = getSafeAuthHeader(authToken);
+    if (Object.keys(authHeader).length > 0) {
       fetch('/api/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`
+          ...authHeader
         },
         body: JSON.stringify({ locationPrivacy: newMode })
       }).catch(err => {
@@ -887,39 +1122,66 @@ export const MapView: React.FC<MapViewProps> = ({
   // Fetch dynamic venues for given coordinates
   const fetchVenuesForLocation = useCallback((lat: number, lng: number, radiusKm = 40) => {
     setIsLoadingVenues(true);
-    fetch(`/api/venues?lat=${lat}&lng=${lng}&radiusKm=${radiusKm}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data.venues && Array.isArray(data.venues)) {
-          setVenues(data.venues);
-        }
-      })
-      .catch(err => {
-        console.error('Failed to load dynamic venues:', err);
-      })
-      .finally(() => {
-        setIsLoadingVenues(false);
-      });
+    try {
+      fetch(`/api/venues?lat=${lat}&lng=${lng}&radiusKm=${radiusKm}`)
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (data?.venues && Array.isArray(data.venues) && data.venues.length > 0) {
+            setVenues(data.venues);
+          } else {
+            const localFallback = getVenuesNearLocation(lat, lng, radiusKm);
+            if (localFallback.length > 0) {
+              setVenues(localFallback);
+            }
+          }
+        })
+        .catch(err => {
+          console.warn('Notice loading venues, using curated fallback:', err?.message || err);
+          const localFallback = getVenuesNearLocation(lat, lng, radiusKm);
+          if (localFallback.length > 0) {
+            setVenues(localFallback);
+          }
+        })
+        .finally(() => {
+          setIsLoadingVenues(false);
+        });
+    } catch {
+      const localFallback = getVenuesNearLocation(lat, lng, radiusKm);
+      if (localFallback.length > 0) {
+        setVenues(localFallback);
+      }
+      setIsLoadingVenues(false);
+    }
   }, []);
 
   // Fetch nearby profiles from server
   const fetchProfiles = useCallback(() => {
     setIsLoadingProfiles(true);
-    fetch('/api/discover', {
-      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {}
-    })
-      .then(res => res.json())
-      .then(data => {
-        if (data.profiles && Array.isArray(data.profiles)) {
-          setProfiles(data.profiles);
-        }
-      })
-      .catch(err => {
-        console.error('Failed to load profiles for map:', err);
-      })
-      .finally(() => {
-        setIsLoadingProfiles(false);
-      });
+    try {
+      const headers = getSafeAuthHeader(authToken);
+      fetch('/api/discover', { headers })
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then(data => {
+          if (data?.profiles && Array.isArray(data.profiles)) {
+            setProfiles(data.profiles);
+          }
+        })
+        .catch(err => {
+          console.warn('Notice loading profiles for map:', err?.message || err);
+        })
+        .finally(() => {
+          setIsLoadingProfiles(false);
+        });
+    } catch (err: any) {
+      console.warn('Notice initializing profiles fetch:', err?.message || err);
+      setIsLoadingProfiles(false);
+    }
   }, [authToken]);
 
   // Initial Location detection (non-blocking, single-shot, cached)
@@ -952,20 +1214,14 @@ export const MapView: React.FC<MapViewProps> = ({
     }
   }, [fetchProfiles, fetchVenuesForLocation, initialRegion.lat, initialRegion.lng]);
 
-  // Global Google Maps authentication failure interceptor
+  // Hook into Google Maps authentication failure interceptor
   useEffect(() => {
-    const prevAuthFailure = (window as unknown as { gm_authFailure?: () => void }).gm_authFailure;
-    (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
-      console.warn('Google Maps authentication failed (InvalidKeyMapError). Switching to interactive radar mode.');
+    const handleAuthFailure = () => {
       setAuthErrorOccurred(true);
-      if (typeof prevAuthFailure === 'function') {
-        try {
-          prevAuthFailure();
-        } catch {}
-      }
     };
+    authFailureListeners.add(handleAuthFailure);
     return () => {
-      (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = prevAuthFailure;
+      authFailureListeners.delete(handleAuthFailure);
     };
   }, []);
 
@@ -1508,6 +1764,15 @@ export const MapView: React.FC<MapViewProps> = ({
             <span>Get Directions</span>
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
+
+          {/* Subtle Native Radar Ad in Venue Drawer */}
+          <div className="pt-2 border-t border-white/10">
+            <AdSlot
+              placement="radar"
+              format="radar-card"
+              onOpenPremium={onOpenPremium}
+            />
+          </div>
         </div>
       )}
 

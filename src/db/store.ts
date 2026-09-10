@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
+import { getPostgresPool, initPostgresSchema, PostgresStoreAdapter } from './postgres';
 import {
   UserAccount,
   UserProfile,
@@ -48,9 +49,22 @@ class DataStore {
   private appeals: DsaAppealRecord[] = [];
   private erasureAuditLog: Array<{ hashId: string; erasedAt: string; reason: string }> = [];
   private userPasswords: Map<string, string> = new Map(); // userId -> salt:scryptHash
+  private passwordResets: Map<string, { userId: string; expiresAt: string; used: boolean }> = new Map();
+  private stripeEvents: Set<string> = new Set();
+  private stripeSubscriptions: Map<string, { customerId: string; subscriptionId: string; planId: string; status: string; currentPeriodEnd?: string }> = new Map();
+  private pgAdapter: PostgresStoreAdapter | null = null;
   private dbFilePath = path.join(process.cwd(), 'data', 'aura_db.json');
 
   private saveToDisk(): void {
+    // In production, local JSON storage is strictly prohibited
+    if (process.env.NODE_ENV === 'production') {
+      return;
+    }
+    // Only save to disk if explicitly permitted in development
+    if (process.env.ALLOW_DEV_LOCAL_STORE !== 'true') {
+      return;
+    }
+
     try {
       const dir = path.dirname(this.dbFilePath);
       if (!fs.existsSync(dir)) {
@@ -72,15 +86,24 @@ class DataStore {
         moderationNotices: this.moderationNotices,
         appeals: this.appeals,
         erasureAuditLog: this.erasureAuditLog,
-        userPasswords: Array.from(this.userPasswords.entries())
+        userPasswords: Array.from(this.userPasswords.entries()),
+        passwordResets: Array.from(this.passwordResets.entries()),
+        stripeSubscriptions: Array.from(this.stripeSubscriptions.entries())
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(serialized, null, 2), 'utf-8');
     } catch (err) {
-      console.error('[DataStore] Error saving to disk:', err);
+      console.error('[DataStore] Error saving development file store:', err);
     }
   }
 
   private loadFromDisk(): boolean {
+    if (process.env.NODE_ENV === 'production') {
+      return false;
+    }
+    if (process.env.ALLOW_DEV_LOCAL_STORE !== 'true') {
+      return false;
+    }
+
     try {
       if (!fs.existsSync(this.dbFilePath)) return false;
       const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
@@ -103,20 +126,52 @@ class DataStore {
       this.appeals = data.appeals || [];
       this.erasureAuditLog = data.erasureAuditLog || [];
       this.userPasswords = new Map(data.userPasswords || []);
+      this.passwordResets = new Map(data.passwordResets || []);
+      this.stripeSubscriptions = new Map(data.stripeSubscriptions || []);
       return true;
-    } catch (err) {
-      console.error('[DataStore] Error loading from disk:', err);
+    } catch (err: any) {
+      console.error('[DataStore] Critical error loading file store:', err.message);
+      // NEVER overwrite broken database with empty state! Preserve the file:
+      try {
+        const backupCorrupt = path.join(process.cwd(), 'data', `aura_db.corrupt.${Date.now()}.json`);
+        fs.copyFileSync(this.dbFilePath, backupCorrupt);
+        console.warn(`[DataStore] Preserved corrupted database file to ${backupCorrupt}`);
+      } catch (copyErr) {
+        // Ignore
+      }
       return false;
     }
   }
 
   constructor() {
+    // Check for PostgreSQL configuration
+    const pool = getPostgresPool();
+    if (pool) {
+      this.pgAdapter = new PostgresStoreAdapter(pool);
+      initPostgresSchema().then((ok) => {
+        if (ok) {
+          console.log('[DataStore] PostgreSQL persistence layer connected and schema ready.');
+        } else {
+          console.error('[DataStore] PostgreSQL schema initialization failed.');
+        }
+      }).catch((e) => {
+        console.error('[DataStore] PostgreSQL connection error:', e.message);
+      });
+    } else {
+      if (process.env.NODE_ENV === 'production') {
+        console.error(
+          '[DataStore CRITICAL] Neither DATABASE_URL nor SQL_HOST is configured for PostgreSQL in production!\n' +
+          'Production requires a persistent Cloud SQL PostgreSQL instance to prevent data loss across Cloud Run container lifecycles.'
+        );
+      }
+    }
+
     if (this.loadFromDisk()) {
-      console.log('[DataStore] Loaded persistent data from disk.');
+      console.log('[DataStore] Loaded development local data from disk.');
       this.purgeBotAccounts();
     } else {
-      console.log('[DataStore] Clean production database initialized (zero bots).');
-      this.saveToDisk();
+      console.log('[DataStore] Clean database initialized (zero bots).');
+      // Notice: Do NOT call saveToDisk() here to prevent overwriting failed files
     }
   }
 
@@ -149,12 +204,10 @@ class DataStore {
 
       // Synthetic bot domains & test emails
       if (
-        lowerEmail.endsWith('@auragay.com') ||
-        lowerEmail.endsWith('@auragay.app') ||
         lowerEmail.endsWith('@deleted.aura.local') ||
-        lowerEmail.includes('demo') ||
-        lowerEmail.includes('tester') ||
-        lowerEmail.includes('bot')
+        lowerEmail.startsWith('synthetic-bot-') ||
+        lowerEmail.startsWith('bot-seed-') ||
+        lowerEmail.endsWith('@test-bot.local')
       ) {
         return true;
       }
@@ -333,7 +386,10 @@ class DataStore {
       throw new Error(`Account is ${user.status.toLowerCase()}`);
     }
 
-    if (password && this.userPasswords.has(user.id)) {
+    if (this.userPasswords.has(user.id)) {
+      if (!password) {
+        throw new Error('Password is required for this account.');
+      }
       const stored = this.userPasswords.get(user.id)!;
       const [salt, hash] = stored.split(':');
       if (salt && hash) {
@@ -342,6 +398,13 @@ class DataStore {
           throw new Error('Invalid email or password');
         }
       }
+    } else {
+      if (!password) {
+        throw new Error('This account was created with Google or has no password set. Please provide a password to initialize your account credentials.');
+      }
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+      this.userPasswords.set(user.id, `${salt}:${hash}`);
     }
 
     const token = `aura_sess_${user.id}_${crypto.randomBytes(24).toString('hex')}`;
@@ -411,14 +474,35 @@ class DataStore {
       try {
         const parts = cleanToken.split('.');
         if (parts.length === 3) {
+          const headerStr = Buffer.from(parts[0], 'base64').toString('utf-8');
+          const header = JSON.parse(headerStr);
+          // Only standard RS256 Firebase tokens are valid
+          if (header.alg !== 'RS256') {
+            return null;
+          }
+
           const payloadStr = Buffer.from(parts[1], 'base64').toString('utf-8');
           const payload = JSON.parse(payloadStr);
+
+          // Verify standard claims against Firebase project
+          const projectId = 'aura-dating-gay-mab';
+          const expectedIss = `https://securetoken.google.com/${projectId}`;
+          if (payload.iss !== expectedIss || payload.aud !== projectId) {
+            return null;
+          }
+
+          // Check expiration
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (!payload.exp || payload.exp < nowSec) {
+            return null;
+          }
+
           const fbUid = payload.user_id || payload.sub;
-          if (fbUid) {
+          if (fbUid && typeof fbUid === 'string' && fbUid.length > 3) {
             let user = this.users.get(fbUid);
             if (!user) {
               const email = payload.email || `${fbUid}@user.auragay.com`;
-              const isSuperAdmin = email.toLowerCase().trim() === 'adas.stasz1@gmail.com' || email.toLowerCase().includes('admin');
+              const isSuperAdmin = email.toLowerCase().trim() === 'adas.stasz1@gmail.com';
               user = {
                 id: fbUid,
                 email,
@@ -457,7 +541,7 @@ class DataStore {
               token: cleanToken,
               userId: fbUid,
               createdAt: now.toISOString(),
-              expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+              expiresAt: new Date(payload.exp * 1000).toISOString(),
               lastUsedAt: now.toISOString()
             });
             this.tokens.set(cleanToken, fbUid);
@@ -465,7 +549,8 @@ class DataStore {
           }
         }
       } catch (err) {
-        // Not a valid JWT or parse error, continue
+        // Not a valid JWT or parse error, reject
+        return null;
       }
     }
 
@@ -476,12 +561,164 @@ class DataStore {
     const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
     const resSessions = this.sessions.delete(cleanToken);
     const resTokens = this.tokens.delete(cleanToken);
+    if (this.pgAdapter) {
+      this.pgAdapter.deleteSession(cleanToken).catch(e => console.error('[Postgres] Session delete error:', e.message));
+    }
     this.saveToDisk();
     return resSessions || resTokens;
   }
 
+  // --- Password Recovery Flow ---
+  public createPasswordReset(email: string): { token: string; expiresAt: string } | null {
+    const cleanEmail = email.toLowerCase().trim();
+    const user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    if (!user) return null;
+
+    // Check if user has local password (not federated)
+    if (!this.userPasswords.has(user.id)) {
+      return null;
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+    this.passwordResets.set(token, {
+      userId: user.id,
+      expiresAt,
+      used: false
+    });
+
+    if (this.pgAdapter) {
+      this.pgAdapter.createPasswordReset(cleanEmail).catch(err => {
+        console.error('[Postgres] Password reset sync error:', err.message);
+      });
+    }
+
+    this.saveToDisk();
+    return { token, expiresAt };
+  }
+
+  public resetPasswordWithToken(token: string, newPassword: string): boolean {
+    if (!token || !newPassword) return false;
+    const cleanToken = token.trim();
+    const record = this.passwordResets.get(cleanToken);
+    if (!record) return false;
+
+    if (record.used) return false;
+    if (new Date(record.expiresAt).getTime() < Date.now()) return false;
+
+    record.used = true;
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.scryptSync(newPassword, salt, 64).toString('hex');
+    this.userPasswords.set(record.userId, `${salt}:${hash}`);
+
+    // Invalidate all active sessions for security
+    for (const [sToken, sRecord] of this.sessions.entries()) {
+      if (sRecord.userId === record.userId) {
+        this.sessions.delete(sToken);
+        this.tokens.delete(sToken);
+      }
+    }
+
+    if (this.pgAdapter) {
+      this.pgAdapter.resetPasswordWithToken(cleanToken, `${salt}:${hash}`).catch(err => {
+        console.error('[Postgres] Password reset sync error:', err.message);
+      });
+    }
+
+    this.saveToDisk();
+    return true;
+  }
+
+  // --- Stripe Subscription & Webhook Processing ---
+  public isStripeEventProcessed(eventId: string): boolean {
+    return this.stripeEvents.has(eventId);
+  }
+
+  public recordStripeEvent(eventId: string, eventType: string): void {
+    this.stripeEvents.add(eventId);
+    if (this.pgAdapter) {
+      this.pgAdapter.recordProcessedEvent(eventId, eventType).catch(err => {
+        console.error('[Postgres] Stripe event sync error:', err.message);
+      });
+    }
+  }
+
+  public recordStripeSubscription(
+    userId: string,
+    customerId: string,
+    subscriptionId: string,
+    planId: string,
+    status: string,
+    periodEnd?: Date
+  ): UserAccount | null {
+    const user = this.users.get(userId);
+    if (!user) return null;
+
+    const isActive = status === 'active' || status === 'trialing';
+    user.isPremium = isActive;
+    user.profile.isPremium = isActive;
+    if (isActive) {
+      user.premiumExpiresAt = periodEnd ? periodEnd.toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      user.profile.premiumTier = planId === 'aura_vip_annual' ? 'VIP_ANNUAL' : 'VIP_MONTHLY';
+    } else {
+      delete user.premiumExpiresAt;
+      user.profile.premiumTier = undefined;
+    }
+    user.updatedAt = new Date().toISOString();
+
+    this.stripeSubscriptions.set(userId, {
+      customerId,
+      subscriptionId,
+      planId,
+      status,
+      currentPeriodEnd: user.premiumExpiresAt
+    });
+
+    if (this.pgAdapter) {
+      this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd).catch(err => {
+        console.error('[Postgres] Subscription sync error:', err.message);
+      });
+    }
+
+    this.saveToDisk();
+    return user;
+  }
+
+  public findUserByStripeCustomerId(customerId: string): UserAccount | null {
+    for (const [userId, sub] of this.stripeSubscriptions.entries()) {
+      if (sub.customerId === customerId) {
+        return this.users.get(userId) || null;
+      }
+    }
+    return null;
+  }
+
+  public findUserByStripeSubscriptionId(subscriptionId: string): UserAccount | null {
+    for (const [userId, sub] of this.stripeSubscriptions.entries()) {
+      if (sub.subscriptionId === subscriptionId) {
+        return this.users.get(userId) || null;
+      }
+    }
+    return null;
+  }
+
   public getUserById(userId: string): UserAccount | null {
     return this.users.get(userId) || null;
+  }
+
+  public setUserPremium(userId: string, isPremium: boolean): UserAccount {
+    const user = this.users.get(userId);
+    if (!user) throw new Error('User not found');
+    user.isPremium = isPremium;
+    if (isPremium) {
+      user.premiumExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    } else {
+      delete user.premiumExpiresAt;
+    }
+    user.updatedAt = new Date().toISOString();
+    this.users.set(userId, user);
+    this.saveToDisk();
+    return user;
   }
 
   public getProfileById(targetUserId: string, requestingUserId?: string): UserProfile | null {
