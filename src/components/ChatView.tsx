@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Conversation, Message, UserProfile } from '../types';
-import { Send, Image as ImageIcon, ArrowLeft, Check, CheckCheck, Sparkles, User, ShieldCheck, RefreshCw, ChevronDown, ChevronUp, Plus } from 'lucide-react';
+import { Conversation, Message, UserProfile, TapType } from '../types';
+import {
+  Send, Image as ImageIcon, ArrowLeft, Check, CheckCheck, Sparkles, User, ShieldCheck,
+  RefreshCw, ChevronDown, ChevronUp, Plus, Clock, Timer, Pin, Shield, ShieldOff,
+  Lock, Unlock, Zap, Flame, Hand, Bookmark, AlertCircle, HardDrive, CloudOff
+} from 'lucide-react';
 import { formatDistance } from '../utils/formatDistance';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { AuraChatOrbGraphic } from './AuraGraphics';
 import { ChatMediaMenu, PhotoMessage, LinkMessage, LocationMessage, StickerMessage, VoiceMessage, StarVideoMessage, MediaPreview, StickerPicker } from './ChatMediaComponents';
+import { ChatSettings } from './ChatSettings';
 
 interface ChatViewProps {
   authToken: string;
@@ -44,6 +49,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [mediaPreview, setMediaPreview] = useState<{type: string, data: any} | null>(null);
   const [uploadingChatPhoto, setUploadingChatPhoto] = useState(false);
+
+  // Privacy, Message Retention & Vault State
+  const [showPrivacyDrawer, setShowPrivacyDrawer] = useState(false);
+  const [updatingSettings, setUpdatingSettings] = useState(false);
+  const [vaultStatus, setVaultStatus] = useState<{
+    iHaveAccessToTheirs: boolean;
+    theyHaveAccessToMine: boolean;
+    iRequestedTheirs: boolean;
+    theyRequestedMine: boolean;
+  }>({
+    iHaveAccessToTheirs: false,
+    theyHaveAccessToMine: false,
+    iRequestedTheirs: false,
+    theyRequestedMine: false
+  });
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
@@ -89,10 +109,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const data = await res.json();
       if (data.messages) {
         setMessages(data.messages);
+        try {
+          localStorage.setItem(`aura_local_chat_${convId}`, JSON.stringify(data.messages));
+        } catch (e) {
+          // ignore quota
+        }
         setTimeout(scrollToBottom, 50);
       }
     } catch (err) {
       console.error('Fetch messages error:', err);
+      // Local fallback for offline / local-only conversations
+      try {
+        const cached = localStorage.getItem(`aura_local_chat_${convId}`);
+        if (cached) {
+          setMessages(JSON.parse(cached));
+          setTimeout(scrollToBottom, 50);
+        }
+      } catch (e) {
+        console.error('Failed to read local messages cache:', e);
+      }
     }
   };
 
@@ -152,13 +187,211 @@ export const ChatView: React.FC<ChatViewProps> = ({
     };
   }, [initialTargetUserId, authToken]);
 
-  // Fetch messages when activeConv changes
+  const fetchVaultStatus = async (targetUserId: string) => {
+    try {
+      const res = await fetch(`/api/vault/status/${targetUserId}`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      setVaultStatus({
+        iHaveAccessToTheirs: !!data.iHaveAccessToTheirs,
+        theyHaveAccessToMine: !!data.theyHaveAccessToMine,
+        iRequestedTheirs: !!data.iRequestedTheirs,
+        theyRequestedMine: !!data.theyRequestedMine
+      });
+    } catch (err) {
+      console.error('Failed to fetch vault status:', err);
+    }
+  };
+
+  // Fetch messages and vault status when activeConv changes
   useEffect(() => {
     if (activeConv) {
       fetchMessages(activeConv.id);
       loadPropositions(activeConv.otherParticipant, selectedVibe);
+      if (activeConv.otherParticipant?.userId) {
+        fetchVaultStatus(activeConv.otherParticipant.userId);
+      }
     }
   }, [activeConv]);
+
+  const handleSetMessageTtl = async (ttlSeconds: number | null) => {
+    if (!activeConv) return;
+    setUpdatingSettings(true);
+    try {
+      const res = await fetch(`/api/conversations/${activeConv.id}/settings`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ messageTtlSeconds: ttlSeconds })
+      });
+      const data = await res.json();
+      if (data.settings) {
+        setActiveConv(prev => prev ? {
+          ...prev,
+          settings: {
+            ...prev.settings,
+            messageTtlSeconds: data.settings.messageTtlSeconds
+          }
+        } : null);
+      }
+    } catch (err) {
+      console.error('Failed to set message TTL:', err);
+    } finally {
+      setUpdatingSettings(false);
+    }
+  };
+
+  const handleToggleDisableAutoBackup = async () => {
+    if (!activeConv) return;
+    const currentVal = !!(activeConv.settings?.disableAutoBackup ?? activeConv.disableAutoBackup);
+    const nextVal = !currentVal;
+    setUpdatingSettings(true);
+    try {
+      const res = await fetch(`/api/conversations/${activeConv.id}/settings`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({
+          disableAutoBackup: nextVal,
+          excludeFromBackup: nextVal ? true : (activeConv.settings?.excludeFromBackup ?? false)
+        })
+      });
+      const data = await res.json();
+      const updatedSettings = data.settings || data.conversation?.settings;
+      if (updatedSettings) {
+        setActiveConv(prev => prev ? {
+          ...prev,
+          disableAutoBackup: updatedSettings.disableAutoBackup,
+          excludeFromBackup: updatedSettings.excludeFromBackup,
+          settings: {
+            ...prev.settings,
+            disableAutoBackup: updatedSettings.disableAutoBackup,
+            excludeFromBackup: updatedSettings.excludeFromBackup
+          }
+        } : null);
+
+        // When disabling auto-backup, guarantee that existing messages are saved locally in the browser
+        if (nextVal && messages.length > 0) {
+          try {
+            localStorage.setItem(`aura_local_chat_${activeConv.id}`, JSON.stringify(messages));
+          } catch (e) {
+            console.error('Failed to cache local messages:', e);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to toggle disable auto backup:', err);
+    } finally {
+      setUpdatingSettings(false);
+    }
+  };
+
+  const handleToggleBackupExclusion = async () => {
+    if (!activeConv) return;
+    const currentVal = !!activeConv.settings?.excludeFromBackup;
+    setUpdatingSettings(true);
+    try {
+      const res = await fetch(`/api/conversations/${activeConv.id}/settings`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ excludeFromBackup: !currentVal })
+      });
+      const data = await res.json();
+      if (data.settings) {
+        setActiveConv(prev => prev ? {
+          ...prev,
+          settings: {
+            ...prev.settings,
+            excludeFromBackup: data.settings.excludeFromBackup
+          }
+        } : null);
+      }
+    } catch (err) {
+      console.error('Failed to toggle backup exclusion:', err);
+    } finally {
+      setUpdatingSettings(false);
+    }
+  };
+
+  const handleToggleMessagePermanent = async (messageId: string) => {
+    if (!activeConv) return;
+    try {
+      const res = await fetch(`/api/conversations/${activeConv.id}/messages/${messageId}/permanent`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
+      const data = await res.json();
+      if (data.message) {
+        setMessages(prev => prev.map(m => m.id === messageId ? { ...m, isPermanent: data.message.isPermanent } : m));
+      }
+    } catch (err) {
+      console.error('Failed to toggle permanent message:', err);
+    }
+  };
+
+  const handleGrantVaultAccess = async (grant: boolean) => {
+    if (!activeConv?.otherParticipant?.userId) return;
+    const targetId = activeConv.otherParticipant.userId;
+    try {
+      const res = await fetch('/api/vault/grant', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ targetUserId: targetId, granted: grant })
+      });
+      if (res.ok) {
+        setVaultStatus(prev => ({ ...prev, theyHaveAccessToMine: grant }));
+        fetchMessages(activeConv.id);
+      }
+    } catch (err) {
+      console.error('Failed to grant vault access:', err);
+    }
+  };
+
+  const handleRequestVaultAccessFromChat = async () => {
+    if (!activeConv?.otherParticipant?.userId) return;
+    const targetId = activeConv.otherParticipant.userId;
+    try {
+      const res = await fetch('/api/vault/request', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ targetUserId: targetId })
+      });
+      if (res.ok) {
+        setVaultStatus(prev => ({ ...prev, iRequestedTheirs: true }));
+        fetchMessages(activeConv.id);
+      }
+    } catch (err) {
+      console.error('Failed to request vault access:', err);
+    }
+  };
+
+  const formatTtlRemaining = (expiresAt?: string) => {
+    if (!expiresAt) return null;
+    const diffMs = new Date(expiresAt).getTime() - Date.now();
+    if (diffMs <= 0) return 'wygasa zaraz';
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return `${diffSec}s`;
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m`;
+    const diffHrs = Math.floor(diffMin / 60);
+    if (diffHrs < 24) return `${diffHrs}h`;
+    const diffDays = Math.floor(diffHrs / 24);
+    return `${diffDays}d`;
+  };
 
   // Load AI Proposition messages tailored to the other participant
   const loadPropositions = async (otherParticipant: UserProfile | undefined, vibe: PropositionVibe = selectedVibe) => {
@@ -244,12 +477,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
         body: JSON.stringify({
           receiverId: activeConv.otherParticipant.userId,
           type: 'TEXT',
-          text: textToSend
+          text: textToSend,
+          disableAutoBackup: activeConv.settings?.disableAutoBackup ?? activeConv.disableAutoBackup,
+          excludeFromBackup: activeConv.settings?.excludeFromBackup ?? activeConv.excludeFromBackup
         })
       });
       const data = await res.json();
       if (data.message) {
-        setMessages(prev => [...prev, data.message]);
+        setMessages(prev => {
+          const updated = [...prev, data.message];
+          if (activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup) {
+            try {
+              localStorage.setItem(`aura_local_chat_${activeConv.id}`, JSON.stringify(updated));
+            } catch (e) {}
+          }
+          return updated;
+        });
         setTimeout(scrollToBottom, 50);
       }
     } catch (err) {
@@ -272,12 +515,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
         },
         body: JSON.stringify({
           receiverId: activeConv.otherParticipant.userId,
+          disableAutoBackup: activeConv.settings?.disableAutoBackup ?? activeConv.disableAutoBackup,
+          excludeFromBackup: activeConv.settings?.excludeFromBackup ?? activeConv.excludeFromBackup,
           ...payload
         })
       });
       const data = await res.json();
       if (data.message) {
-        setMessages(prev => [...prev, data.message]);
+        setMessages(prev => {
+          const updated = [...prev, data.message];
+          if (activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup) {
+            try {
+              localStorage.setItem(`aura_local_chat_${activeConv.id}`, JSON.stringify(updated));
+            } catch (e) {}
+          }
+          return updated;
+        });
         setTimeout(scrollToBottom, 50);
       }
     } catch (err) {
@@ -449,26 +702,75 @@ export const ChatView: React.FC<ChatViewProps> = ({
               </div>
             </div>
 
-            {/* Quick AI Proposition Toggle Button in Header */}
-            <button
-              onClick={() => {
-                setShowAIPanel(!showAIPanel);
-                if (!showAIPanel && aiPropositions.length === 0) {
-                  loadPropositions(activeConv.otherParticipant, selectedVibe);
-                }
-              }}
-              className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1.5 transition-all duration-200 active:scale-95 ${
-                showAIPanel
-                  ? 'bg-fuchsia-500/25 text-fuchsia-200 border border-fuchsia-500/40 shadow-[0_0_12px_rgba(217,70,239,0.3)]'
-                  : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 border border-white/[0.1]'
-              }`}
-              title="Toggle AI Proposition Messages"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-fuchsia-400 animate-pulse" />
-              <span>AI Propositions</span>
-              {showAIPanel ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
-            </button>
+            <div className="flex items-center gap-1.5">
+              {/* Privacy, Expiration & Vault Settings Button */}
+              <button
+                onClick={() => {
+                  setShowPrivacyDrawer(!showPrivacyDrawer);
+                  if (showAIPanel) setShowAIPanel(false);
+                }}
+                className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1.5 transition-all duration-200 active:scale-95 ${
+                  showPrivacyDrawer
+                    ? 'bg-amber-500/25 text-amber-200 border border-amber-500/50 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
+                    : activeConv.settings?.messageTtlSeconds || activeConv.settings?.excludeFromBackup || activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup
+                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                    : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 border border-white/[0.1]'
+                }`}
+                title="Message expiration, backup & private vault settings"
+              >
+                <Timer className="w-3.5 h-3.5 text-amber-400" />
+                <span>Prywatność</span>
+                {activeConv.settings?.messageTtlSeconds ? (
+                  <span className="px-1 py-0.2 rounded bg-amber-400/20 text-amber-300 text-[9px]">
+                    {formatTtlRemaining(new Date(Date.now() + activeConv.settings.messageTtlSeconds * 1000).toISOString())}
+                  </span>
+                ) : null}
+                {(activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup) ? (
+                  <span title="Disable Auto-Backup aktywny (tylko lokalnie)">
+                    <CloudOff className="w-3 h-3 text-cyan-400" />
+                  </span>
+                ) : activeConv.settings?.excludeFromBackup ? (
+                  <ShieldOff className="w-3 h-3 text-cyan-400" />
+                ) : null}
+              </button>
+
+              {/* Quick AI Proposition Toggle Button in Header */}
+              <button
+                onClick={() => {
+                  setShowAIPanel(!showAIPanel);
+                  if (showPrivacyDrawer) setShowPrivacyDrawer(false);
+                  if (!showAIPanel && aiPropositions.length === 0) {
+                    loadPropositions(activeConv.otherParticipant, selectedVibe);
+                  }
+                }}
+                className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1.5 transition-all duration-200 active:scale-95 ${
+                  showAIPanel
+                    ? 'bg-fuchsia-500/25 text-fuchsia-200 border border-fuchsia-500/40 shadow-[0_0_12px_rgba(217,70,239,0.3)]'
+                    : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 border border-white/[0.1]'
+                }`}
+                title="Toggle AI Proposition Messages"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-fuchsia-400 animate-pulse" />
+                <span>AI</span>
+                {showAIPanel ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
+              </button>
+            </div>
           </div>
+
+          {/* Privacy, Retention & Vault Drawer */}
+          {activeConv && (
+            <ChatSettings
+              isOpen={showPrivacyDrawer}
+              onClose={() => setShowPrivacyDrawer(false)}
+              conversation={activeConv}
+              updatingSettings={updatingSettings}
+              onSetMessageTtl={handleSetMessageTtl}
+              onToggleDisableAutoBackup={handleToggleDisableAutoBackup}
+              vaultStatus={vaultStatus}
+              onGrantVaultAccess={handleGrantVaultAccess}
+              onRequestVaultAccess={handleRequestVaultAccessFromChat}
+            />
+          )}
 
           {/* Collapsible AI Propositions Panel */}
           {showAIPanel && (
@@ -559,6 +861,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {/* Messages Stream */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar">
+            {/* Disable Auto-Backup Active Notification Banner */}
+            {(activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup) && (
+              <div className="p-2.5 rounded-2xl bg-cyan-950/40 border border-cyan-500/30 flex items-center justify-between gap-2 text-xs text-cyan-200 shrink-0">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-xl bg-cyan-500/20 text-cyan-300 shrink-0">
+                    <CloudOff className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-white text-[10.5px]">Wyłączono automatyczną kopię (Disable Auto-Backup)</span>
+                    <p className="text-[9.5px] text-cyan-300/80">Wiadomości są zapisywane tylko na tym urządzeniu i wyłączone z eksportów danych.</p>
+                  </div>
+                </div>
+                <span className="text-[8.5px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-400/30 shrink-0">
+                  Tylko lokalnie
+                </span>
+              </div>
+            )}
+
             {messages.length === 0 ? (
               /* Empty Conversation State: Features Aura AI Proposition Starters directly */
               <div className="h-full flex flex-col items-center justify-center text-center p-2 space-y-4">
@@ -632,24 +952,103 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       {m.type === 'VOICE' && <VoiceMessage media={m.media} isMe={isMe} />}
                       {m.type === 'STAR_VIDEO' && <StarVideoMessage media={m.media} />}
                       
-                      {/* Message Metadata & Animated Checkmark Status */}
-                      <div className={`flex items-center justify-end gap-1.5 mt-1.5 text-[9.5px] ${isMe ? 'text-white/75' : 'text-slate-400'}`}>
-                        <span className="tabular-nums font-medium tracking-tight">
-                          {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                        
-                        {isMe && (
-                          <span
-                            className="flex items-center ml-0.5 transition-all duration-300 ease-out"
-                            title={isDelivered ? 'Delivered and Read' : 'Sent'}
+                      {/* Aura Tap Message Display */}
+                      {m.type === 'TAP' && (
+                        <div className="flex items-center gap-2.5 py-1">
+                          <div className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-fuchsia-600/30 to-amber-500/30 border border-fuchsia-400/40 flex items-center justify-center text-xl shadow-md">
+                            {m.tapType === 'HOT' ? '🔥' : m.tapType === 'WOOF' ? '🐾' : m.tapType === 'WAVE' ? '👋' : '⚡'}
+                          </div>
+                          <div>
+                            <p className="text-xs font-black tracking-wide text-white">
+                              {m.tapType === 'HOT' ? 'Aura Hot Tap 🔥' : m.tapType === 'WOOF' ? 'Woof Tap 🐾' : m.tapType === 'WAVE' ? 'Pomachanie 👋' : 'Aura Bolt ⚡'}
+                            </p>
+                            <p className="text-[10px] text-fuchsia-300 font-medium">Szybka zaczepka</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Vault Action Message Display */}
+                      {m.type === 'VAULT_ACTION' && (
+                        <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
+                              <Lock className="w-4 h-4" />
+                            </div>
+                            <p className="text-xs font-bold text-amber-200">{m.text}</p>
+                          </div>
+                          {!isMe && m.text?.toLowerCase().includes('poprosił o dostęp') && (
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => handleGrantVaultAccess(true)}
+                                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-black text-[10px] font-black transition active:scale-95 flex items-center gap-1 shadow-sm"
+                              >
+                                <Unlock className="w-3 h-3" />
+                                <span>Przyznaj dostęp do skarbca</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Message Metadata, TTL Expiration, Permanent Pin & Delivery Status */}
+                      <div className="flex items-center justify-between gap-2 mt-1.5 text-[9.5px]">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {m.isPermanent ? (
+                            <span className="flex items-center gap-1 text-amber-300 bg-amber-500/20 px-1.5 py-0.5 rounded-md font-semibold border border-amber-500/30 shadow-xs">
+                              <Pin className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
+                              <span>Na stałe</span>
+                            </span>
+                          ) : m.expiresAt ? (
+                            <span className="flex items-center gap-1 text-amber-200/90 font-medium bg-black/30 px-1.5 py-0.5 rounded-md border border-white/10" title={`Wygaśnie ${new Date(m.expiresAt).toLocaleTimeString()}`}>
+                              <Clock className="w-2.5 h-2.5 text-amber-400" />
+                              <span>{formatTtlRemaining(m.expiresAt)}</span>
+                            </span>
+                          ) : null}
+
+                          {(m.disableAutoBackup || (activeConv.settings?.disableAutoBackup && m.excludeFromBackup)) ? (
+                            <span className="flex items-center gap-1 text-cyan-300/95 font-semibold bg-cyan-950/60 px-1.5 py-0.5 rounded-md border border-cyan-500/30" title="Zapisana wyłącznie lokalnie (wyłączona z chmury i kopii zapasowej)">
+                              <HardDrive className="w-2.5 h-2.5 text-cyan-300" />
+                              <span>Tylko lokalnie</span>
+                            </span>
+                          ) : m.excludeFromBackup ? (
+                            <span className="flex items-center gap-0.5 text-cyan-300/90 font-medium bg-black/30 px-1 py-0.5 rounded-md border border-white/10" title="Odłączona od kopii zapasowej (Off-the-record)">
+                              <ShieldOff className="w-2.5 h-2.5 text-cyan-400" />
+                              <span>Bez kopii</span>
+                            </span>
+                          ) : null}
+
+                          {/* Pin Toggle Button */}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleMessagePermanent(m.id)}
+                            title={m.isPermanent ? "Usuń zabezpieczenie (wiadomość wygaśnie normalnie)" : "Zapisz na stałe (zabezpiecz przed wygaśnięciem)"}
+                            className={`p-1 rounded-md hover:bg-white/10 transition active:scale-90 ${
+                              m.isPermanent ? 'text-amber-300' : 'text-white/40 hover:text-white/80'
+                            }`}
                           >
-                            {isDelivered ? (
-                              <CheckCheck className="w-3.5 h-3.5 text-cyan-300 stroke-[2.4] transition-transform duration-300 animate-tick-pop" />
-                            ) : (
-                              <Check className="w-3.5 h-3.5 text-white/70 stroke-[2.2] transition-opacity duration-300" />
-                            )}
+                            <Pin className={`w-3 h-3 ${m.isPermanent ? 'fill-amber-400 text-amber-400' : ''}`} />
+                          </button>
+                        </div>
+
+                        <div className={`flex items-center gap-1.5 ${isMe ? 'text-white/75' : 'text-slate-400'}`}>
+                          <span className="tabular-nums font-medium tracking-tight">
+                            {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </span>
-                        )}
+                          
+                          {isMe && (
+                            <span
+                              className="flex items-center ml-0.5 transition-all duration-300 ease-out"
+                              title={isDelivered ? 'Delivered and Read' : 'Sent'}
+                            >
+                              {isDelivered ? (
+                                <CheckCheck className="w-3.5 h-3.5 text-cyan-300 stroke-[2.4] transition-transform duration-300 animate-tick-pop" />
+                              ) : (
+                                <Check className="w-3.5 h-3.5 text-white/70 stroke-[2.2] transition-opacity duration-300" />
+                              )}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>

@@ -32,6 +32,7 @@ export interface ProfilePhoto {
   url: string;
   isPrimary: boolean;
   isPrivate?: boolean;
+  isLocked?: boolean;
   caption?: string;
 }
 
@@ -129,8 +130,68 @@ export interface ReportRecord {
 }
 
 export type MessageStatus = 'SENT' | 'DELIVERED' | 'READ';
+export type DeliveryStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
+export type DeletedStatus = 'none' | 'deleted_for_me' | 'deleted_for_everyone';
 
-export type MessageType = 'TEXT' | 'PHOTO' | 'LINK' | 'LOCATION' | 'STICKER' | 'VOICE' | 'STAR_VIDEO';
+export type TapType = 'HOT' | 'WOOF' | 'BOLT' | 'WAVE';
+
+export type MessageType = 'TEXT' | 'PHOTO' | 'LINK' | 'LOCATION' | 'STICKER' | 'VOICE' | 'STAR_VIDEO' | 'TAP' | 'VAULT_ACTION';
+
+// Specific typed message payloads (Section 1)
+export interface PhotoPayload {
+  mediaId: string;
+  thumbnailRef?: string;
+  width?: number;
+  height?: number;
+  mimeType: string;
+  size: number;
+  caption?: string;
+}
+
+export interface LinkPayload {
+  normalizedUrl: string;
+  displayUrl: string;
+  title?: string;
+  domain: string;
+  thumbnailRef?: string;
+  description?: string;
+}
+
+export interface LocationPayload {
+  latitude: number;
+  longitude: number;
+  label?: string;
+  placeName?: string;
+  precisionMode: 'exact' | 'approximate';
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export interface StickerPayload {
+  stickerId: string;
+  stickerPackId: string;
+  animated?: boolean;
+  name?: string;
+  url?: string;
+}
+
+export interface VoicePayload {
+  mediaId: string;
+  duration: number; // in seconds
+  mimeType: string;
+  size: number;
+  waveform?: number[];
+}
+
+export interface StarVideoPayload {
+  mediaId: string;
+  thumbnailRef?: string;
+  duration: number; // strict limit, max 20s
+  width?: number;
+  height?: number;
+  mimeType: string;
+  size: number;
+}
 
 export interface MessageMediaInfo {
   url: string;
@@ -161,17 +222,49 @@ export interface Message {
   conversationId: string;
   senderId: string;
   receiverId: string;
+  recipientId?: string; // conversation membership reference / synonym
   type: MessageType;
+  createdAt: string;
+  updatedAt?: string;
+
+  // Delivery & Read Status
+  status: MessageStatus; // backwards compatible
+  deliveryStatus?: DeliveryStatus;
+  readStatus?: boolean;
+  readAt?: string;
+  deletedStatus?: DeletedStatus;
+  deletedForUserIds?: string[];
+
+  // Typed Media Payloads
+  photo?: PhotoPayload;
+  link?: LinkPayload;
+  locationPayload?: LocationPayload;
+  stickerPayload?: StickerPayload;
+  voice?: VoicePayload;
+  starVideo?: StarVideoPayload;
+
+  // Legacy / Existing fields for backwards compatibility
   text?: string;
-  photoUrl?: string; // legacy support
+  photoUrl?: string;
   media?: MessageMediaInfo;
   linkPreview?: LinkPreviewInfo;
   location?: LocationInfo;
   stickerId?: string;
   stickerUrl?: string;
   stickerName?: string;
-  status: MessageStatus;
-  createdAt: string;
+  tapType?: TapType;
+  vaultAction?: 'REQUEST' | 'GRANT' | 'REVOKE';
+  expiresAt?: string;
+  ttlSeconds?: number;
+  isPermanent?: boolean;
+  excludeFromBackup?: boolean;
+  disableAutoBackup?: boolean;
+}
+
+export interface ConversationSettings {
+  messageTtlSeconds?: number | null;
+  excludeFromBackup?: boolean;
+  disableAutoBackup?: boolean;
 }
 
 export interface Conversation {
@@ -180,6 +273,13 @@ export interface Conversation {
   lastMessage?: Message;
   unreadCount: number;
   otherParticipant: UserProfile;
+  messageTtlSeconds?: number; // 0 or undefined = forever; 30, 300, 3600, 86400, 604800
+  excludeFromBackup?: boolean; // off-the-record / exclude from cloud backup
+  disableAutoBackup?: boolean; // opt-out from cloud backup, store only locally
+  vaultAccessGranted?: boolean; // current user granted their vault to other
+  vaultAccessReceived?: boolean; // other user granted their vault to current user
+  vaultRequested?: boolean; // current user requested other's vault
+  settings?: ConversationSettings;
 }
 
 export interface FilterState {
@@ -192,6 +292,7 @@ export interface FilterState {
   verifiedOnly: boolean;
   onlineOnly: boolean;
   hasPhotosOnly: boolean;
+  rightNowOnly?: boolean;
 }
 
 export type MomentPrivacy = 'everyone' | 'connections' | 'specific';
@@ -378,3 +479,77 @@ export interface AdAnalyticsEvent {
   isPersonalized: boolean;
   provider: string;
 }
+
+export interface CloudBackupRecord {
+  backupId: string;
+  timestamp: string;
+  status: 'SUCCESS' | 'FAILED';
+  totalConversations: number;
+  backedUpConversations: number;
+  excludedConversations: number;
+  excludedDueToDisableAutoBackup: number;
+  totalMessagesBackedUp: number;
+  checksumSha256: string;
+  backupSizeBytes?: number;
+  backupFilePath?: string;
+  automated: boolean;
+  excludedConversationIds: string[];
+}
+
+export interface CloudBackupStatus {
+  serviceActive: boolean;
+  lastBackup: CloudBackupRecord | null;
+  totalConversations: number;
+  conversationsWithAutoBackupDisabled: number;
+  historyCount: number;
+  nextScheduledBackup?: string;
+}
+
+// ==========================================
+// UNIFIED BILLING & ENTITLEMENTS (STORE-READY)
+// ==========================================
+
+export type BillingProviderType = 'google_play' | 'apple_storekit' | 'stripe' | 'none';
+
+export type EntitlementStatus = 
+  | 'active' 
+  | 'grace_period' 
+  | 'account_hold' 
+  | 'canceled' 
+  | 'expired' 
+  | 'revoked' 
+  | 'none';
+
+export type PlanTier = 'monthly' | 'three_month' | 'yearly';
+
+export interface UserEntitlement {
+  userId: string;
+  premium: boolean;
+  provider: BillingProviderType;
+  productId?: string;
+  planTier?: PlanTier;
+  status: EntitlementStatus;
+  expiresAt?: string;
+  autoRenew: boolean;
+  originalTransactionId?: string;
+  purchaseTokenHash?: string;
+  storeTransactionId?: string;
+  environment?: 'production' | 'sandbox';
+  gracePeriodUntil?: string;
+  lastVerifiedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreProduct {
+  id: string;
+  tier: PlanTier;
+  title: string;
+  description: string;
+  localizedPrice: string;
+  priceAmountMicros?: number;
+  currencyCode?: string;
+  billingPeriod: 'P1M' | 'P3M' | 'P1Y';
+  freeTrialPeriod?: string;
+}
+

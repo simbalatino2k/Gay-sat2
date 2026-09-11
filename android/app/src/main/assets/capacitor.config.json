@@ -1,0 +1,10 @@
+{
+	"appId": "app.aura.gay18",
+	"appName": "AURA GAY 18+",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https",
+		"cleartext": false
+	},
+	"plugins": {}
+}

@@ -18,7 +18,8 @@ import {
   AdminAuditLog,
   ModerationNotice,
   DsaAppealRecord,
-  GdprExportData
+  GdprExportData,
+  UserEntitlement
 } from '../types';
 
 let pgPool: Pool | null = null;
@@ -222,6 +223,39 @@ export async function initPostgresSchema(): Promise<boolean> {
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS store_subscriptions (
+        id VARCHAR(128) PRIMARY KEY,
+        user_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider VARCHAR(64) NOT NULL,
+        product_id VARCHAR(128) NOT NULL,
+        base_plan_id VARCHAR(128),
+        purchase_token_hash VARCHAR(255) UNIQUE,
+        transaction_id VARCHAR(255),
+        original_transaction_id VARCHAR(255) UNIQUE,
+        environment VARCHAR(32) DEFAULT 'production',
+        status VARCHAR(64) NOT NULL,
+        auto_renew BOOLEAN DEFAULT true,
+        purchase_date TIMESTAMPTZ,
+        expires_at TIMESTAMPTZ,
+        grace_period_expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        last_verified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS store_billing_events (
+        id VARCHAR(128) PRIMARY KEY,
+        provider VARCHAR(64) NOT NULL,
+        external_event_id VARCHAR(255) NOT NULL,
+        event_type VARCHAR(128) NOT NULL,
+        received_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR(64) DEFAULT 'processed',
+        metadata JSONB,
+        CONSTRAINT uq_provider_external_event UNIQUE (provider, external_event_id)
+      );
+
       CREATE TABLE IF NOT EXISTS stripe_events (
         event_id VARCHAR(255) PRIMARY KEY,
         event_type VARCHAR(128) NOT NULL,
@@ -263,6 +297,11 @@ export async function initPostgresSchema(): Promise<boolean> {
       CREATE INDEX IF NOT EXISTS idx_matches_users ON matches(user1_id, user2_id);
       CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
       CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets(token);
+      CREATE INDEX IF NOT EXISTS idx_store_sub_user ON store_subscriptions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_store_sub_status ON store_subscriptions(status);
+      CREATE INDEX IF NOT EXISTS idx_store_sub_token_hash ON store_subscriptions(purchase_token_hash);
+      CREATE INDEX IF NOT EXISTS idx_store_sub_orig_tx ON store_subscriptions(original_transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_store_events_ext ON store_billing_events(provider, external_event_id);
     `);
 
     await client.query('COMMIT');
@@ -528,6 +567,152 @@ export class PostgresStoreAdapter {
       'INSERT INTO stripe_events (event_id, event_type, processed_at) VALUES ($1, $2, CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING',
       [eventId, eventType]
     );
+  }
+
+  public async upsertStoreSubscription(entitlement: UserEntitlement): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const isPrem = entitlement.premium && (entitlement.status === 'active' || entitlement.status === 'grace_period');
+      const planTier = entitlement.planTier || (entitlement.productId?.includes('yearly') ? 'yearly' : 'monthly');
+      const premiumTier = isPrem ? (planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY') : null;
+
+      await client.query(
+        `INSERT INTO store_subscriptions (
+          id, user_id, provider, product_id, base_plan_id,
+          purchase_token_hash, transaction_id, original_transaction_id,
+          environment, status, auto_renew, purchase_date,
+          expires_at, grace_period_expires_at, created_at, updated_at, last_verified_at
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8,
+          $9, $10, $11, $12,
+          $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          provider = EXCLUDED.provider,
+          product_id = EXCLUDED.product_id,
+          base_plan_id = EXCLUDED.base_plan_id,
+          purchase_token_hash = COALESCE(EXCLUDED.purchase_token_hash, store_subscriptions.purchase_token_hash),
+          transaction_id = COALESCE(EXCLUDED.transaction_id, store_subscriptions.transaction_id),
+          original_transaction_id = COALESCE(EXCLUDED.original_transaction_id, store_subscriptions.original_transaction_id),
+          environment = EXCLUDED.environment,
+          status = EXCLUDED.status,
+          auto_renew = EXCLUDED.auto_renew,
+          expires_at = EXCLUDED.expires_at,
+          grace_period_expires_at = EXCLUDED.grace_period_expires_at,
+          updated_at = CURRENT_TIMESTAMP,
+          last_verified_at = CURRENT_TIMESTAMP`,
+        [
+          entitlement.userId,
+          entitlement.userId,
+          entitlement.provider,
+          entitlement.productId || 'aura.premium.monthly',
+          entitlement.planTier || 'monthly',
+          entitlement.purchaseTokenHash || null,
+          entitlement.storeTransactionId || null,
+          entitlement.originalTransactionId || null,
+          entitlement.environment || 'production',
+          entitlement.status,
+          entitlement.autoRenew,
+          entitlement.createdAt ? new Date(entitlement.createdAt) : new Date(),
+          entitlement.expiresAt ? new Date(entitlement.expiresAt) : null,
+          entitlement.gracePeriodUntil ? new Date(entitlement.gracePeriodUntil) : null
+        ]
+      );
+
+      await client.query(
+        `UPDATE users SET
+          is_premium = $1,
+          premium_tier = $2,
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3`,
+        [isPrem, premiumTier, entitlement.userId]
+      );
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getStoreSubscriptionByUserId(userId: string): Promise<UserEntitlement | null> {
+    const res = await this.pool.query(
+      'SELECT * FROM store_subscriptions WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1',
+      [userId]
+    );
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    const isPrem = (row.status === 'active' || row.status === 'grace_period') &&
+      (!row.expires_at || new Date(row.expires_at).getTime() > Date.now());
+
+    return {
+      userId: row.user_id,
+      premium: isPrem,
+      provider: row.provider,
+      productId: row.product_id,
+      planTier: row.base_plan_id || (row.product_id?.includes('yearly') ? 'yearly' : 'monthly'),
+      status: row.status,
+      expiresAt: row.expires_at ? row.expires_at.toISOString() : undefined,
+      autoRenew: !!row.auto_renew,
+      originalTransactionId: row.original_transaction_id || undefined,
+      purchaseTokenHash: row.purchase_token_hash || undefined,
+      storeTransactionId: row.transaction_id || undefined,
+      environment: row.environment,
+      gracePeriodUntil: row.grace_period_expires_at ? row.grace_period_expires_at.toISOString() : undefined,
+      lastVerifiedAt: row.last_verified_at ? row.last_verified_at.toISOString() : new Date().toISOString(),
+      createdAt: row.created_at ? row.created_at.toISOString() : new Date().toISOString(),
+      updatedAt: row.updated_at ? row.updated_at.toISOString() : new Date().toISOString()
+    };
+  }
+
+  public async findUserByPurchaseTokenHash(hash: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM store_subscriptions WHERE purchase_token_hash = $1 LIMIT 1',
+      [hash]
+    );
+    return res.rows.length > 0 ? res.rows[0].user_id : null;
+  }
+
+  public async findUserByOriginalTransactionId(origTxId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM store_subscriptions WHERE original_transaction_id = $1 LIMIT 1',
+      [origTxId]
+    );
+    return res.rows.length > 0 ? res.rows[0].user_id : null;
+  }
+
+  public async isStoreEventProcessed(provider: string, externalEventId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      'SELECT id FROM store_billing_events WHERE provider = $1 AND external_event_id = $2',
+      [provider, externalEventId]
+    );
+    return res.rows.length > 0;
+  }
+
+  public async recordStoreBillingEvent(
+    id: string,
+    provider: string,
+    externalEventId: string,
+    eventType: string,
+    metadata?: any
+  ): Promise<boolean> {
+    try {
+      await this.pool.query(
+        `INSERT INTO store_billing_events (
+          id, provider, external_event_id, event_type, metadata, received_at, processed_at, status
+        ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'processed')
+        ON CONFLICT (provider, external_event_id) DO NOTHING`,
+        [id, provider, externalEventId, eventType, metadata ? JSON.stringify(metadata) : null]
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private mapUserRow(row: any): UserAccount {

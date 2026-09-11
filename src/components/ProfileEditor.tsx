@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
-import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle } from 'lucide-react';
+import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
 
 interface ProfileEditorProps {
@@ -126,6 +126,15 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
   const handleRemovePhoto = (id: string) => {
     setPhotos(photos.filter(p => p.id !== id));
+  };
+
+  const togglePhotoPrivate = (id: string) => {
+    setPhotos(photos.map(p => {
+      if (p.id === id) {
+        return { ...p, isPrivate: !p.isPrivate };
+      }
+      return p;
+    }));
   };
 
   const toggleLookingFor = (item: LookingFor) => {
@@ -260,8 +269,36 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           <div className="grid grid-cols-3 gap-2">
             {photos.map(p => (
-              <div key={p.id} className="relative aspect-square rounded-2xl overflow-hidden border border-white/10 bg-black group shadow-md">
-                <img src={p.url} alt="Profile photo" referrerPolicy="no-referrer" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+              <div key={p.id} className={`relative aspect-square rounded-2xl overflow-hidden border bg-black group shadow-md transition-all ${
+                p.isPrivate ? 'border-amber-500/60 ring-1 ring-amber-500/40' : 'border-white/10'
+              }`}>
+                <img src={p.url} alt="Profile photo" referrerPolicy="no-referrer" className={`w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 ${
+                  p.isPrivate ? 'brightness-90' : ''
+                }`} />
+                
+                {/* Private Vault Badge */}
+                {p.isPrivate && (
+                  <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full bg-black/80 backdrop-blur-md border border-amber-500/40 flex items-center gap-1 text-[9px] font-bold text-amber-300 shadow-sm">
+                    <Lock className="w-2.5 h-2.5 text-amber-400" />
+                    <span>Skarbiec</span>
+                  </div>
+                )}
+
+                {/* Private / Public Toggle */}
+                <button
+                  type="button"
+                  title={p.isPrivate ? "Prywatne zdjęcie (Skarbiec) - kliknij aby odblokować dla wszystkich" : "Kliknij aby ukryć w prywatnym skarbcu"}
+                  onClick={() => togglePhotoPrivate(p.id)}
+                  className={`absolute bottom-1.5 left-1.5 p-1.5 rounded-full backdrop-blur-md transition active:scale-90 ${
+                    p.isPrivate
+                      ? 'bg-amber-500/90 text-black hover:bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.5)]'
+                      : 'bg-black/70 text-slate-300 hover:text-white hover:bg-black/90'
+                  }`}
+                >
+                  {p.isPrivate ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                </button>
+
+                {/* Remove button */}
                 <button
                   type="button"
                   onClick={() => handleRemovePhoto(p.id)}
@@ -271,6 +308,13 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                 </button>
               </div>
             ))}
+          </div>
+
+          <div className="flex items-start gap-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-200/90">
+            <Lock className="w-3.5 h-3.5 shrink-0 text-amber-400 mt-0.5" />
+            <span>
+              <strong>Prywatny Skarbiec:</strong> Kliknij ikonę kłódki na zdjęciu, aby przenieść je do skarbca. Zdjęcia ze skarbca widzą tylko osoby, którym osobiście przyznasz dostęp w czacie.
+            </span>
           </div>
 
           {uploadError && (
@@ -465,23 +509,45 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         </div>
 
         {/* Looking For */}
-        <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-2 shadow-xl">
-          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Looking For</label>
+        <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Looking For</label>
+            <button
+              type="button"
+              onClick={() => toggleLookingFor('Right Now')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-black tracking-wide border transition-all active:scale-95 ${
+                lookingFor.includes('Right Now')
+                  ? 'border-amber-400/80 bg-gradient-to-r from-amber-500/30 to-fuchsia-500/30 text-amber-300 shadow-[0_0_14px_rgba(245,158,11,0.35)] animate-pulse'
+                  : 'border-white/10 bg-white/5 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span>Right Now {lookingFor.includes('Right Now') ? 'WŁĄCZONE' : 'WYŁĄCZONE'}</span>
+            </button>
+          </div>
+
           <div className="flex flex-wrap gap-1.5">
-            {LOOKING_FOR.map(l => (
-              <button
-                key={l}
-                type="button"
-                onClick={() => toggleLookingFor(l)}
-                className={`px-3 py-1 rounded-xl text-[11px] font-bold border transition-all active:scale-95 ${
-                  lookingFor.includes(l)
-                    ? 'border-rose-500/60 bg-rose-500/20 text-rose-200 shadow-[0_0_12px_rgba(244,63,94,0.25)]'
-                    : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
-                }`}
-              >
-                {l}
-              </button>
-            ))}
+            {LOOKING_FOR.map(l => {
+              const isRightNow = l === 'Right Now';
+              const isSelected = lookingFor.includes(l);
+              return (
+                <button
+                  key={l}
+                  type="button"
+                  onClick={() => toggleLookingFor(l)}
+                  className={`px-3 py-1 rounded-xl text-[11px] font-bold border transition-all active:scale-95 flex items-center gap-1 ${
+                    isSelected
+                      ? isRightNow
+                        ? 'border-amber-400 bg-amber-500/25 text-amber-200 shadow-[0_0_14px_rgba(245,158,11,0.4)]'
+                        : 'border-rose-500/60 bg-rose-500/20 text-rose-200 shadow-[0_0_12px_rgba(244,63,94,0.25)]'
+                      : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {isRightNow && <Zap className="w-3 h-3 text-amber-400" />}
+                  <span>{l}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 

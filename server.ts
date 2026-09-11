@@ -1,20 +1,56 @@
+// Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
+if ((globalThis as any).__dirname === '.') {
+  delete (globalThis as any).__dirname;
+}
+
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
+import http from 'http';
 import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
 import { store } from './src/db/store';
 import { QUEER_VENUES, getVenuesNearLocation, searchVenues } from './src/data/queerVenues';
 import { AURA_STICKERS } from './src/data/auraStickers';
 import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
-import { initStorage, uploadUserMedia, getLocalMediaFile } from './src/lib/storage';
+import { 
+  initStorage, 
+  uploadUserMedia, 
+  getLocalMediaFile,
+  processAndSaveMedia,
+  createUploadSession,
+  getUploadSession,
+  getMediaRecord,
+  getMediaFileForServing,
+  deleteMediaRecord
+} from './src/lib/storage';
+import { 
+  MEDIA_LIMITS, 
+  ALLOWED_PHOTO_MIMES, 
+  ALLOWED_AUDIO_MIMES, 
+  ALLOWED_VIDEO_MIMES 
+} from './src/config/mediaConfig';
+import { 
+  checkRateLimit, 
+  fetchSafeLinkMetadata, 
+  verifyMediaAccessToken, 
+  signMediaAccessToken 
+} from './src/lib/mediaSecurity';
+import { cloudBackupService } from './src/services/cloudBackupService';
+import {
+  verifyGooglePlayPurchase,
+  verifyAppleStoreKitTransaction,
+  handleGooglePlayRtdn,
+  handleAppleStoreKitWebhook,
+  restoreUserPurchases
+} from './src/services/billingService';
+import { BILLING_PLANS, STORE_PRODUCT_IDS } from './src/config/billingConfig';
 
 // Initialize Media Storage subsystem
 initStorage();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 8 * 1024 * 1024 } // 8 MB limit
+  limits: { fileSize: 35 * 1024 * 1024 } // 35 MB limit (supports up to 30 MB Star Video)
 });
 
 // Initialize Express App
@@ -32,19 +68,14 @@ app.use(
 );
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Hardened Production Security Headers Middleware
+// Production Security Headers Middleware (Nginx manages reverse-proxy CSP & framing)
 app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader(
     'Permissions-Policy',
     'camera=(self), microphone=(), payment=*, geolocation=(self)'
-  );
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; img-src 'self' https: data: blob:; font-src 'self' https: data:; connect-src 'self' https: wss:; worker-src 'self' blob:;"
   );
   if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production') {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
@@ -284,30 +315,324 @@ app.post('/api/auth/reset-password', authRateLimiter, (req: Request, res: Respon
   }
 });
 
-// Media: Secure Upload Endpoint (GCS / Private Container Storage)
-app.post('/api/media/upload', authenticateToken, upload.single('media'), async (req: AuthenticatedRequest, res: Response) => {
+// ============================================================================
+// RICH MEDIA BACKEND ENDPOINTS & ACCESS CONTROL
+// ============================================================================
+
+// 1. Upload Init: Allocate upload session & validate parameters before transfer
+app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No media file received. Please provide an image file.' });
+    const rateCheck = checkRateLimit(`upload_init_${req.user!.id}`, MEDIA_LIMITS.RATE_LIMITS.UPLOAD_INIT);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Media upload rate limit exceeded. Please wait a moment.' });
     }
 
-    const result = await uploadUserMedia(
-      req.file.buffer,
-      req.file.mimetype,
-      req.file.originalname,
-      req.user!.id
-    );
+    const { mediaType, mimeType, size, conversationId } = req.body;
+    if (!mediaType || !mimeType || typeof size !== 'number') {
+      return res.status(400).json({ error: 'Missing required parameters: mediaType, mimeType, size.' });
+    }
+
+    const category = mediaType as 'photo' | 'voice' | 'star_video' | 'profile_photo';
+    if (!['photo', 'voice', 'star_video', 'profile_photo'].includes(category)) {
+      return res.status(400).json({ error: `Invalid mediaType: ${mediaType}.` });
+    }
+
+    if (conversationId) {
+      const conv = store.getConversation(conversationId);
+      if (!conv || !conv.participantIds.includes(req.user!.id)) {
+        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
+      }
+
+      const otherId = conv.participantIds.find(id => id !== req.user!.id);
+      if (otherId) {
+        if (store.isBlocked(req.user!.id, otherId)) {
+          return res.status(403).json({ error: 'Cannot upload media to a blocked conversation.' });
+        }
+        const otherUser = store.getUserById(otherId);
+        if (!otherUser || otherUser.status !== 'ACTIVE') {
+          return res.status(403).json({ error: 'Recipient account is not active.' });
+        }
+      }
+    }
+
+    const session = createUploadSession(req.user!.id, category, mimeType, size, conversationId);
+    const allowedMimes = (category === 'photo' || category === 'profile_photo')
+      ? ALLOWED_PHOTO_MIMES
+      : category === 'voice'
+      ? ALLOWED_AUDIO_MIMES
+      : ALLOWED_VIDEO_MIMES;
 
     res.json({
       success: true,
-      media: result
+      uploadId: session.uploadId,
+      maxBytes: session.maxSizeBytes,
+      allowedMimeTypes: allowedMimes,
+      expiresAt: session.expiresAt
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to initialize media upload.' });
+  }
+});
+
+// 2. Upload Complete: Process and store verified media binary
+app.post('/api/media/upload/complete', authenticateToken, upload.single('media'), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rateCheck = checkRateLimit(`upload_comp_${req.user!.id}`, MEDIA_LIMITS.RATE_LIMITS.UPLOAD_COMPLETE);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Media upload rate limit exceeded. Please wait a moment.' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No media file received.' });
+    }
+
+    const { uploadId, conversationId, caption, duration } = req.body;
+    let category: 'photo' | 'voice' | 'star_video' | 'profile_photo' = 'photo';
+    let targetConvId = conversationId;
+
+    if (uploadId) {
+      const session = getUploadSession(uploadId);
+      if (!session) {
+        return res.status(400).json({ error: 'Invalid or expired upload session.' });
+      }
+      if (session.userId !== req.user!.id) {
+        return res.status(403).json({ error: 'Upload session belongs to another user.' });
+      }
+      category = session.category;
+      targetConvId = session.conversationId || targetConvId;
+    } else if (req.body.category) {
+      category = req.body.category;
+    }
+
+    if (category === 'star_video') {
+      const vidRate = checkRateLimit(`vid_comp_${req.user!.id}`, MEDIA_LIMITS.RATE_LIMITS.STAR_VIDEO_UPLOAD);
+      if (!vidRate.allowed) {
+        return res.status(429).json({ error: 'Star Video upload limit reached. Maximum 6 videos per minute.' });
+      }
+    }
+
+    const record = await processAndSaveMedia({
+      buffer: req.file.buffer,
+      clientMime: req.file.mimetype,
+      category,
+      userId: req.user!.id,
+      conversationId: targetConvId,
+      caption,
+      clientDuration: duration ? Number(duration) : undefined
+    });
+
+    res.json({
+      success: true,
+      media: {
+        mediaId: record.id,
+        mimeType: record.mimeType,
+        size: record.size,
+        width: record.width,
+        height: record.height,
+        duration: record.duration,
+        thumbnailRef: record.thumbnailFilename ? `/api/media/${record.id}?thumb=true` : undefined,
+        url: `/api/media/${record.id}`
+      }
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Media processing failed.' });
+  }
+});
+
+// 3. Unified Media Upload (Direct or single-step upload)
+app.post('/api/media/upload', authenticateToken, upload.single('media'), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rateCheck = checkRateLimit(`upload_comp_${req.user!.id}`, MEDIA_LIMITS.RATE_LIMITS.UPLOAD_COMPLETE);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Upload rate limit exceeded. Please wait a moment.' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No media file received.' });
+    }
+
+    let category: 'photo' | 'voice' | 'star_video' | 'profile_photo' = 'photo';
+    if (req.body.category && ['photo', 'voice', 'star_video', 'profile_photo'].includes(req.body.category)) {
+      category = req.body.category;
+    } else if (req.file.mimetype.startsWith('audio/')) {
+      category = 'voice';
+    } else if (req.file.mimetype.startsWith('video/')) {
+      category = 'star_video';
+    }
+
+    const record = await processAndSaveMedia({
+      buffer: req.file.buffer,
+      clientMime: req.file.mimetype,
+      category,
+      userId: req.user!.id,
+      conversationId: req.body.conversationId,
+      caption: req.body.caption,
+      clientDuration: req.body.duration ? Number(req.body.duration) : undefined
+    });
+
+    res.json({
+      success: true,
+      media: {
+        mediaId: record.id,
+        url: `/api/media/${record.id}`,
+        thumbnailUrl: record.thumbnailFilename ? `/api/media/${record.id}?thumb=true` : undefined,
+        filename: record.filename,
+        size: record.size,
+        mimeType: record.mimeType,
+        width: record.width,
+        height: record.height,
+        duration: record.duration
+      }
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Media upload failed.' });
   }
 });
 
-// Media: Authenticated / Sandboxed Delivery Endpoint
+// 4. Secure Media Access & Delivery Endpoint with Strict Headers
+app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
+  try {
+    const mediaId = String(req.params.mediaId);
+    const isThumb = req.query.thumb === 'true';
+
+    // 1. Resolve authentication (Bearer token or signed access token)
+    let requestingUserId: string | null = null;
+    const authHeader = req.headers['authorization'];
+    if (authHeader) {
+      const cleanToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+      const user = store.getUserByToken(cleanToken);
+      if (user && user.status === 'ACTIVE') {
+        requestingUserId = user.id;
+      }
+    }
+
+    if (!requestingUserId && req.query.token) {
+      const token = String(req.query.token);
+      const signedPayload = verifyMediaAccessToken(token);
+      if (signedPayload && signedPayload.mediaId === mediaId) {
+        const user = store.getUserById(signedPayload.userId);
+        if (user && user.status === 'ACTIVE') {
+          requestingUserId = user.id;
+        }
+      } else {
+        const user = store.getUserByToken(token);
+        if (user && user.status === 'ACTIVE') {
+          requestingUserId = user.id;
+        }
+      }
+    }
+
+    if (!requestingUserId) {
+      return res.status(401).json({ error: 'Authentication required to access media.' });
+    }
+
+    const dlRate = checkRateLimit(`dl_${requestingUserId}`, MEDIA_LIMITS.RATE_LIMITS.MEDIA_DOWNLOAD);
+    if (!dlRate.allowed) {
+      return res.status(429).json({ error: 'Download rate limit exceeded.' });
+    }
+
+    // 2. Fetch media record
+    const record = getMediaRecord(mediaId);
+    if (!record || record.deletedAt) {
+      return res.status(404).json({ error: 'Media not found or has been deleted.' });
+    }
+
+    // 3. Conversation access control & block check
+    if (record.conversationId) {
+      const conv = store.getConversation(record.conversationId);
+      if (!conv || !conv.participantIds.includes(requestingUserId)) {
+        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
+      }
+
+      const otherId = conv.participantIds.find(id => id !== requestingUserId);
+      if (otherId) {
+        if (store.isBlocked(requestingUserId, otherId)) {
+          return res.status(403).json({ error: 'Access blocked by user policy.' });
+        }
+        const otherUser = store.getUserById(otherId);
+        if (!otherUser || otherUser.status !== 'ACTIVE') {
+          return res.status(403).json({ error: 'Participant account is inactive.' });
+        }
+      }
+
+      const msgs = store.getMessages(record.conversationId, requestingUserId);
+      const hasActiveMessage = msgs.some(m => 
+        m.photo?.mediaId === mediaId || 
+        m.voice?.mediaId === mediaId || 
+        m.starVideo?.mediaId === mediaId || 
+        m.media?.url?.includes(mediaId)
+      );
+      if (!hasActiveMessage && record.ownerId !== requestingUserId) {
+        return res.status(404).json({ error: 'Media is no longer accessible or was deleted.' });
+      }
+    }
+
+    // 4. Serve file with mandatory security headers
+    const fileInfo = getMediaFileForServing(mediaId, isThumb);
+    if (!fileInfo) {
+      return res.status(404).json({ error: 'Media binary file not found.' });
+    }
+
+    res.setHeader('Content-Type', fileInfo.mimeType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Content-Disposition', 'inline; filename="safe_media"');
+    res.setHeader('Cache-Control', 'private, no-transform, max-age=3600');
+    res.sendFile(fileInfo.path);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to deliver media.' });
+  }
+});
+
+// 5. Generate Signed Media Access Token for Expiring Links
+app.get('/api/media/:mediaId/sign', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  const mediaId = String(req.params.mediaId);
+  const record = getMediaRecord(mediaId);
+  if (!record) {
+    return res.status(404).json({ error: 'Media not found.' });
+  }
+  const signedToken = signMediaAccessToken(mediaId, req.user!.id, 900); // 15 min TTL
+  res.json({
+    token: signedToken,
+    url: `/api/media/${mediaId}?token=${signedToken}`
+  });
+});
+
+// 6. Delete Media Endpoint
+app.delete('/api/media/:mediaId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const mediaId = String(req.params.mediaId);
+    const success = deleteMediaRecord(mediaId, req.user!.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Media not found or already deleted.' });
+    }
+    res.json({ success: true, message: 'Media successfully deleted.' });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message || 'Failed to delete media.' });
+  }
+});
+
+// 7. SSRF-Protected Link Preview Endpoint
+app.post('/api/media/link-preview', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rateCheck = checkRateLimit(`link_prev_${req.user!.id}`, MEDIA_LIMITS.RATE_LIMITS.LINK_PREVIEW);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Link preview rate limit exceeded. Please wait a moment.' });
+    }
+
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'URL parameter is required.' });
+    }
+
+    const preview = await fetchSafeLinkMetadata(url);
+    res.json({ success: true, preview });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Could not generate link preview.' });
+  }
+});
+
+// Media: Authenticated / Sandboxed Delivery Endpoint (Legacy path support)
 app.get('/api/media/files/:filename', (req: Request, res: Response) => {
   const filename = Array.isArray(req.params.filename) ? req.params.filename[0] : (req.params.filename as string);
   const fileInfo = getLocalMediaFile(filename);
@@ -388,11 +713,16 @@ app.get('/api/profiles', (req: Request, res: Response) => {
 app.get('/api/profiles/:userId', (req: Request, res: Response) => {
   try {
     const userId = String(req.params.userId);
-    const target = store.getUserById(userId);
-    if (!target || target.status !== 'ACTIVE') {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
+    const user = token ? store.getUserByToken(token) : null;
+    const requestingUserId = user ? user.id : undefined;
+
+    const profile = store.getProfileById(userId, requestingUserId);
+    if (!profile) {
       return res.status(404).json({ error: 'User profile not found' });
     }
-    res.json({ profile: target.profile });
+    res.json({ profile });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to retrieve profile' });
   }
@@ -573,25 +903,148 @@ app.get('/api/conversations/:conversationId/messages', authenticateToken, (req: 
 app.post('/api/conversations/:conversationId/messages', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
-    const { text, photoUrl, type, media, linkPreview, location, stickerId, stickerUrl, stickerName } = req.body;
+    const {
+      text,
+      photoUrl,
+      type,
+      media,
+      linkPreview,
+      location,
+      locationPayload,
+      photo,
+      link,
+      stickerPayload,
+      voice,
+      starVideo,
+      stickerId,
+      stickerUrl,
+      stickerName,
+      ttlSeconds,
+      isPermanent,
+      excludeFromBackup,
+      disableAutoBackup,
+      tapType,
+      vaultAction
+    } = req.body;
 
-    const messageType = type || (photoUrl ? 'PHOTO' : 'TEXT');
+    const messageType = type || (photoUrl || photo ? 'PHOTO' : 'TEXT');
 
-    if (!text?.trim() && !photoUrl && !media && !location && !stickerId) {
-      return res.status(400).json({ error: 'Message content is required.' });
+    // 1. Validate Photo Message
+    if (messageType === 'PHOTO') {
+      if (!photo && !photoUrl && !media) {
+        return res.status(400).json({ error: 'Photo payload or media URL is required.' });
+      }
+      if (photo?.mediaId) {
+        const rec = getMediaRecord(photo.mediaId);
+        if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+          return res.status(400).json({ error: 'Invalid or unauthorized photo mediaId.' });
+        }
+      }
     }
 
-    let finalStickerUrl = stickerUrl;
-    let finalStickerName = stickerName;
+    // 2. Validate Link Message
+    if (messageType === 'LINK') {
+      const targetUrl = link?.normalizedUrl || linkPreview?.url || text?.trim();
+      if (!targetUrl) {
+        return res.status(400).json({ error: 'Link URL is required for link messages.' });
+      }
+      try {
+        const parsed = new URL(targetUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          return res.status(400).json({ error: 'Forbidden link protocol. Only HTTP and HTTPS are permitted.' });
+        }
+      } catch (e) {
+        return res.status(400).json({ error: 'Invalid URL provided in link message.' });
+      }
+    }
 
-    // Secure sticker validation
-    if (messageType === 'STICKER' && stickerId) {
-      const validSticker = AURA_STICKERS.find(s => s.id === stickerId);
+    // 3. Validate Location Message & Privacy Mode
+    let finalLocationPayload = locationPayload;
+    let finalLocation = location;
+    if (messageType === 'LOCATION') {
+      const loc = locationPayload || location;
+      if (!loc) {
+        return res.status(400).json({ error: 'Location coordinates are required.' });
+      }
+      const lat = loc.latitude !== undefined ? loc.latitude : loc.lat;
+      const lng = loc.longitude !== undefined ? loc.longitude : loc.lng;
+
+      if (typeof lat !== 'number' || typeof lng !== 'number' || isNaN(lat) || isNaN(lng)) {
+        return res.status(400).json({ error: 'Latitude and Longitude must be valid numbers.' });
+      }
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return res.status(400).json({ error: 'Coordinates are out of geographical bounds.' });
+      }
+
+      const precisionMode = loc.precisionMode === 'exact' ? 'exact' : 'approximate';
+      let safeLat = lat;
+      let safeLng = lng;
+      if (precisionMode === 'approximate') {
+        // Safe privacy fuzzing: round to ~1km precision
+        safeLat = Math.round(lat * 100) / 100;
+        safeLng = Math.round(lng * 100) / 100;
+      }
+
+      finalLocationPayload = {
+        latitude: safeLat,
+        longitude: safeLng,
+        precisionMode,
+        label: loc.label || loc.placeName || loc.approximateArea,
+        placeName: loc.placeName || loc.label || loc.approximateArea,
+        createdAt: new Date().toISOString()
+      };
+      finalLocation = {
+        lat: safeLat,
+        lng: safeLng,
+        approximateArea: finalLocationPayload.label
+      };
+    }
+
+    // 4. Validate Sticker Message
+    let finalStickerUrl = stickerUrl || stickerPayload?.url;
+    let finalStickerName = stickerName || stickerPayload?.name;
+    const finalStickerId = stickerId || stickerPayload?.stickerId;
+
+    if (messageType === 'STICKER') {
+      if (!finalStickerId) {
+        return res.status(400).json({ error: 'Sticker ID is required for sticker messages.' });
+      }
+      const validSticker = AURA_STICKERS.find(s => s.id === finalStickerId);
       if (!validSticker) {
         return res.status(400).json({ error: 'Invalid sticker.' });
       }
       finalStickerUrl = validSticker.url;
       finalStickerName = validSticker.name;
+    }
+
+    // 5. Validate Voice Message
+    if (messageType === 'VOICE') {
+      if (!voice?.mediaId) {
+        return res.status(400).json({ error: 'Voice payload requires a verified mediaId.' });
+      }
+      const rec = getMediaRecord(voice.mediaId);
+      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+        return res.status(400).json({ error: 'Invalid or unauthorized voice mediaId.' });
+      }
+    }
+
+    // 6. Validate Star Video Message
+    if (messageType === 'STAR_VIDEO') {
+      if (!starVideo?.mediaId) {
+        return res.status(400).json({ error: 'Star Video payload requires a verified mediaId.' });
+      }
+      const rec = getMediaRecord(starVideo.mediaId);
+      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+        return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
+      }
+      if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
+        return res.status(400).json({ error: `Star Video exceeds maximum length of ${MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS} seconds.` });
+      }
+    }
+
+    // 7. Generic content requirement check
+    if (!text?.trim() && !photoUrl && !photo && !media && !finalLocation && !finalStickerId && !voice && !starVideo && !tapType && !vaultAction && !link && !linkPreview) {
+      return res.status(400).json({ error: 'Message content is required.' });
     }
 
     const message = store.sendMessage(req.user!.id, conversationId, {
@@ -600,14 +1053,136 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, (req:
       photoUrl,
       media,
       linkPreview,
-      location,
-      stickerId,
+      location: finalLocation,
+      locationPayload: finalLocationPayload,
+      photo,
+      link,
+      stickerPayload,
+      voice,
+      starVideo,
+      stickerId: finalStickerId,
       stickerUrl: finalStickerUrl,
-      stickerName: finalStickerName
+      stickerName: finalStickerName,
+      ttlSeconds: typeof ttlSeconds === 'number' ? ttlSeconds : undefined,
+      isPermanent: Boolean(isPermanent),
+      excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
+      disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined,
+      tapType,
+      vaultAction
     });
     res.status(201).json({ message });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to send message' });
+  }
+});
+
+// Conversations: Delete Message (Supports both for_me and for_everyone)
+app.delete('/api/conversations/:conversationId/messages/:messageId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const messageId = String(req.params.messageId);
+    const mode = (req.query.mode === 'for_everyone' || req.body?.mode === 'for_everyone') ? 'for_everyone' : 'for_me';
+
+    store.deleteMessage(conversationId, messageId, req.user!.id, mode);
+    res.json({ success: true, message: 'Message deleted successfully.' });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to delete message' });
+  }
+});
+
+// Update conversation retention and privacy settings
+app.patch('/api/conversations/:conversationId/settings', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const { messageTtlSeconds, excludeFromBackup, disableAutoBackup } = req.body;
+    const conversation = store.updateConversationSettings(conversationId, req.user!.id, {
+      messageTtlSeconds: typeof messageTtlSeconds === 'number' ? messageTtlSeconds : undefined,
+      excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
+      disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined
+    });
+    res.json({ success: true, conversation, settings: conversation.settings });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update conversation settings' });
+  }
+});
+
+// Toggle message permanent status (pin/save permanently)
+app.post('/api/conversations/:conversationId/messages/:messageId/permanent', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const messageId = String(req.params.messageId);
+    const message = store.toggleMessagePermanent(messageId, conversationId, req.user!.id);
+    res.json({ success: true, message });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to toggle message permanence' });
+  }
+});
+
+// Quick Taps (Aura Tap / Woof / Ogień)
+app.post('/api/taps', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { targetUserId, tapType } = req.body;
+    if (!targetUserId || !tapType) {
+      return res.status(400).json({ error: 'targetUserId and tapType are required' });
+    }
+    const result = store.sendTap(req.user!.id, targetUserId, tapType);
+    res.status(201).json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to send tap' });
+  }
+});
+
+// Vault Access: Request Access
+app.post('/api/vault/request', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { targetUserId } = req.body;
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'targetUserId is required' });
+    }
+    store.requestVaultAccess(req.user!.id, targetUserId);
+    const conv = store.getOrCreateConversation(req.user!.id, targetUserId);
+    const message = store.sendMessage(req.user!.id, conv.id, {
+      type: 'VAULT_ACTION',
+      vaultAction: 'REQUEST',
+      text: '📸 Poprosił o dostęp do Twojego prywatnego albumu'
+    });
+    res.json({ success: true, message });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to request vault access' });
+  }
+});
+
+// Vault Access: Grant / Revoke Access
+app.post('/api/vault/grant', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { targetUserId, grant } = req.body;
+    if (!targetUserId || grant === undefined) {
+      return res.status(400).json({ error: 'targetUserId and grant boolean are required' });
+    }
+    const isGranted = Boolean(grant);
+    store.grantVaultAccess(req.user!.id, targetUserId, isGranted);
+    const conv = store.getOrCreateConversation(req.user!.id, targetUserId);
+    const message = store.sendMessage(req.user!.id, conv.id, {
+      type: 'VAULT_ACTION',
+      vaultAction: isGranted ? 'GRANT' : 'REVOKE',
+      text: isGranted ? '🔓 Przyznał Ci dostęp do prywatnego albumu' : '🔒 Cofnął dostęp do prywatnego albumu'
+    });
+    res.json({ success: true, granted: isGranted, message });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update vault access' });
+  }
+});
+
+// Vault Access: Get Status
+app.get('/api/vault/status/:targetUserId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const targetUserId = String(req.params.targetUserId);
+    const hasAccess = store.hasVaultAccess(targetUserId, req.user!.id);
+    const requested = store.isVaultRequested(req.user!.id, targetUserId);
+    const iGrantedAccess = store.hasVaultAccess(req.user!.id, targetUserId);
+    res.json({ hasAccess, requested, iGrantedAccess });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to fetch vault status' });
   }
 });
 
@@ -699,6 +1274,29 @@ app.get('/api/gdpr/export', authenticateToken, (req: AuthenticatedRequest, res: 
     res.json(exportData);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to generate GDPR data export' });
+  }
+});
+
+// Automated Cloud Backup Service endpoints
+app.get('/api/backup/cloud/status', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const status = cloudBackupService.getStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch cloud backup status' });
+  }
+});
+
+app.post('/api/backup/cloud/run', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const backupRecord = await cloudBackupService.runAutomatedBackup();
+    res.json({
+      success: true,
+      backup: backupRecord,
+      message: `Automated cloud backup completed successfully. ${backupRecord.excludedDueToDisableAutoBackup} conversation(s) excluded via 'disableAutoBackup'.`
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to execute automated cloud backup' });
   }
 });
 
@@ -1152,6 +1750,134 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
   }
 });
 
+// ==========================================
+// STORE-COMPLIANT BILLING & ENTITLEMENT ROUTES
+// (Google Play Billing, Apple StoreKit 2, Unified Entitlements)
+// ==========================================
+
+// Get Store Products with localized pricing fallback
+app.get('/api/billing/products', (req: Request, res: Response) => {
+  const platform = req.query.platform || 'web';
+  const products = [
+    {
+      id: BILLING_PLANS.monthly.id,
+      tier: 'monthly',
+      title: BILLING_PLANS.monthly.fallbackTitle,
+      description: BILLING_PLANS.monthly.fallbackDescription,
+      localizedPrice: BILLING_PLANS.monthly.fallbackPrice || '',
+      billingPeriod: BILLING_PLANS.monthly.billingPeriod
+    },
+    {
+      id: BILLING_PLANS.three_month.id,
+      tier: 'three_month',
+      title: BILLING_PLANS.three_month.fallbackTitle,
+      description: BILLING_PLANS.three_month.fallbackDescription,
+      localizedPrice: BILLING_PLANS.three_month.fallbackPrice || '',
+      billingPeriod: BILLING_PLANS.three_month.billingPeriod
+    },
+    {
+      id: BILLING_PLANS.yearly.id,
+      tier: 'yearly',
+      title: BILLING_PLANS.yearly.fallbackTitle,
+      description: BILLING_PLANS.yearly.fallbackDescription,
+      localizedPrice: BILLING_PLANS.yearly.fallbackPrice || '',
+      billingPeriod: BILLING_PLANS.yearly.billingPeriod
+    }
+  ];
+  res.json({ success: true, platform, products });
+});
+
+// Get Current User Entitlements (Single source of truth)
+app.get('/api/billing/entitlements', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user!.id;
+  const entitlement = await store.getUserEntitlements(userId);
+  res.json({ success: true, entitlement });
+});
+
+// Google Play Billing Verification & Acknowledgment
+app.post('/api/billing/google-play/verify', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const { packageName, subscriptionId, purchaseToken } = req.body;
+  const userId = req.user!.id;
+
+  if (!subscriptionId || !purchaseToken) {
+    return res.status(400).json({ success: false, error: 'Missing subscriptionId or purchaseToken.' });
+  }
+
+  const result = await verifyGooglePlayPurchase({
+    packageName: packageName || 'app.aura.gay18',
+    subscriptionId,
+    purchaseToken,
+    userId
+  });
+
+  if (!result.valid) {
+    return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+  }
+
+  res.json({ success: true, entitlement: result.entitlement });
+});
+
+// Apple StoreKit 2 Transaction Verification
+app.post('/api/billing/apple-storekit/verify', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const { transactionJws } = req.body;
+  const userId = req.user!.id;
+
+  if (!transactionJws) {
+    return res.status(400).json({ success: false, error: 'Missing transactionJws.' });
+  }
+
+  const result = await verifyAppleStoreKitTransaction({
+    transactionJws,
+    userId
+  });
+
+  if (!result.valid) {
+    return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+  }
+
+  res.json({ success: true, entitlement: result.entitlement });
+});
+
+// Restore Purchases across devices
+app.post('/api/billing/restore', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const { receiptData, provider } = req.body;
+  const userId = req.user!.id;
+
+  const result = await restoreUserPurchases(userId, receiptData, provider);
+  res.json(result);
+});
+
+// Google Play RTDN Webhook (Cloud Pub/Sub Push)
+app.post('/api/billing/rtdn/google-play', async (req: Request, res: Response) => {
+  try {
+    const pubsubMsg = req.body.message;
+    if (!pubsubMsg) {
+      return res.status(400).json({ error: 'Invalid Pub/Sub payload' });
+    }
+    await handleGooglePlayRtdn(pubsubMsg);
+    // Always acknowledge to Pub/Sub with 200
+    res.status(200).send('OK');
+  } catch (err: any) {
+    console.error('[Google Play RTDN] Handler error:', err.message);
+    res.status(200).send('OK'); // Acknowledge to prevent infinite retry loops on malformed payloads
+  }
+});
+
+// Apple StoreKit 2 App Store Server Notifications V2 Webhook
+app.post('/api/billing/webhook/apple-storekit', async (req: Request, res: Response) => {
+  try {
+    const { signedPayload } = req.body;
+    if (!signedPayload) {
+      return res.status(400).json({ error: 'Missing signedPayload' });
+    }
+    await handleAppleStoreKitWebhook(signedPayload);
+    res.status(200).send('OK');
+  } catch (err: any) {
+    console.error('[Apple StoreKit Webhook] Handler error:', err.message);
+    res.status(200).send('OK');
+  }
+});
+
 // Admin: Analytics & Moderation Dashboard
 app.get('/api/admin/stats', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
   const stats = store.getAdminStats();
@@ -1286,17 +2012,34 @@ app.all('/api/*', (req: Request, res: Response) => {
 
 // Vite Server Integration (Dev vs Prod)
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));
+
+  const httpServer = http.createServer(app);
+
+  if (!isProduction) {
+    // Development mode: conditionally initialize Vite development server & HMR
+    delete (globalThis as any).__dirname;
+    const { createServer: createViteServer } = await import('vite');
     const isHmrDisabled = process.env.DISABLE_HMR === 'true';
+
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: isHmrDisabled ? false : undefined,
+        watch: isHmrDisabled ? null : undefined,
+        hmr: {
+          server: httpServer,
+          host: process.env.HMR_HOST || undefined,
+          port: process.env.HMR_PORT ? parseInt(process.env.HMR_PORT, 10) : undefined,
+          overlay: !isHmrDisabled,
+        },
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
+    // Production mode: serve pre-built static assets and index.html from dist without Vite
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
@@ -1304,8 +2047,10 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[AURA GAY 18+] Server actively running on http://0.0.0.0:${PORT}`);
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`[AURA GAY 18+] Server actively running on http://0.0.0.0:${PORT} (${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'})`);
   });
 }
 

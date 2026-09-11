@@ -24,10 +24,13 @@ import {
   RefreshCw,
   MapPin,
   CheckCircle,
-  Zap
+  Zap,
+  Crown
 } from 'lucide-react';
 import { AdSlot } from './ads';
 import { getAdConsent, saveAdConsent } from '../config/adsConfig';
+import { PremiumPaywallModal } from './billing/PremiumPaywallModal';
+import { billingClient } from '../services/billingClient';
 
 interface SettingsViewProps {
   currentUser: UserAccount;
@@ -46,6 +49,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const [upgrading, setUpgrading] = useState(false);
   const [upgradeUrl, setUpgradeUrl] = useState<string | null>(null);
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [restoringPurchases, setRestoringPurchases] = useState(false);
+  const [restoreFeedback, setRestoreFeedback] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [adConsent, setAdConsent] = useState(() => getAdConsent());
@@ -154,24 +160,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleCheckout = async () => {
-    setUpgrading(true);
+    setShowPaywall(true);
+  };
+
+  const handleRestorePurchases = async () => {
+    setRestoringPurchases(true);
+    setRestoreFeedback(null);
     try {
-      const res = await fetch('/api/payments/checkout-session', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`
-        },
-        body: JSON.stringify({ planId: 'aura_vip_monthly' })
-      });
-      const data = await res.json();
-      if (data.checkoutUrl) {
-        setUpgradeUrl(data.checkoutUrl);
+      const res = await billingClient.restorePurchases();
+      setRestoreFeedback(res.message || (res.success ? 'Purchases restored!' : 'No active subscriptions found.'));
+      if (res.success && res.entitlement) {
+        if (onUpdateUser) {
+          onUpdateUser({
+            ...currentUser,
+            isPremium: res.entitlement.premium,
+            profile: {
+              ...currentUser.profile,
+              isPremium: res.entitlement.premium
+            }
+          });
+        }
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setRestoreFeedback(err.message || 'Restoration failed.');
     } finally {
-      setUpgrading(false);
+      setRestoringPurchases(false);
     }
   };
 
@@ -395,27 +408,42 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
         </div>
 
-        {upgradeUrl ? (
-          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-center space-y-2">
-            <p className="text-xs font-bold text-emerald-300">Stripe checkout session ready!</p>
-            <a
-              href={upgradeUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-block px-4 py-2 rounded-xl bg-emerald-600 text-xs font-bold text-white shadow-lg shadow-emerald-950/40 hover:brightness-110 active:scale-95 transition"
-            >
-              Complete Subscription
-            </a>
+        {restoreFeedback && (
+          <div className="p-2.5 rounded-xl bg-violet-950/50 border border-violet-500/30 text-[11px] text-violet-200">
+            {restoreFeedback}
           </div>
-        ) : (
-          <button
-            onClick={handleCheckout}
-            disabled={upgrading}
-            className="w-full py-3 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-lg shadow-fuchsia-950/50 hover:brightness-110 active:scale-[0.98] transition-all duration-200"
-          >
-            {upgrading ? 'Preparing subscription...' : 'Unlock for $14.99 / mo'}
-          </button>
         )}
+
+        <div className="space-y-2 pt-1">
+          <button
+            id="btn-open-paywall-modal"
+            onClick={() => setShowPaywall(true)}
+            className="w-full py-3 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-lg shadow-fuchsia-950/50 hover:brightness-110 active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2"
+          >
+            <Crown className="w-4 h-4" />
+            <span>{currentUser.isPremium ? 'Change / View AURA VIP Plans' : 'Unlock AURA Premium'}</span>
+          </button>
+
+          <div className="flex items-center justify-between px-1 text-xs">
+            <button
+              id="btn-settings-restore-purchases"
+              disabled={restoringPurchases}
+              onClick={handleRestorePurchases}
+              className="text-violet-400 hover:text-violet-300 transition flex items-center gap-1.5 font-medium disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${restoringPurchases ? 'animate-spin' : ''}`} />
+              <span>{restoringPurchases ? 'Checking store...' : 'Restore Purchases'}</span>
+            </button>
+
+            <button
+              id="btn-settings-manage-subscription"
+              onClick={() => billingClient.openSubscriptionManagement()}
+              className="text-slate-400 hover:text-slate-200 transition font-medium"
+            >
+              Manage Subscription
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* GDPR Privacy & Consent Management (EU GDPR Article 7 & 9) */}
@@ -839,6 +867,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <p className="text-xs text-rose-200 font-medium">
               Are you sure? Under GDPR Article 17, this permanently and irreversibly erases your profile, chats, photos, and sessions.
             </p>
+            
+            {/* Mandatory Store Subscription Notice */}
+            <div className="p-2.5 rounded-xl bg-black/50 border border-amber-500/30 text-amber-200/90 text-[11px] text-left leading-relaxed space-y-1.5">
+              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                Store Subscription Notice:
+              </p>
+              <p>
+                Deleting your AURA account does <strong>NOT</strong> automatically cancel any active Google Play or Apple App Store subscriptions. Please cancel through your device store settings to prevent future renewal charges.
+              </p>
+              <button
+                type="button"
+                onClick={() => billingClient.openSubscriptionManagement()}
+                className="text-violet-300 underline font-semibold text-[11px] block mt-1 hover:text-white"
+              >
+                Open Store Subscription Settings
+              </button>
+            </div>
+
             <div className="flex gap-2">
               <button
                 onClick={() => setShowDeleteConfirm(false)}
@@ -857,6 +904,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Store-Compliant Premium Paywall Modal */}
+      <PremiumPaywallModal
+        isOpen={showPaywall}
+        onClose={() => setShowPaywall(false)}
+        onSuccess={(entitlement) => {
+          if (onUpdateUser) {
+            onUpdateUser({
+              ...currentUser,
+              isPremium: entitlement.premium,
+              profile: {
+                ...currentUser.profile,
+                isPremium: entitlement.premium
+              }
+            });
+          }
+        }}
+      />
     </div>
   );
 };

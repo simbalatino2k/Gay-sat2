@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
 import { getPostgresPool, initPostgresSchema, PostgresStoreAdapter } from './postgres';
+import { purgeAllUserMedia, deleteMediaRecord } from '../lib/storage';
 import {
   UserAccount,
   UserProfile,
@@ -22,7 +23,12 @@ import {
   ModerationNotice,
   DsaAppealRecord,
   DsaReportReason,
-  GdprExportData
+  GdprExportData,
+  TapType,
+  ConversationSettings,
+  CloudBackupRecord,
+  CloudBackupStatus,
+  UserEntitlement
 } from '../types';
 
 // Production database state: No pre-seeded bot accounts or synthetic profiles
@@ -52,6 +58,11 @@ class DataStore {
   private passwordResets: Map<string, { userId: string; expiresAt: string; used: boolean }> = new Map();
   private stripeEvents: Set<string> = new Set();
   private stripeSubscriptions: Map<string, { customerId: string; subscriptionId: string; planId: string; status: string; currentPeriodEnd?: string }> = new Map();
+  private localStoreSubscriptions: Map<string, UserEntitlement> = new Map(); // development fallback
+  private localStoreEvents: Set<string> = new Set();
+  private vaultAccess: Map<string, Set<string>> = new Map(); // ownerUserId -> Set of granted userIds
+  private vaultRequests: Map<string, Set<string>> = new Map(); // targetUserId -> Set of requester userIds
+  private cloudBackupHistory: CloudBackupRecord[] = [];
   private pgAdapter: PostgresStoreAdapter | null = null;
   private dbFilePath = path.join(process.cwd(), 'data', 'aura_db.json');
 
@@ -88,7 +99,9 @@ class DataStore {
         erasureAuditLog: this.erasureAuditLog,
         userPasswords: Array.from(this.userPasswords.entries()),
         passwordResets: Array.from(this.passwordResets.entries()),
-        stripeSubscriptions: Array.from(this.stripeSubscriptions.entries())
+        stripeSubscriptions: Array.from(this.stripeSubscriptions.entries()),
+        localStoreSubscriptions: Array.from(this.localStoreSubscriptions.entries()),
+        localStoreEvents: Array.from(this.localStoreEvents)
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(serialized, null, 2), 'utf-8');
     } catch (err) {
@@ -128,6 +141,8 @@ class DataStore {
       this.userPasswords = new Map(data.userPasswords || []);
       this.passwordResets = new Map(data.passwordResets || []);
       this.stripeSubscriptions = new Map(data.stripeSubscriptions || []);
+      this.localStoreSubscriptions = new Map(data.localStoreSubscriptions || []);
+      this.localStoreEvents = new Set(data.localStoreEvents || []);
       return true;
     } catch (err: any) {
       console.error('[DataStore] Critical error loading file store:', err.message);
@@ -674,6 +689,22 @@ class DataStore {
       currentPeriodEnd: user.premiumExpiresAt
     });
 
+    // Also record into unified store subscriptions
+    this.localStoreSubscriptions.set(userId, {
+      userId,
+      premium: isActive,
+      provider: 'stripe',
+      productId: planId,
+      planTier: planId === 'aura_vip_annual' ? 'yearly' : 'monthly',
+      status: isActive ? 'active' : 'canceled',
+      expiresAt: user.premiumExpiresAt,
+      autoRenew: isActive,
+      storeTransactionId: subscriptionId,
+      lastVerifiedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
     if (this.pgAdapter) {
       this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd).catch(err => {
         console.error('[Postgres] Subscription sync error:', err.message);
@@ -700,6 +731,126 @@ class DataStore {
       }
     }
     return null;
+  }
+
+  /**
+   * Unified Store Entitlement Resolution (Google Play, Apple StoreKit, Stripe).
+   * Backed by PostgreSQL in production and local store in development.
+   */
+  public async getUserEntitlements(userId: string): Promise<UserEntitlement> {
+    if (this.pgAdapter) {
+      const pgEnt = await this.pgAdapter.getStoreSubscriptionByUserId(userId);
+      if (pgEnt) return pgEnt;
+    }
+
+    const existing = this.localStoreSubscriptions.get(userId);
+    const user = this.users.get(userId);
+
+    if (existing) {
+      // Check for expiration (do not overwrite revoked status)
+      if (existing.status !== 'revoked' && existing.expiresAt && new Date(existing.expiresAt).getTime() < Date.now()) {
+        existing.premium = false;
+        existing.status = 'expired';
+        existing.updatedAt = new Date().toISOString();
+        if (user) {
+          user.isPremium = false;
+          user.profile.isPremium = false;
+        }
+      }
+      return existing;
+    }
+
+    // Fallback if legacy isPremium is set on user
+    const isPrem = !!user?.isPremium;
+    const defaultEntitlement: UserEntitlement = {
+      userId,
+      premium: isPrem,
+      provider: isPrem ? 'stripe' : 'none',
+      status: isPrem ? 'active' : 'none',
+      expiresAt: user?.premiumExpiresAt,
+      autoRenew: isPrem,
+      lastVerifiedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    this.localStoreSubscriptions.set(userId, defaultEntitlement);
+    return defaultEntitlement;
+  }
+
+  public async recordStoreEntitlement(entitlement: UserEntitlement): Promise<UserEntitlement> {
+    if (this.pgAdapter) {
+      await this.pgAdapter.upsertStoreSubscription(entitlement);
+    }
+
+    const user = this.users.get(entitlement.userId);
+    if (user) {
+      user.isPremium = entitlement.premium;
+      user.profile.isPremium = entitlement.premium;
+      if (entitlement.premium && entitlement.expiresAt) {
+        user.premiumExpiresAt = entitlement.expiresAt;
+        user.profile.premiumTier = entitlement.planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY';
+      } else if (!entitlement.premium) {
+        delete user.premiumExpiresAt;
+        user.profile.premiumTier = undefined;
+      }
+      user.updatedAt = new Date().toISOString();
+      this.users.set(entitlement.userId, user);
+    }
+
+    this.localStoreSubscriptions.set(entitlement.userId, entitlement);
+    this.saveToDisk();
+    return entitlement;
+  }
+
+  public async findUserByPurchaseTokenHash(tokenHash: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const uid = await this.pgAdapter.findUserByPurchaseTokenHash(tokenHash);
+      if (uid) return this.getUserById(uid) || ({ id: uid } as any);
+    }
+    for (const [userId, ent] of this.localStoreSubscriptions.entries()) {
+      if (ent.purchaseTokenHash === tokenHash) {
+        return this.users.get(userId) || ({ id: userId } as any);
+      }
+    }
+    return null;
+  }
+
+  public async findUserByOriginalTransactionId(origId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const uid = await this.pgAdapter.findUserByOriginalTransactionId(origId);
+      if (uid) return this.getUserById(uid) || ({ id: uid } as any);
+    }
+    for (const [userId, ent] of this.localStoreSubscriptions.entries()) {
+      if (ent.originalTransactionId === origId) {
+        return this.users.get(userId) || ({ id: userId } as any);
+      }
+    }
+    return null;
+  }
+
+  public async isStoreEventProcessed(provider: string, externalEventId: string): Promise<boolean> {
+    if (this.pgAdapter) {
+      return this.pgAdapter.isStoreEventProcessed(provider, externalEventId);
+    }
+    const key = `${provider}:${externalEventId}`;
+    return this.localStoreEvents.has(key);
+  }
+
+  public async recordStoreBillingEvent(
+    id: string,
+    provider: string,
+    externalEventId: string,
+    eventType: string,
+    metadata?: any
+  ): Promise<boolean> {
+    if (this.pgAdapter) {
+      return this.pgAdapter.recordStoreBillingEvent(id, provider, externalEventId, eventType, metadata);
+    }
+    const key = `${provider}:${externalEventId}`;
+    this.localStoreEvents.add(key);
+    this.saveToDisk();
+    return true;
   }
 
   public getUserById(userId: string): UserAccount | null {
@@ -731,7 +882,7 @@ class DataStore {
       return null;
     }
 
-    return this.sanitizeProfilePrivacy(targetUser.profile);
+    return this.sanitizeProfilePrivacy(targetUser.profile, requestingUserId);
   }
 
   // --- Profile Methods ---
@@ -869,9 +1020,16 @@ class DataStore {
     const userConvs = Array.from(this.conversations.values()).filter(c => c.participantIds.includes(userId));
     const allMessages: Message[] = [];
     userConvs.forEach(c => {
+      // Excluded from backup by conversation-level privacy setting or Disable Auto-Backup
+      if (c.excludeFromBackup || c.disableAutoBackup || c.settings?.excludeFromBackup || c.settings?.disableAutoBackup) return;
       const msgs = this.messages.get(c.id) || [];
+      const now = Date.now();
       msgs.forEach(m => {
-        if (m.senderId === userId) {
+        // Exclude messages flagged as excludeFromBackup, disableAutoBackup or expired
+        if (m.senderId === userId && !m.excludeFromBackup && !m.disableAutoBackup) {
+          if (m.expiresAt && !m.isPermanent && new Date(m.expiresAt).getTime() <= now) {
+            return;
+          }
           allMessages.push(m);
         }
       });
@@ -917,6 +1075,134 @@ class DataStore {
     return {
       ...payloadWithoutChecksum,
       checksumSha256
+    };
+  }
+
+  /**
+   * Generates an automated cloud backup snapshot of the system state,
+   * strictly respecting conversation-level and message-level 'disableAutoBackup' flags.
+   * Any conversation with disableAutoBackup (or excludeFromBackup) is completely excluded.
+   */
+  public performAutomatedCloudBackup(automated: boolean = true): CloudBackupRecord {
+    const backupId = `cb-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const timestamp = new Date().toISOString();
+
+    const allConversations = Array.from(this.conversations.values());
+    const excludedConversationIds: string[] = [];
+    const eligibleConversations: Conversation[] = [];
+    const backedUpMessages: Message[] = [];
+    const now = Date.now();
+
+    for (const conv of allConversations) {
+      const isAutoBackupDisabled = !!(
+        conv.disableAutoBackup ||
+        conv.settings?.disableAutoBackup ||
+        conv.excludeFromBackup ||
+        conv.settings?.excludeFromBackup
+      );
+
+      if (isAutoBackupDisabled) {
+        excludedConversationIds.push(conv.id);
+        continue;
+      }
+
+      eligibleConversations.push(conv);
+
+      const convMessages = this.messages.get(conv.id) || [];
+      for (const msg of convMessages) {
+        if (msg.disableAutoBackup || msg.excludeFromBackup) {
+          continue;
+        }
+        if (msg.expiresAt && !msg.isPermanent && new Date(msg.expiresAt).getTime() <= now) {
+          continue;
+        }
+        backedUpMessages.push(msg);
+      }
+    }
+
+    const backupPayload = {
+      backupId,
+      timestamp,
+      automated,
+      metadata: {
+        totalUsers: this.users.size,
+        totalConversations: allConversations.length,
+        backedUpConversationsCount: eligibleConversations.length,
+        excludedConversationsCount: excludedConversationIds.length,
+        backedUpMessagesCount: backedUpMessages.length
+      },
+      conversations: eligibleConversations,
+      messages: backedUpMessages,
+      matches: this.matches,
+      likes: this.likes,
+      moments: this.moments
+    };
+
+    const serialized = JSON.stringify(backupPayload);
+    const checksumSha256 = crypto.createHash('sha256').update(serialized).digest('hex');
+
+    const backupDir = path.join(process.cwd(), 'data', 'backups');
+    let backupFilePath: string | undefined;
+    let backupSizeBytes: number | undefined;
+
+    try {
+      if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+      }
+      backupFilePath = path.join(backupDir, `cloud_backup_${backupId}.json`);
+      fs.writeFileSync(backupFilePath, serialized, 'utf-8');
+      backupSizeBytes = Buffer.byteLength(serialized, 'utf-8');
+    } catch (err) {
+      console.warn('[DataStore] Notice: Unable to write local backup file (retaining in-memory snapshot):', err);
+    }
+
+    const record: CloudBackupRecord = {
+      backupId,
+      timestamp,
+      status: 'SUCCESS',
+      totalConversations: allConversations.length,
+      backedUpConversations: eligibleConversations.length,
+      excludedConversations: excludedConversationIds.length,
+      excludedDueToDisableAutoBackup: excludedConversationIds.length,
+      totalMessagesBackedUp: backedUpMessages.length,
+      checksumSha256,
+      backupSizeBytes,
+      backupFilePath,
+      automated,
+      excludedConversationIds
+    };
+
+    this.cloudBackupHistory.unshift(record);
+    if (this.cloudBackupHistory.length > 50) {
+      this.cloudBackupHistory.pop();
+    }
+
+    return record;
+  }
+
+  public getLatestCloudBackup(): CloudBackupRecord | null {
+    return this.cloudBackupHistory[0] || null;
+  }
+
+  public getCloudBackupHistory(): CloudBackupRecord[] {
+    return [...this.cloudBackupHistory];
+  }
+
+  public getConversationsWithAutoBackupDisabled(): string[] {
+    return Array.from(this.conversations.values())
+      .filter(c => c.disableAutoBackup || c.settings?.disableAutoBackup || c.excludeFromBackup || c.settings?.excludeFromBackup)
+      .map(c => c.id);
+  }
+
+  public getCloudBackupStatus(): CloudBackupStatus {
+    const totalConversations = this.conversations.size;
+    const disabledCount = this.getConversationsWithAutoBackupDisabled().length;
+    return {
+      serviceActive: true,
+      lastBackup: this.getLatestCloudBackup(),
+      totalConversations,
+      conversationsWithAutoBackupDisabled: disabledCount,
+      historyCount: this.cloudBackupHistory.length
     };
   }
 
@@ -1015,11 +1301,20 @@ class DataStore {
       if (uid === userId) this.tokens.delete(tok);
     }
 
+    this.localStoreSubscriptions.delete(userId);
+
     this.erasureAuditLog.push({
       hashId: userHash,
       erasedAt: new Date().toISOString(),
       reason: 'GDPR_ART_17_RIGHT_TO_ERASURE'
     });
+
+    // GDPR Right to Erasure: Purge all uploaded binary media and records
+    try {
+      purgeAllUserMedia(userId);
+    } catch (e) {
+      // ignore
+    }
 
     this.saveToDisk();
     return true;
@@ -1246,8 +1541,25 @@ class DataStore {
    * - APPROXIMATE (Default): applies deterministic ~1.5km fuzzy offset
    * Never exposes exact physical address to other users.
    */
-  public sanitizeProfilePrivacy(profile: UserProfile): UserProfile {
+  public sanitizeProfilePrivacy(profile: UserProfile, viewerUserId?: string): UserProfile {
     const privacy = profile.locationPrivacy || 'APPROXIMATE';
+    const isOwner = viewerUserId && (viewerUserId === profile.userId || viewerUserId === profile.id);
+    const hasVault = isOwner || (viewerUserId ? this.hasVaultAccess(profile.userId, viewerUserId) : false);
+
+    const sanitizePhotos = (photos: any[]) => {
+      return (photos || []).map(p => {
+        if (p.isPrivate && !hasVault) {
+          return {
+            ...p,
+            isLocked: true
+          };
+        }
+        return {
+          ...p,
+          isLocked: false
+        };
+      });
+    };
 
     if (privacy === 'HIDDEN') {
       const copy = { ...profile };
@@ -1256,6 +1568,7 @@ class DataStore {
       copy.locationPrivacy = 'HIDDEN';
       copy.approximateArea = 'Location Hidden';
       copy.distanceKm = Math.round(profile.distanceKm || 0);
+      copy.photos = sanitizePhotos(profile.photos);
       return copy;
     }
 
@@ -1270,12 +1583,14 @@ class DataStore {
       if (copy.lng !== undefined) {
         copy.lng = Math.round(copy.lng * 1000) / 1000;
       }
+      copy.photos = sanitizePhotos(profile.photos);
       return copy;
     }
 
     // Default: APPROXIMATE
     const copy = { ...profile };
     copy.locationPrivacy = 'APPROXIMATE';
+    copy.photos = sanitizePhotos(profile.photos);
 
     if (profile.lat !== undefined && profile.lng !== undefined) {
       let hash = 0;
@@ -1415,6 +1730,42 @@ class DataStore {
     return report;
   }
 
+  // --- Vault Access Control ---
+  public grantVaultAccess(ownerId: string, targetUserId: string, grant: boolean): boolean {
+    if (!this.vaultAccess.has(ownerId)) {
+      this.vaultAccess.set(ownerId, new Set());
+    }
+    const granted = this.vaultAccess.get(ownerId)!;
+    if (grant) {
+      granted.add(targetUserId);
+      if (this.vaultRequests.has(ownerId)) {
+        this.vaultRequests.get(ownerId)!.delete(targetUserId);
+      }
+    } else {
+      granted.delete(targetUserId);
+    }
+    this.saveToDisk();
+    return grant;
+  }
+
+  public requestVaultAccess(requesterId: string, targetUserId: string): boolean {
+    if (!this.vaultRequests.has(targetUserId)) {
+      this.vaultRequests.set(targetUserId, new Set());
+    }
+    this.vaultRequests.get(targetUserId)!.add(requesterId);
+    this.saveToDisk();
+    return true;
+  }
+
+  public hasVaultAccess(ownerId: string, viewerUserId: string): boolean {
+    if (ownerId === viewerUserId) return true;
+    return !!this.vaultAccess.get(ownerId)?.has(viewerUserId);
+  }
+
+  public isVaultRequested(requesterId: string, targetUserId: string): boolean {
+    return !!this.vaultRequests.get(targetUserId)?.has(requesterId);
+  }
+
   // --- Conversations & Messaging ---
   public getOrCreateConversation(userAId: string, userBId: string): Conversation {
     const convKey = [userAId, userBId].sort().join('_');
@@ -1431,7 +1782,7 @@ class DataStore {
         id: `conv-${Date.now()}`,
         participantIds: [userAId, userBId],
         unreadCount: 0,
-        otherParticipant: otherUser.profile
+        otherParticipant: this.sanitizeProfilePrivacy(otherUser.profile, userAId)
       };
       this.conversations.set(conv.id, conv);
       this.messages.set(conv.id, []);
@@ -1459,7 +1810,11 @@ class DataStore {
       })
       .map(c => {
         const otherId = c.participantIds.find(id => id !== userId)!;
-        const otherProfile = this.users.get(otherId)!.profile;
+        const otherProfile = this.sanitizeProfilePrivacy(this.users.get(otherId)!.profile, userId);
+        
+        // Prune expired messages for this conversation
+        this.pruneExpiredMessages(c.id);
+
         const convMsgs = this.messages.get(c.id) || [];
         const lastMsg = convMsgs[convMsgs.length - 1];
         const unreadCount = convMsgs.filter(m => m.receiverId === userId && m.status !== 'READ').length;
@@ -1468,7 +1823,10 @@ class DataStore {
           ...c,
           otherParticipant: otherProfile,
           lastMessage: lastMsg,
-          unreadCount
+          unreadCount,
+          vaultAccessGranted: this.hasVaultAccess(userId, otherId),
+          vaultAccessReceived: this.hasVaultAccess(otherId, userId),
+          vaultRequested: this.isVaultRequested(userId, otherId)
         };
       })
       .sort((a, b) => {
@@ -1476,6 +1834,85 @@ class DataStore {
         const tB = b.lastMessage ? new Date(b.lastMessage.createdAt).getTime() : 0;
         return tB - tA;
       });
+  }
+
+  public getConversation(conversationId: string): Conversation | null {
+    return this.conversations.get(conversationId) || null;
+  }
+
+  public updateConversationSettings(
+    conversationId: string,
+    userId: string,
+    settings: { messageTtlSeconds?: number; excludeFromBackup?: boolean; disableAutoBackup?: boolean }
+  ): Conversation {
+    const conv = this.conversations.get(conversationId);
+    if (!conv || !conv.participantIds.includes(userId)) {
+      throw new Error('Unauthorized conversation access');
+    }
+    if (!conv.settings) {
+      conv.settings = {};
+    }
+    if (settings.messageTtlSeconds !== undefined) {
+      conv.messageTtlSeconds = settings.messageTtlSeconds;
+      conv.settings.messageTtlSeconds = settings.messageTtlSeconds;
+    }
+    if (settings.excludeFromBackup !== undefined) {
+      conv.excludeFromBackup = settings.excludeFromBackup;
+      conv.settings.excludeFromBackup = settings.excludeFromBackup;
+    }
+    if (settings.disableAutoBackup !== undefined) {
+      conv.disableAutoBackup = settings.disableAutoBackup;
+      conv.settings.disableAutoBackup = settings.disableAutoBackup;
+      if (settings.disableAutoBackup) {
+        conv.excludeFromBackup = true;
+        conv.settings.excludeFromBackup = true;
+      }
+    }
+    this.conversations.set(conversationId, conv);
+    this.saveToDisk();
+    return conv;
+  }
+
+  public toggleMessagePermanent(messageId: string, conversationId: string, userId: string): Message {
+    const conv = this.conversations.get(conversationId);
+    if (!conv || !conv.participantIds.includes(userId)) {
+      throw new Error('Unauthorized conversation access');
+    }
+    const msgs = this.messages.get(conversationId) || [];
+    const msg = msgs.find(m => m.id === messageId);
+    if (!msg) {
+      throw new Error('Message not found');
+    }
+    msg.isPermanent = !msg.isPermanent;
+    if (msg.isPermanent) {
+      delete msg.expiresAt;
+    } else if (msg.ttlSeconds && msg.ttlSeconds > 0) {
+      msg.expiresAt = new Date(new Date(msg.createdAt).getTime() + msg.ttlSeconds * 1000).toISOString();
+    }
+    this.saveToDisk();
+    return msg;
+  }
+
+  public pruneExpiredMessages(conversationId: string): void {
+    const msgs = this.messages.get(conversationId);
+    if (!msgs || msgs.length === 0) return;
+
+    const now = Date.now();
+    const active = msgs.filter(m => {
+      if (m.isPermanent) return true;
+      if (!m.expiresAt) return true;
+      return new Date(m.expiresAt).getTime() > now;
+    });
+
+    if (active.length !== msgs.length) {
+      this.messages.set(conversationId, active);
+      const conv = this.conversations.get(conversationId);
+      if (conv) {
+        conv.lastMessage = active[active.length - 1];
+        this.conversations.set(conversationId, conv);
+      }
+      this.saveToDisk();
+    }
   }
 
   public getMessages(conversationId: string, requestingUserId: string): Message[] {
@@ -1489,7 +1926,60 @@ class DataStore {
       throw new Error('Access blocked by user policy');
     }
 
-    return this.messages.get(conversationId) || [];
+    this.pruneExpiredMessages(conversationId);
+    const msgs = this.messages.get(conversationId) || [];
+
+    // Filter out deleted messages for this user
+    return msgs.filter(m => {
+      if (m.deletedStatus === 'deleted_for_everyone') return false;
+      if (m.deletedForUserIds && m.deletedForUserIds.includes(requestingUserId)) return false;
+      return true;
+    });
+  }
+
+  public deleteMessage(
+    conversationId: string,
+    messageId: string,
+    requestingUserId: string,
+    mode: 'for_me' | 'for_everyone' = 'for_me'
+  ): boolean {
+    const conv = this.conversations.get(conversationId);
+    if (!conv || !conv.participantIds.includes(requestingUserId)) {
+      throw new Error('Unauthorized conversation access');
+    }
+
+    const msgs = this.messages.get(conversationId) || [];
+    const msg = msgs.find(m => m.id === messageId);
+    if (!msg) {
+      throw new Error('Message not found');
+    }
+
+    if (mode === 'for_everyone') {
+      if (msg.senderId !== requestingUserId) {
+        throw new Error('Only the sender can delete a message for everyone');
+      }
+      msg.deletedStatus = 'deleted_for_everyone';
+      msg.text = 'This message was deleted';
+      const mediaId = msg.photo?.mediaId || msg.voice?.mediaId || msg.starVideo?.mediaId;
+      if (mediaId) {
+        try {
+          deleteMediaRecord(mediaId, requestingUserId);
+        } catch (e) {
+          // ignore
+        }
+      }
+    } else {
+      if (!msg.deletedForUserIds) {
+        msg.deletedForUserIds = [];
+      }
+      if (!msg.deletedForUserIds.includes(requestingUserId)) {
+        msg.deletedForUserIds.push(requestingUserId);
+      }
+      msg.deletedStatus = 'deleted_for_me';
+    }
+
+    this.saveToDisk();
+    return true;
   }
 
   public sendMessage(senderId: string, conversationId: string, payload: Partial<Message>): Message {
@@ -1508,21 +1998,96 @@ class DataStore {
       throw new Error('Recipient account is not active');
     }
 
+    const ttlSeconds = payload.ttlSeconds !== undefined ? payload.ttlSeconds : conv.messageTtlSeconds;
+    let expiresAt: string | undefined = undefined;
+    if (ttlSeconds && ttlSeconds > 0 && !payload.isPermanent) {
+      expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    }
+
+    // Media & payload backward-compatibility normalization
+    let finalMedia = payload.media;
+    let finalPhotoUrl = payload.photoUrl?.trim();
+    if (payload.photo) {
+      finalPhotoUrl = `/api/media/${payload.photo.mediaId}`;
+      finalMedia = {
+        url: `/api/media/${payload.photo.mediaId}`,
+        mimeType: payload.photo.mimeType,
+        width: payload.photo.width,
+        height: payload.photo.height,
+        sizeBytes: payload.photo.size,
+        thumbnailUrl: payload.photo.thumbnailRef ? `/api/media/${payload.photo.mediaId}?thumb=true` : undefined
+      };
+    } else if (payload.voice) {
+      finalMedia = {
+        url: `/api/media/${payload.voice.mediaId}`,
+        mimeType: payload.voice.mimeType,
+        durationSeconds: payload.voice.duration,
+        sizeBytes: payload.voice.size
+      };
+    } else if (payload.starVideo) {
+      finalMedia = {
+        url: `/api/media/${payload.starVideo.mediaId}`,
+        mimeType: payload.starVideo.mimeType,
+        durationSeconds: payload.starVideo.duration,
+        width: payload.starVideo.width,
+        height: payload.starVideo.height,
+        sizeBytes: payload.starVideo.size,
+        thumbnailUrl: payload.starVideo.thumbnailRef ? `/api/media/${payload.starVideo.mediaId}?thumb=true` : undefined
+      };
+    }
+
+    let finalLocation = payload.location;
+    if (payload.locationPayload) {
+      finalLocation = {
+        lat: payload.locationPayload.latitude,
+        lng: payload.locationPayload.longitude,
+        approximateArea: payload.locationPayload.label || payload.locationPayload.placeName
+      };
+    }
+
+    let finalLinkPreview = payload.linkPreview;
+    if (payload.link) {
+      finalLinkPreview = {
+        url: payload.link.normalizedUrl,
+        domain: payload.link.domain,
+        title: payload.link.title,
+        thumbnailUrl: payload.link.thumbnailRef
+      };
+    }
+
     const newMessage: Message = {
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
       conversationId,
       senderId,
       receiverId,
+      recipientId: receiverId,
       type: payload.type || 'TEXT',
       text: payload.text?.trim(),
-      photoUrl: payload.photoUrl?.trim(),
-      media: payload.media,
-      linkPreview: payload.linkPreview,
-      location: payload.location,
-      stickerId: payload.stickerId,
-      stickerUrl: payload.stickerUrl,
-      stickerName: payload.stickerName,
-      status: 'DELIVERED', // Marked delivered in system
+      photoUrl: finalPhotoUrl,
+      media: finalMedia,
+      linkPreview: finalLinkPreview,
+      location: finalLocation,
+      photo: payload.photo,
+      link: payload.link,
+      locationPayload: payload.locationPayload,
+      stickerPayload: payload.stickerPayload,
+      voice: payload.voice,
+      starVideo: payload.starVideo,
+      stickerId: payload.stickerId || payload.stickerPayload?.stickerId,
+      stickerUrl: payload.stickerUrl || payload.stickerPayload?.url,
+      stickerName: payload.stickerName || payload.stickerPayload?.name,
+      tapType: payload.tapType,
+      vaultAction: payload.vaultAction,
+      expiresAt,
+      ttlSeconds,
+      isPermanent: payload.isPermanent,
+      excludeFromBackup: payload.excludeFromBackup ?? payload.disableAutoBackup ?? conv.disableAutoBackup ?? conv.settings?.disableAutoBackup ?? conv.excludeFromBackup ?? false,
+      disableAutoBackup: payload.disableAutoBackup ?? conv.disableAutoBackup ?? conv.settings?.disableAutoBackup ?? false,
+      status: 'DELIVERED',
+      deliveryStatus: payload.deliveryStatus || 'delivered',
+      readStatus: payload.readStatus || false,
+      deletedStatus: payload.deletedStatus || 'none',
+      deletedForUserIds: payload.deletedForUserIds || [],
       createdAt: new Date().toISOString()
     };
 
@@ -1535,6 +2100,22 @@ class DataStore {
 
     this.saveToDisk();
     return newMessage;
+  }
+
+  public sendTap(senderId: string, targetUserId: string, tapType: TapType): { conversation: Conversation; message: Message } {
+    const conv = this.getOrCreateConversation(senderId, targetUserId);
+    const tapTexts: Record<TapType, string> = {
+      HOT: '🔥 Wysłał Ci ogień!',
+      WOOF: '🐾 Wysłał Ci Woof!',
+      BOLT: '⚡ Wysłał Ci Aura Tap!',
+      WAVE: '👋 Pomachał do Ciebie!'
+    };
+    const message = this.sendMessage(senderId, conv.id, {
+      type: 'TAP',
+      tapType,
+      text: tapTexts[tapType] || '⚡ Wysłał Ci Aura Tap!'
+    });
+    return { conversation: conv, message };
   }
 
   public markMessagesRead(conversationId: string, userId: string): void {
