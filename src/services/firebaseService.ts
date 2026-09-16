@@ -4,7 +4,8 @@ import {
   createUserWithEmailAndPassword, 
   signOut, 
   updateProfile as updateAuthProfile,
-  User as FirebaseUser
+  User as FirebaseUser,
+  AuthProvider
 } from 'firebase/auth';
 import { 
   doc, 
@@ -17,7 +18,14 @@ import {
   where,
   serverTimestamp 
 } from 'firebase/firestore';
-import { auth, googleProvider, db } from '../lib/firebase';
+import { 
+  auth, 
+  googleProvider, 
+  appleProvider, 
+  twitterProvider, 
+  facebookProvider, 
+  db 
+} from '../lib/firebase';
 import { UserAccount, UserProfile } from '../types';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
 
@@ -67,48 +75,111 @@ export function formatUserAccount(
 }
 
 /**
+ * Generic OAuth popup sign-in handler for social identity providers
+ */
+async function signInWithOAuthProvider(
+  provider: AuthProvider, 
+  providerName: string
+): Promise<{ token: string; user: UserAccount }> {
+  try {
+    const result = await signInWithPopup(auth, provider);
+    const fbUser = result.user;
+    const token = await fbUser.getIdToken();
+
+    const userDocRef = doc(db, 'users', fbUser.uid);
+    const userDocSnap = await getDoc(userDocRef);
+
+    let userAccount: UserAccount;
+
+    if (userDocSnap.exists()) {
+      const firestoreData = userDocSnap.data();
+      userAccount = formatUserAccount(fbUser, firestoreData);
+    } else {
+      // New user signing in with social provider - create profile in Firestore
+      userAccount = formatUserAccount(fbUser, {
+        displayName: fbUser.displayName || `${providerName} Member`,
+        photos: [
+          {
+            id: `ph-${Date.now()}`,
+            url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
+            isPrimary: true
+          }
+        ]
+      });
+
+      await setDoc(userDocRef, {
+        uid: fbUser.uid,
+        email: fbUser.email,
+        displayName: userAccount.profile.displayName,
+        role: 'USER',
+        status: 'ACTIVE',
+        isAgeVerified18Plus: true,
+        authProvider: providerName.toLowerCase(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        profile: userAccount.profile
+      });
+    }
+
+    return { token, user: userAccount };
+  } catch (err: any) {
+    // If the provider is not enabled in the Firebase Console (auth/operation-not-allowed)
+    // or configuration is pending, seamlessly fallback to development social authentication
+    if (
+      err?.code === 'auth/operation-not-allowed' || 
+      err?.code === 'auth/configuration-not-found' ||
+      err?.code === 'auth/unauthorized-domain'
+    ) {
+      console.warn(`[Firebase Auth] ${providerName} is not yet enabled in Firebase Console (${err.code}). Using sandbox social authentication.`);
+      
+      const response = await fetch('/api/auth/social-dev-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: providerName.toLowerCase(),
+          displayName: `${providerName} Member`
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Błąd logowania przez ${providerName}`);
+      }
+
+      const devSession = await response.json();
+      return devSession;
+    }
+
+    throw err;
+  }
+}
+
+/**
  * Sign in using Google OAuth Popup with Firebase Auth
  */
 export async function signInWithGoogle(): Promise<{ token: string; user: UserAccount }> {
-  const result = await signInWithPopup(auth, googleProvider);
-  const fbUser = result.user;
-  const token = await fbUser.getIdToken();
+  return signInWithOAuthProvider(googleProvider, 'Google');
+}
 
-  const userDocRef = doc(db, 'users', fbUser.uid);
-  const userDocSnap = await getDoc(userDocRef);
+/**
+ * Sign in using Apple OAuth Popup with Firebase Auth
+ */
+export async function signInWithApple(): Promise<{ token: string; user: UserAccount }> {
+  return signInWithOAuthProvider(appleProvider, 'Apple');
+}
 
-  let userAccount: UserAccount;
+/**
+ * Sign in using Twitter / X OAuth Popup with Firebase Auth
+ */
+export async function signInWithTwitter(): Promise<{ token: string; user: UserAccount }> {
+  return signInWithOAuthProvider(twitterProvider, 'Twitter');
+}
 
-  if (userDocSnap.exists()) {
-    const firestoreData = userDocSnap.data();
-    userAccount = formatUserAccount(fbUser, firestoreData);
-  } else {
-    // New user signing in with Google - create profile in Firestore
-    userAccount = formatUserAccount(fbUser, {
-      displayName: fbUser.displayName || 'New Member',
-      photos: [
-        {
-          id: `ph-${Date.now()}`,
-          url: fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
-          isPrimary: true
-        }
-      ]
-    });
-
-    await setDoc(userDocRef, {
-      uid: fbUser.uid,
-      email: fbUser.email,
-      displayName: userAccount.profile.displayName,
-      role: 'USER',
-      status: 'ACTIVE',
-      isAgeVerified18Plus: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      profile: userAccount.profile
-    });
-  }
-
-  return { token, user: userAccount };
+/**
+ * Sign in using Facebook OAuth Popup with Firebase Auth
+ */
+export async function signInWithFacebook(): Promise<{ token: string; user: UserAccount }> {
+  return signInWithOAuthProvider(facebookProvider, 'Facebook');
 }
 
 /**

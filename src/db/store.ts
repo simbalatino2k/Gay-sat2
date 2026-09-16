@@ -38,7 +38,43 @@ const INITIAL_CONVERSATIONS: Conversation[] = [];
 const INITIAL_MESSAGES: Record<string, Message[]> = {};
 const INITIAL_MOMENTS: Moment[] = [];
 
-class DataStore {
+export class DataStore {
+
+  public async hydrateFromPostgres(): Promise<void> {
+    if (!this.pgAdapter) return;
+    try {
+      console.log('[DataStore] Hydrating from PostgreSQL...');
+      const users = await this.pgAdapter.loadAllUsers();
+      for (const u of users) {
+        this.users.set(u.id, u);
+      }
+      const sessions = await this.pgAdapter.loadAllSessions();
+      for (const s of sessions) {
+        this.sessions.set(s.token, {
+          token: s.token,
+          userId: s.user_id,
+          createdAt: s.created_at.toISOString(),
+          expiresAt: s.expires_at.toISOString(),
+          lastUsedAt: s.last_used_at.toISOString()
+        });
+        this.tokens.set(s.token, s.user_id);
+      }
+      const convs = await this.pgAdapter.loadAllConversations();
+      for (const c of convs) {
+        this.conversations.set(c.id, c);
+      }
+      const msgs = await this.pgAdapter.loadAllMessages();
+      for (const m of msgs) {
+        const arr = this.messages.get(m.conversationId) || [];
+        arr.push(m);
+        this.messages.set(m.conversationId, arr);
+      }
+      console.log('[DataStore] Hydration complete.');
+    } catch (err: any) {
+      console.error('[DataStore] Hydration failed:', err.message);
+    }
+  }
+
   private users: Map<string, UserAccount> = new Map();
   private tokens: Map<string, string> = new Map(); // token -> userId (legacy compatibility)
   private sessions: Map<string, SessionRecord> = new Map(); // token -> SessionRecord
@@ -194,7 +230,7 @@ class DataStore {
    * Purges all bot, test, synthetic, and non-real accounts, sessions, moments, and messages.
    * Protects real verified user accounts (such as adas.stasz1@gmail.com) and promotes the primary owner to SUPERADMIN.
    */
-  public purgeBotAccounts(): { purgedUsersCount: number; purgedMomentsCount: number } {
+  public async purgeBotAccounts(): Promise<{ purgedUsersCount: number; purgedMomentsCount: number }> {
     const isBotUser = (userId: string, email?: string): boolean => {
       if (userId === 'YfFbq4qTCjZYMPZUZEZPzrkOM2k2') return false;
       const lowerEmail = (email || '').toLowerCase().trim();
@@ -291,13 +327,13 @@ class DataStore {
   }
 
   // --- Auth Methods ---
-  public registerUser(
+  public async registerUser(
     email: string,
     displayName: string,
     age: number,
     role: string = 'USER',
     password?: string
-  ): { token: string; user: UserAccount } {
+  ): Promise<{ token: string; user: UserAccount }> {
     const cleanEmail = email.toLowerCase().trim();
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       throw new Error('Valid email address is required');
@@ -307,7 +343,10 @@ class DataStore {
       throw new Error('Access denied. AURA GAY is an adult platform strictly restricted to individuals aged 18 and older.');
     }
 
-    const existing = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    let existing = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    if (!existing && this.pgAdapter) {
+      existing = (await this.pgAdapter.getUserByEmail(cleanEmail)) || undefined;
+    }
     if (existing) {
       throw new Error('An account with this email address already exists. Please log in instead.');
     }
@@ -353,10 +392,12 @@ class DataStore {
       profile: newUserProfile
     };
 
+    let pwdHashAndSalt: string | undefined;
     if (password && password.trim().length >= 6) {
       const salt = crypto.randomBytes(16).toString('hex');
       const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-      this.userPasswords.set(userId, `${salt}:${hash}`);
+      pwdHashAndSalt = `${salt}:${hash}`;
+      this.userPasswords.set(userId, pwdHashAndSalt);
     }
 
     this.users.set(userId, newUser);
@@ -376,7 +417,7 @@ class DataStore {
     this.tokens.set(token, userId);
 
     // Initialize GDPR Consents
-    this.consents.set(userId, {
+    const initialConsents: UserConsents = {
       necessaryCookies: true,
       functionalCookies: true,
       analyticsCookies: false,
@@ -385,27 +426,49 @@ class DataStore {
       locationProcessingConsent: true,
       termsAcceptedVersion: '2026.1',
       privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: now.toISOString()
-    });
+      updatedAt: now.toISOString(),
+      safeContentEnabled: true
+    };
+    this.consents.set(userId, initialConsents);
 
     this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUserAndSession(newUser, token, new Date(expiresAt), pwdHashAndSalt);
+      await this.pgAdapter.saveUserConsents(userId, initialConsents);
+    }
+
     return { token, user: newUser };
   }
 
-  public loginUser(email: string, password?: string): { token: string; user: UserAccount } | null {
+  public async loginUser(email: string, password?: string): Promise<{ token: string; user: UserAccount } | null> {
     const cleanEmail = email.toLowerCase().trim();
-    const user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    let user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    if (!user && this.pgAdapter) {
+      user = (await this.pgAdapter.getUserByEmail(cleanEmail)) || undefined;
+      if (user) {
+        this.users.set(user.id, user);
+      }
+    }
     if (!user) return null;
 
     if (user.status !== 'ACTIVE') {
       throw new Error(`Account is ${user.status.toLowerCase()}`);
     }
 
-    if (this.userPasswords.has(user.id)) {
+    let stored = this.userPasswords.get(user.id);
+    if (!stored && this.pgAdapter) {
+      const dbHash = await this.pgAdapter.getPasswordHash(user.id);
+      if (dbHash) {
+        stored = dbHash;
+        this.userPasswords.set(user.id, dbHash);
+      }
+    }
+
+    if (stored) {
       if (!password) {
         throw new Error('Password is required for this account.');
       }
-      const stored = this.userPasswords.get(user.id)!;
       const [salt, hash] = stored.split(':');
       if (salt && hash) {
         const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -419,7 +482,44 @@ class DataStore {
       }
       const salt = crypto.randomBytes(16).toString('hex');
       const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-      this.userPasswords.set(user.id, `${salt}:${hash}`);
+      const newHash = `${salt}:${hash}`;
+      this.userPasswords.set(user.id, newHash);
+      if (this.pgAdapter) {
+        await this.pgAdapter.saveUserPassword(user.id, newHash);
+      }
+    }
+
+    const token = `aura_sess_${user.id}_${crypto.randomBytes(24).toString('hex')}`;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sessionRecord: SessionRecord = {
+      token,
+      userId: user.id,
+      createdAt: now.toISOString(),
+      expiresAt,
+      lastUsedAt: now.toISOString()
+    };
+    this.sessions.set(token, sessionRecord);
+    this.tokens.set(token, user.id);
+    this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUserAndSession(user, token, new Date(expiresAt));
+    }
+
+    return { token, user };
+  }
+
+  public async loginOrRegisterSocialUser(provider: string, email?: string, displayName?: string): Promise<{ token: string; user: UserAccount }> {
+    const cleanProvider = (provider || 'social').toLowerCase().trim();
+    const cleanEmail = (email || `${cleanProvider}.user@aura.local`).toLowerCase().trim();
+
+    let user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+    if (!user) {
+      const cleanName = displayName || `${cleanProvider.charAt(0).toUpperCase() + cleanProvider.slice(1)} Member`;
+      const res = await this.registerUser(cleanEmail, cleanName, 25, 'USER');
+      user = res.user;
+      return res;
     }
 
     const token = `aura_sess_${user.id}_${crypto.randomBytes(24).toString('hex')}`;
@@ -438,10 +538,24 @@ class DataStore {
     return { token, user };
   }
 
-  public getUserByToken(token: string): UserAccount | null {
+  public async getUserByToken(token: string): Promise<UserAccount | null> {
     if (!token) return null;
     const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
     if (!cleanToken) return null;
+
+    // 0. Authoritative multi-instance PostgreSQL session verification
+    if (this.pgAdapter) {
+      const dbUser = await this.pgAdapter.getUserByToken(cleanToken);
+      if (dbUser) {
+        if (dbUser.status !== 'ACTIVE') return null;
+        this.users.set(dbUser.id, dbUser);
+        return dbUser;
+      }
+      if (cleanToken.startsWith('aura_sess_')) {
+        // If it's an aura_sess_ token and not in PostgreSQL, it was revoked or expired
+        return null;
+      }
+    }
 
     // 1. Modern session lookup with expiration check
     const session = this.sessions.get(cleanToken);
@@ -500,9 +614,12 @@ class DataStore {
           const payload = JSON.parse(payloadStr);
 
           // Verify standard claims against Firebase project
-          const projectId = 'aura-dating-gay-mab';
-          const expectedIss = `https://securetoken.google.com/${projectId}`;
-          if (payload.iss !== expectedIss || payload.aud !== projectId) {
+          const validProjectIds = [
+            'ai-studio-aura-0580ece6-7701-4148-bdcf-9accc85a9917',
+            'aura-dating-gay-mab'
+          ];
+          const validIssuers = validProjectIds.map(id => `https://securetoken.google.com/${id}`);
+          if (!validProjectIds.includes(payload.aud) || !validIssuers.includes(payload.iss)) {
             return null;
           }
 
@@ -572,19 +689,19 @@ class DataStore {
     return null;
   }
 
-  public invalidateToken(token: string): boolean {
+  public async invalidateToken(token: string): Promise<boolean> {
     const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
     const resSessions = this.sessions.delete(cleanToken);
     const resTokens = this.tokens.delete(cleanToken);
     if (this.pgAdapter) {
-      this.pgAdapter.deleteSession(cleanToken).catch(e => console.error('[Postgres] Session delete error:', e.message));
+      await this.pgAdapter.deleteSession(cleanToken);
     }
     this.saveToDisk();
     return resSessions || resTokens;
   }
 
   // --- Password Recovery Flow ---
-  public createPasswordReset(email: string): { token: string; expiresAt: string } | null {
+  public async createPasswordReset(email: string): Promise<{ token: string; expiresAt: string } | null> {
     const cleanEmail = email.toLowerCase().trim();
     const user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
     if (!user) return null;
@@ -612,7 +729,7 @@ class DataStore {
     return { token, expiresAt };
   }
 
-  public resetPasswordWithToken(token: string, newPassword: string): boolean {
+  public async resetPasswordWithToken(token: string, newPassword: string): Promise<boolean> {
     if (!token || !newPassword) return false;
     const cleanToken = token.trim();
     const record = this.passwordResets.get(cleanToken);
@@ -645,11 +762,11 @@ class DataStore {
   }
 
   // --- Stripe Subscription & Webhook Processing ---
-  public isStripeEventProcessed(eventId: string): boolean {
+  public async isStripeEventProcessed(eventId: string): Promise<boolean> {
     return this.stripeEvents.has(eventId);
   }
 
-  public recordStripeEvent(eventId: string, eventType: string): void {
+  public async recordStripeEvent(eventId: string, eventType: string): Promise<void> {
     this.stripeEvents.add(eventId);
     if (this.pgAdapter) {
       this.pgAdapter.recordProcessedEvent(eventId, eventType).catch(err => {
@@ -658,14 +775,14 @@ class DataStore {
     }
   }
 
-  public recordStripeSubscription(
+  public async recordStripeSubscription(
     userId: string,
     customerId: string,
     subscriptionId: string,
     planId: string,
     status: string,
     periodEnd?: Date
-  ): UserAccount | null {
+  ): Promise<UserAccount | null> {
     const user = this.users.get(userId);
     if (!user) return null;
 
@@ -715,7 +832,7 @@ class DataStore {
     return user;
   }
 
-  public findUserByStripeCustomerId(customerId: string): UserAccount | null {
+  public async findUserByStripeCustomerId(customerId: string): Promise<UserAccount | null> {
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.customerId === customerId) {
         return this.users.get(userId) || null;
@@ -724,7 +841,7 @@ class DataStore {
     return null;
   }
 
-  public findUserByStripeSubscriptionId(subscriptionId: string): UserAccount | null {
+  public async findUserByStripeSubscriptionId(subscriptionId: string): Promise<UserAccount | null> {
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.subscriptionId === subscriptionId) {
         return this.users.get(userId) || null;
@@ -853,11 +970,18 @@ class DataStore {
     return true;
   }
 
-  public getUserById(userId: string): UserAccount | null {
+  public async getUserById(userId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const u = await this.pgAdapter.getUserById(userId);
+      if (u) {
+        this.users.set(u.id, u);
+        return u;
+      }
+    }
     return this.users.get(userId) || null;
   }
 
-  public setUserPremium(userId: string, isPremium: boolean): UserAccount {
+  public async setUserPremium(userId: string, isPremium: boolean): Promise<UserAccount> {
     const user = this.users.get(userId);
     if (!user) throw new Error('User not found');
     user.isPremium = isPremium;
@@ -872,13 +996,13 @@ class DataStore {
     return user;
   }
 
-  public getProfileById(targetUserId: string, requestingUserId?: string): UserProfile | null {
+  public async getProfileById(targetUserId: string, requestingUserId?: string): Promise<UserProfile | null> {
     const targetUser = this.users.get(targetUserId);
     if (!targetUser || targetUser.status !== 'ACTIVE') {
       return null;
     }
 
-    if (requestingUserId && this.isBlocked(requestingUserId, targetUserId)) {
+    if (requestingUserId && (await this.isBlocked(requestingUserId, targetUserId))) {
       return null;
     }
 
@@ -886,7 +1010,7 @@ class DataStore {
   }
 
   // --- Profile Methods ---
-  public updateProfile(userId: string, updates: Partial<UserProfile>): UserProfile {
+  public async updateProfile(userId: string, updates: Partial<UserProfile>): Promise<UserProfile> {
     const user = this.users.get(userId);
     if (!user) throw new Error('User not found');
     if (user.status !== 'ACTIVE') throw new Error(`User account is ${user.status.toLowerCase()}`);
@@ -928,15 +1052,20 @@ class DataStore {
 
     user.updatedAt = new Date().toISOString();
     this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUser(user);
+    }
+
     return user.profile;
   }
 
-  public addProfilePhoto(userId: string, url: string, isPrimary: boolean = false): UserProfile {
-    const user = this.users.get(userId);
+  public async addProfilePhoto(userId: string, url: string, isPrimary: boolean = false): Promise<UserProfile> {
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
 
     const cleanUrl = url.trim();
-    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://') && !cleanUrl.startsWith('data:image/')) {
+    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://') && !cleanUrl.startsWith('data:image/') && !cleanUrl.startsWith('/api/media/')) {
       throw new Error('Invalid image URL format');
     }
 
@@ -956,12 +1085,18 @@ class DataStore {
     }
 
     user.profile.photos.push(newPhoto);
+    user.updatedAt = new Date().toISOString();
     this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUser(user);
+    }
+
     return user.profile;
   }
 
-  public deleteProfilePhoto(userId: string, photoId: string): UserProfile {
-    const user = this.users.get(userId);
+  public async deleteProfilePhoto(userId: string, photoId: string): Promise<UserProfile> {
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
 
     user.profile.photos = user.profile.photos.filter(p => p.id !== photoId);
@@ -969,12 +1104,25 @@ class DataStore {
       user.profile.photos[0].isPrimary = true;
     }
 
+    user.updatedAt = new Date().toISOString();
     this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUser(user);
+    }
+
     return user.profile;
   }
 
   // --- GDPR Subject Rights & Consents ---
-  public getUserConsents(userId: string): UserConsents {
+  public async getUserConsents(userId: string): Promise<UserConsents> {
+    if (this.pgAdapter) {
+      const dbConsents = await this.pgAdapter.getUserConsents(userId);
+      if (dbConsents) {
+        this.consents.set(userId, dbConsents);
+        return dbConsents;
+      }
+    }
     const existing = this.consents.get(userId);
     if (existing) return existing;
 
@@ -987,15 +1135,19 @@ class DataStore {
       locationProcessingConsent: true,
       termsAcceptedVersion: '2026.1',
       privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      safeContentEnabled: true
     };
     this.consents.set(userId, defaultConsents);
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUserConsents(userId, defaultConsents);
+    }
     this.saveToDisk();
     return defaultConsents;
   }
 
-  public updateUserConsents(userId: string, partial: Partial<UserConsents>): UserConsents {
-    const current = this.getUserConsents(userId);
+  public async updateUserConsents(userId: string, partial: Partial<UserConsents>): Promise<UserConsents> {
+    const current = await this.getUserConsents(userId);
     const updated: UserConsents = {
       ...current,
       ...partial,
@@ -1003,15 +1155,18 @@ class DataStore {
       updatedAt: new Date().toISOString()
     };
     this.consents.set(userId, updated);
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUserConsents(userId, updated);
+    }
     this.saveToDisk();
     return updated;
   }
 
-  public exportUserData(userId: string): GdprExportData {
+  public async exportUserData(userId: string): Promise<GdprExportData> {
     const user = this.users.get(userId);
     if (!user) throw new Error('User not found');
 
-    const consents = this.getUserConsents(userId);
+    const consents = await this.getUserConsents(userId);
     const matches = this.matches.filter(m => m.user1Id === userId || m.user2Id === userId);
     const likesGiven = this.likes.filter(l => l.fromUserId === userId);
     const blockedUserIds = this.blocks.filter(b => b.blockerUserId === userId).map(b => b.blockedUserId);
@@ -1206,7 +1361,7 @@ class DataStore {
     };
   }
 
-  public rectifyUserData(userId: string, updates: { email?: string; displayName?: string; bio?: string }): UserAccount {
+  public async rectifyUserData(userId: string, updates: { email?: string; displayName?: string; bio?: string }): Promise<UserAccount> {
     const user = this.users.get(userId);
     if (!user) throw new Error('User not found');
 
@@ -1231,7 +1386,7 @@ class DataStore {
     return user;
   }
 
-  public restrictAccount(userId: string, reason: string): boolean {
+  public async restrictAccount(userId: string, reason: string): Promise<boolean> {
     const user = this.users.get(userId);
     if (!user) return false;
 
@@ -1249,11 +1404,11 @@ class DataStore {
     return true;
   }
 
-  public recordObjection(userId: string, reason: string): boolean {
+  public async recordObjection(userId: string, reason: string): Promise<boolean> {
     const user = this.users.get(userId);
     if (!user) return false;
 
-    const consents = this.getUserConsents(userId);
+    const consents = await this.getUserConsents(userId);
     consents.aiAssistanceConsent = false;
     consents.analyticsCookies = false;
     consents.updatedAt = new Date().toISOString();
@@ -1263,7 +1418,7 @@ class DataStore {
     return true;
   }
 
-  public eraseUserData(userId: string): boolean {
+  public async eraseUserData(userId: string): Promise<boolean> {
     const user = this.users.get(userId);
     if (!user) return false;
 
@@ -1321,12 +1476,12 @@ class DataStore {
   }
 
   // --- DSA Compliance: Reports, Moderation & Appeals ---
-  public submitDsaReport(
+  public async submitDsaReport(
     reporterUserId: string,
     reportedUserId: string,
     reason: DsaReportReason,
     details?: string
-  ): ReportRecord {
+  ): Promise<ReportRecord> {
     if (reporterUserId === reportedUserId) {
       throw new Error('Cannot report yourself');
     }
@@ -1349,20 +1504,21 @@ class DataStore {
 
     this.reports.push(report);
     this.saveToDisk();
+    if (this.pgAdapter && typeof (this.pgAdapter as any).saveReport === "function") { await (this.pgAdapter as any).saveReport({ id: report.id, reporterUserId: report.reporterUserId, reportedUserId: report.reportedUserId, reason: report.reason, details: report.details, status: report.status, createdAt: report.createdAt }); }
     return report;
   }
 
-  public getUserSubmittedReports(reporterUserId: string): ReportRecord[] {
+  public async getUserSubmittedReports(reporterUserId: string): Promise<ReportRecord[]> {
     return this.reports.filter(r => r.reporterUserId === reporterUserId);
   }
 
-  public adminDecideReport(
+  public async adminDecideReport(
     adminId: string,
     reportId: string,
     decision: 'SUSPEND_ACCOUNT' | 'REMOVE_CONTENT' | 'WARNING' | 'DISMISSED',
     legalBasis: string,
     statementOfReasons: string
-  ): ModerationNotice {
+  ): Promise<ModerationNotice> {
     const report = this.reports.find(r => r.id === reportId);
     if (!report) throw new Error('Report not found');
 
@@ -1387,8 +1543,11 @@ class DataStore {
     };
 
     this.moderationNotices.push(notice);
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveModerationNotice(notice);
+    }
 
-    this.logAdminAction(
+    await this.logAdminAction(
       adminId,
       decision === 'DISMISSED' ? 'DISMISS_REPORT' : 'RESOLVE_REPORT',
       report.reportedUserId,
@@ -1400,11 +1559,14 @@ class DataStore {
     return notice;
   }
 
-  public getModerationNoticesForUser(userId: string): ModerationNotice[] {
+  public async getModerationNoticesForUser(userId: string): Promise<ModerationNotice[]> {
+    if (this.pgAdapter) {
+      return await this.pgAdapter.getModerationNotices(userId);
+    }
     return this.moderationNotices.filter(n => n.targetUserId === userId);
   }
 
-  public submitDsaAppeal(userId: string, noticeId: string, appealReason: string): DsaAppealRecord {
+  public async submitDsaAppeal(userId: string, noticeId: string, appealReason: string): Promise<DsaAppealRecord> {
     const notice = this.moderationNotices.find(n => n.id === noticeId && n.targetUserId === userId);
     if (!notice) {
       throw new Error('Moderation notice not found or unauthorized');
@@ -1426,19 +1588,25 @@ class DataStore {
     notice.appealStatus = 'PENDING';
     this.appeals.push(appeal);
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveDsaAppeal(appeal);
+    }
     return appeal;
   }
 
-  public getDsaAppeals(): DsaAppealRecord[] {
+  public async getDsaAppeals(): Promise<DsaAppealRecord[]> {
+    if (this.pgAdapter) {
+      return await this.pgAdapter.getDsaAppeals();
+    }
     return this.appeals;
   }
 
-  public adminDecideAppeal(
+  public async adminDecideAppeal(
     adminId: string,
     appealId: string,
     outcome: 'UPHELD' | 'OVERTURNED',
     decisionNotes: string
-  ): DsaAppealRecord {
+  ): Promise<DsaAppealRecord> {
     const appeal = this.appeals.find(a => a.id === appealId);
     if (!appeal) throw new Error('Appeal not found');
 
@@ -1456,10 +1624,17 @@ class DataStore {
       if (user && user.status === 'SUSPENDED') {
         user.status = 'ACTIVE';
         user.updatedAt = new Date().toISOString();
+        if (this.pgAdapter) {
+          await this.pgAdapter.updateUserStatus(user.id, 'ACTIVE');
+        }
       }
     }
 
-    this.logAdminAction(
+    if (this.pgAdapter) {
+      await this.pgAdapter.updateDsaAppeal(appealId, outcome, decisionNotes);
+    }
+
+    await this.logAdminAction(
       adminId,
       'APPEAL_DECISION',
       appeal.userId,
@@ -1471,13 +1646,13 @@ class DataStore {
     return appeal;
   }
 
-  public logAdminAction(
+  public async logAdminAction(
     adminId: string,
     action: AdminAuditLog['action'],
     targetUserId?: string,
     reason?: string,
     details?: Record<string, any>
-  ): AdminAuditLog {
+  ): Promise<AdminAuditLog> {
     const log: AdminAuditLog = {
       id: `audit-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       adminId,
@@ -1489,16 +1664,22 @@ class DataStore {
     };
     this.adminAuditLogs.push(log);
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveAdminAuditLog(log);
+    }
     return log;
   }
 
-  public getAdminAuditLogs(): AdminAuditLog[] {
+  public async getAdminAuditLogs(): Promise<AdminAuditLog[]> {
+    if (this.pgAdapter) {
+      return await this.pgAdapter.getAdminAuditLogs();
+    }
     return this.adminAuditLogs;
   }
 
 
   // --- Discovery Feed & Filtering ---
-  public getDiscoverFeed(currentUserId: string, filters?: Partial<FilterState>): UserProfile[] {
+  public async getDiscoverFeed(currentUserId: string, filters?: Partial<FilterState>): Promise<UserProfile[]> {
     // Get list of blocked user IDs
     const blockedUserIds = new Set<string>();
     this.blocks.forEach(b => {
@@ -1624,24 +1805,28 @@ class DataStore {
   }
 
   // --- Social Interactions (Like, Match, Block, Report) ---
-  public likeUser(fromUserId: string, toUserId: string, isSuperLike: boolean = false): { isMatch: boolean; match?: MatchRecord } {
+  public async likeUser(fromUserId: string, toUserId: string, isSuperLike: boolean = false): Promise<{ isMatch: boolean; match?: MatchRecord }> {
     if (fromUserId === toUserId) {
       throw new Error('Cannot like yourself');
     }
 
-    if (this.isBlocked(fromUserId, toUserId)) {
+    if (await this.isBlocked(fromUserId, toUserId)) {
       throw new Error('Action blocked by user policy');
     }
 
-    const existingLike = this.likes.find(l => l.fromUserId === fromUserId && l.toUserId === toUserId);
-    if (!existingLike) {
-      this.likes.push({
+    let likeRecord: LikeRecord | undefined = this.likes.find(l => l.fromUserId === fromUserId && l.toUserId === toUserId);
+    if (!likeRecord) {
+      likeRecord = {
         id: `like-${Date.now()}`,
         fromUserId,
         toUserId,
         isSuperLike,
         createdAt: new Date().toISOString()
-      });
+      };
+      this.likes.push(likeRecord);
+      if (this.pgAdapter) {
+        await this.pgAdapter.saveLike(likeRecord);
+      }
     }
 
     // Check mutual like
@@ -1658,9 +1843,12 @@ class DataStore {
           matchedProfile: targetUser?.profile
         };
         this.matches.push(match);
+        if (this.pgAdapter) {
+          await this.pgAdapter.saveMatch(match);
+        }
 
         // Auto create conversation
-        this.getOrCreateConversation(fromUserId, toUserId);
+        await this.getOrCreateConversation(fromUserId, toUserId);
       }
       this.saveToDisk();
       return { isMatch: true, match };
@@ -1670,7 +1858,7 @@ class DataStore {
     return { isMatch: false };
   }
 
-  public blockUser(blockerUserId: string, blockedUserId: string): BlockRecord {
+  public async blockUser(blockerUserId: string, blockedUserId: string): Promise<BlockRecord> {
     if (blockerUserId === blockedUserId) {
       throw new Error('Cannot block yourself');
     }
@@ -1685,53 +1873,78 @@ class DataStore {
       createdAt: new Date().toISOString()
     };
     this.blocks.push(record);
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveBlock(record);
+    }
     this.saveToDisk();
     return record;
   }
 
-  public unblockUser(blockerUserId: string, blockedUserId: string): boolean {
+  public async unblockUser(blockerUserId: string, blockedUserId: string): Promise<boolean> {
     const initialLen = this.blocks.length;
     this.blocks = this.blocks.filter(b => !(b.blockerUserId === blockerUserId && b.blockedUserId === blockedUserId));
     const changed = this.blocks.length < initialLen;
+    if (this.pgAdapter) {
+      await this.pgAdapter.unblockUser(blockerUserId, blockedUserId);
+    }
     if (changed) this.saveToDisk();
     return changed;
   }
 
-  public getBlockedUsers(userId: string): UserProfile[] {
+  public async getBlockedUsers(userId: string): Promise<UserProfile[]> {
     const blockedIds = this.blocks.filter(b => b.blockerUserId === userId).map(b => b.blockedUserId);
     return blockedIds.map(id => this.users.get(id)?.profile).filter((p): p is UserProfile => !!p);
   }
 
-  public isBlocked(userA: string, userB: string): boolean {
+  public async isBlocked(userA: string, userB: string): Promise<boolean> {
+    if (this.pgAdapter && typeof (this.pgAdapter as any).isBlocked === "function") {
+      return (this.pgAdapter as any).isBlocked(userA, userB);
+    }
     return this.blocks.some(b => 
       (b.blockerUserId === userA && b.blockedUserId === userB) ||
       (b.blockerUserId === userB && b.blockedUserId === userA)
     );
   }
 
-  public reportUser(reporterUserId: string, reportedUserId: string, reason: string, details?: string): ReportRecord {
+  public async reportItem(
+    reporterUserId: string,
+    reportedUserId: string,
+    reason: string,
+    details?: string,
+    reportedMessageId?: string,
+    reportedMediaId?: string
+  ): Promise<ReportRecord> {
     if (reporterUserId === reportedUserId) {
       throw new Error('Cannot report yourself');
     }
 
-    const reportedUser = this.users.get(reportedUserId);
+    const reportedUser = await this.getUserById(reportedUserId);
     const report: ReportRecord = {
-      id: `rep-${Date.now()}`,
+      id: `rep-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
       reporterUserId,
       reportedUserId,
       reason: reason.trim(),
       details: details ? details.trim() : undefined,
+      reportedMessageId,
+      reportedMediaId,
       status: 'PENDING',
       createdAt: new Date().toISOString(),
       reportedProfile: reportedUser?.profile
     };
     this.reports.push(report);
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveReport(report);
+    }
     this.saveToDisk();
     return report;
   }
 
+  public async reportUser(reporterUserId: string, reportedUserId: string, reason: string, details?: string): Promise<ReportRecord> {
+    return this.reportItem(reporterUserId, reportedUserId, reason, details);
+  }
+
   // --- Vault Access Control ---
-  public grantVaultAccess(ownerId: string, targetUserId: string, grant: boolean): boolean {
+  public async grantVaultAccess(ownerId: string, targetUserId: string, grant: boolean): Promise<boolean> {
     if (!this.vaultAccess.has(ownerId)) {
       this.vaultAccess.set(ownerId, new Set());
     }
@@ -1748,7 +1961,7 @@ class DataStore {
     return grant;
   }
 
-  public requestVaultAccess(requesterId: string, targetUserId: string): boolean {
+  public async requestVaultAccess(requesterId: string, targetUserId: string): Promise<boolean> {
     if (!this.vaultRequests.has(targetUserId)) {
       this.vaultRequests.set(targetUserId, new Set());
     }
@@ -1767,7 +1980,7 @@ class DataStore {
   }
 
   // --- Conversations & Messaging ---
-  public getOrCreateConversation(userAId: string, userBId: string): Conversation {
+  public async getOrCreateConversation(userAId: string, userBId: string): Promise<Conversation> {
     const convKey = [userAId, userBId].sort().join('_');
     let conv = Array.from(this.conversations.values()).find(c => {
       const sorted = [...c.participantIds].sort().join('_');
@@ -1789,10 +2002,11 @@ class DataStore {
       this.saveToDisk();
     }
 
+    if (this.pgAdapter && typeof (this.pgAdapter as any).saveConversation === "function") { await (this.pgAdapter as any).saveConversation({ id: conv.id, participants: conv.participantIds, isMatch: false, createdAt: new Date().toISOString() }); }
     return conv;
   }
 
-  public getUserConversations(userId: string): Conversation[] {
+  public async getUserConversations(userId: string): Promise<Conversation[]> {
     const blockedUserIds = new Set(
       this.blocks
         .filter(b => b.blockerUserId === userId || b.blockedUserId === userId)
@@ -1836,15 +2050,15 @@ class DataStore {
       });
   }
 
-  public getConversation(conversationId: string): Conversation | null {
+  public async getConversation(conversationId: string): Promise<Conversation | null> {
     return this.conversations.get(conversationId) || null;
   }
 
-  public updateConversationSettings(
+  public async updateConversationSettings(
     conversationId: string,
     userId: string,
     settings: { messageTtlSeconds?: number; excludeFromBackup?: boolean; disableAutoBackup?: boolean }
-  ): Conversation {
+  ): Promise<Conversation> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(userId)) {
       throw new Error('Unauthorized conversation access');
@@ -1873,7 +2087,7 @@ class DataStore {
     return conv;
   }
 
-  public toggleMessagePermanent(messageId: string, conversationId: string, userId: string): Message {
+  public async toggleMessagePermanent(messageId: string, conversationId: string, userId: string): Promise<Message> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(userId)) {
       throw new Error('Unauthorized conversation access');
@@ -1890,10 +2104,11 @@ class DataStore {
       msg.expiresAt = new Date(new Date(msg.createdAt).getTime() + msg.ttlSeconds * 1000).toISOString();
     }
     this.saveToDisk();
+    if (this.pgAdapter && typeof (this.pgAdapter as any).saveMessage === "function") { await (this.pgAdapter as any).saveMessage(msg); }
     return msg;
   }
 
-  public pruneExpiredMessages(conversationId: string): void {
+  public async pruneExpiredMessages(conversationId: string): Promise<void> {
     const msgs = this.messages.get(conversationId);
     if (!msgs || msgs.length === 0) return;
 
@@ -1915,15 +2130,29 @@ class DataStore {
     }
   }
 
-  public getMessages(conversationId: string, requestingUserId: string): Message[] {
-    const conv = this.conversations.get(conversationId);
+  public async getMessages(conversationId: string, requestingUserId: string): Promise<Message[]> {
+    let conv = this.conversations.get(conversationId);
+    if (!conv && this.pgAdapter) {
+      const all = await this.pgAdapter.loadAllConversations();
+      conv = all.find(c => c.id === conversationId);
+      if (conv) this.conversations.set(conv.id, conv);
+    }
     if (!conv || !conv.participantIds.includes(requestingUserId)) {
       throw new Error('Unauthorized conversation access');
     }
 
     const otherId = conv.participantIds.find(id => id !== requestingUserId)!;
-    if (this.isBlocked(requestingUserId, otherId)) {
+    if (await this.isBlocked(requestingUserId, otherId)) {
       throw new Error('Access blocked by user policy');
+    }
+
+    if (this.pgAdapter) {
+      const dbMsgs = await this.pgAdapter.getMessages(conversationId);
+      return dbMsgs.filter(m => {
+        if (m.deletedStatus === 'deleted_for_everyone') return false;
+        if (m.deletedForUserIds && m.deletedForUserIds.includes(requestingUserId)) return false;
+        return true;
+      });
     }
 
     this.pruneExpiredMessages(conversationId);
@@ -1937,12 +2166,12 @@ class DataStore {
     });
   }
 
-  public deleteMessage(
+  public async deleteMessage(
     conversationId: string,
     messageId: string,
     requestingUserId: string,
     mode: 'for_me' | 'for_everyone' = 'for_me'
-  ): boolean {
+  ): Promise<boolean> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(requestingUserId)) {
       throw new Error('Unauthorized conversation access');
@@ -1982,15 +2211,26 @@ class DataStore {
     return true;
   }
 
-  public sendMessage(senderId: string, conversationId: string, payload: Partial<Message>): Message {
+  public async sendMessage(senderId: string, conversationId: string, payload: Partial<Message>): Promise<Message> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(senderId)) {
       throw new Error('Unauthorized conversation access');
     }
 
     const receiverId = conv.participantIds.find(id => id !== senderId)!;
-    if (this.isBlocked(senderId, receiverId)) {
+    if (await this.isBlocked(senderId, receiverId)) {
       throw new Error('Cannot message a blocked user');
+    }
+
+    // Idempotency check: if clientMessageId provided, return existing message if found
+    if (payload.clientMessageId && typeof payload.clientMessageId === 'string' && payload.clientMessageId.trim()) {
+      const cleanKey = payload.clientMessageId.trim();
+      if (this.pgAdapter) {
+        const existingPg = await this.pgAdapter.getMessageByClientMessageId(conversationId, cleanKey);
+        if (existingPg) return existingPg;
+      }
+      const existingMem = (this.messages.get(conversationId) || []).find(m => m.clientMessageId === cleanKey);
+      if (existingMem) return existingMem;
     }
 
     const receiverUser = this.users.get(receiverId);
@@ -2057,6 +2297,7 @@ class DataStore {
 
     const newMessage: Message = {
       id: `msg-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+      clientMessageId: payload.clientMessageId?.trim() || undefined,
       conversationId,
       senderId,
       receiverId,
@@ -2099,18 +2340,24 @@ class DataStore {
     this.conversations.set(conversationId, conv);
 
     this.saveToDisk();
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveMessage(newMessage);
+      await this.pgAdapter.saveConversation(conv);
+    }
+
     return newMessage;
   }
 
-  public sendTap(senderId: string, targetUserId: string, tapType: TapType): { conversation: Conversation; message: Message } {
-    const conv = this.getOrCreateConversation(senderId, targetUserId);
+  public async sendTap(senderId: string, targetUserId: string, tapType: TapType): Promise<{ conversation: Conversation; message: Message }> {
+    const conv = await this.getOrCreateConversation(senderId, targetUserId);
     const tapTexts: Record<TapType, string> = {
       HOT: '🔥 Wysłał Ci ogień!',
       WOOF: '🐾 Wysłał Ci Woof!',
       BOLT: '⚡ Wysłał Ci Aura Tap!',
       WAVE: '👋 Pomachał do Ciebie!'
     };
-    const message = this.sendMessage(senderId, conv.id, {
+    const message = await this.sendMessage(senderId, conv.id, {
       type: 'TAP',
       tapType,
       text: tapTexts[tapType] || '⚡ Wysłał Ci Aura Tap!'
@@ -2118,7 +2365,7 @@ class DataStore {
     return { conversation: conv, message };
   }
 
-  public markMessagesRead(conversationId: string, userId: string): void {
+  public async markMessagesRead(conversationId: string, userId: string): Promise<void> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(userId)) {
       return;
@@ -2139,7 +2386,7 @@ class DataStore {
   }
 
   // --- Matches ---
-  public getUserMatches(userId: string): MatchRecord[] {
+  public async getUserMatches(userId: string): Promise<MatchRecord[]> {
     const blockedUserIds = new Set(
       this.blocks
         .filter(b => b.blockerUserId === userId || b.blockedUserId === userId)
@@ -2163,41 +2410,51 @@ class DataStore {
   }
 
   // --- Admin & Safety Moderation ---
-  public getReports(): ReportRecord[] {
+  public async getReports(): Promise<ReportRecord[]> {
     return this.reports;
   }
 
-  public suspendUser(userId: string): boolean {
+  public async suspendUser(userId: string): Promise<boolean> {
     const user = this.users.get(userId);
-    if (!user) return false;
-    user.status = 'SUSPENDED';
-    user.updatedAt = new Date().toISOString();
+    if (user) {
+      user.status = 'SUSPENDED';
+      user.updatedAt = new Date().toISOString();
+    }
 
     // Invalidate all tokens for this suspended user
     for (const [tok, uid] of Array.from(this.tokens.entries())) {
       if (uid === userId) this.tokens.delete(tok);
     }
 
-    this.saveToDisk();
-    return true;
-  }
-
-  public softDeleteUser(userId: string): boolean {
-    const user = this.users.get(userId);
-    if (!user) return false;
-    user.status = 'DELETED';
-    user.updatedAt = new Date().toISOString();
-
-    // Invalidate all tokens for this deleted user
-    for (const [tok, uid] of Array.from(this.tokens.entries())) {
-      if (uid === userId) this.tokens.delete(tok);
+    if (this.pgAdapter) {
+      await this.pgAdapter.updateUserStatus(userId, 'SUSPENDED');
     }
 
     this.saveToDisk();
     return true;
   }
 
-  public getAdminStats(): AdminStats {
+  public async softDeleteUser(userId: string): Promise<boolean> {
+    const user = this.users.get(userId);
+    if (user) {
+      user.status = 'DELETED';
+      user.updatedAt = new Date().toISOString();
+    }
+
+    // Invalidate all tokens for this deleted user
+    for (const [tok, uid] of Array.from(this.tokens.entries())) {
+      if (uid === userId) this.tokens.delete(tok);
+    }
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.updateUserStatus(userId, 'DELETED');
+    }
+
+    this.saveToDisk();
+    return true;
+  }
+
+  public async getAdminStats(): Promise<AdminStats> {
     const usersArr = Array.from(this.users.values());
     return {
       totalUsers: usersArr.length,
@@ -2210,7 +2467,7 @@ class DataStore {
   }
 
   // --- Moments / Stories ---
-  public getMoments(userId: string): Moment[] {
+  public async getMoments(userId: string): Promise<Moment[]> {
     const now = new Date();
     const blockedUserIds = new Set(
       this.blocks
@@ -2239,10 +2496,10 @@ class DataStore {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  public createMoment(
+  public async createMoment(
     userId: string,
     data: { mediaUrl: string; mediaType?: 'photo' | 'video'; caption?: string; privacy?: 'everyone' | 'connections' | 'specific'; allowedUserIds?: string[] }
-  ): Moment {
+  ): Promise<Moment> {
     const newMoment: Moment = {
       id: `mom-${Date.now()}`,
       userId,
@@ -2263,33 +2520,48 @@ class DataStore {
 
     this.moments.unshift(newMoment);
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveMoment(newMoment);
+    }
     return newMoment;
   }
 
-  public likeMoment(userId: string, momentId: string): boolean {
+  public async likeMoment(userId: string, momentId: string): Promise<boolean> {
     const mom = this.moments.find(m => m.id === momentId);
     if (!mom) return false;
     mom.likesCount = (mom.likesCount || 0) + 1;
     mom.hasLiked = true;
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveMoment(mom);
+    }
     return true;
   }
 
-  public viewMoment(userId: string, momentId: string): boolean {
+  public async viewMoment(userId: string, momentId: string): Promise<boolean> {
     const mom = this.moments.find(m => m.id === momentId);
     if (!mom) return false;
     mom.viewsCount = (mom.viewsCount || 0) + 1;
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveMoment(mom);
+    }
     return true;
   }
 
-  public deleteMoment(userId: string, momentId: string): boolean {
+  public async deleteMoment(userId: string, momentId: string): Promise<boolean> {
     const idx = this.moments.findIndex(m => m.id === momentId && m.userId === userId);
     if (idx === -1) return false;
     this.moments.splice(idx, 1);
     this.saveToDisk();
+    if (this.pgAdapter) {
+      await this.pgAdapter.deleteMoment(momentId, userId);
+    }
     return true;
   }
 }
 
 export const store = new DataStore();
+export function getStore(): DataStore {
+  return store;
+}

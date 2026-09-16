@@ -9,6 +9,8 @@ import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { motion, AnimatePresence } from 'motion/react';
 import { AdSlot, AdConsentModal } from './ads';
 import { ADS_CONFIG } from '../config/adsConfig';
+import { SwipeCardDeck } from './SwipeCardDeck';
+import { SwipableGridCard } from './SwipableGridCard';
 
 interface DiscoverFeedProps {
   authToken: string;
@@ -43,6 +45,19 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
   const [internalShowFilter, setInternalShowFilter] = useState(false);
   const [showAdConsentModal, setShowAdConsentModal] = useState(false);
   
+  // View Mode: 'swipe' (Card Deck) or 'grid' (Multi-column)
+  const [viewMode, setViewMode] = useState<'swipe' | 'grid'>(() => {
+    const stored = localStorage.getItem('aura_discover_view_mode');
+    return (stored === 'swipe' || stored === 'grid') ? stored : 'swipe';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('aura_discover_view_mode', viewMode);
+  }, [viewMode]);
+
+  // Set of dismissed profile IDs when swiping in grid view
+  const [dismissedProfileIds, setDismissedProfileIds] = useState<Set<string>>(new Set());
+
   // Responsive Columns State
   const [columns, setColumns] = useState<'auto'|2|3|4|5|6>(() => {
     const stored = localStorage.getItem('aura_grid_cols');
@@ -172,6 +187,25 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
     (filter.maxDistanceKm > 0 ? 1 : 0) +
     (filter.minAge > 18 || filter.maxAge < 65 ? 1 : 0);
 
+  const handleCardLike = (profile: UserProfile) => {
+    onLikeProfile(profile);
+    setDismissedProfileIds(prev => new Set(prev).add(profile.id));
+    fetch('/api/likes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+      },
+      body: JSON.stringify({ targetUserId: profile.userId })
+    }).catch(err => console.warn('Like API notice:', err));
+  };
+
+  const handleCardPass = (profile: UserProfile) => {
+    setDismissedProfileIds(prev => new Set(prev).add(profile.id));
+  };
+
+  const visibleGridProfiles = filteredProfiles.filter(p => !dismissedProfileIds.has(p.id));
+
   const gridClassMap = {
     'auto': 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6',
     2: 'grid-cols-2',
@@ -184,12 +218,12 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
   return (
     <div className="w-full max-w-[1400px] mx-auto space-y-4 pb-40 pt-1 px-3 sm:px-6 relative">
       
-      {/* Top Header */}
-      <div className="flex items-center justify-between px-1 gap-2">
+      {/* Top Header with Tactile Mode Switcher */}
+      <div className="flex flex-wrap items-center justify-between px-1 gap-2.5">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-base sm:text-lg font-extrabold text-white tracking-wide">
-              Odkrywaj w pobliżu
+              {viewMode === 'swipe' ? 'Swipe Match' : 'Odkrywaj w pobliżu'}
             </h2>
             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-black tracking-wider">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -201,27 +235,61 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
           </p>
         </div>
 
-        {activeFilterCount > 0 && (
-          <button
-            onClick={() => setFilter({
-              minAge: 18,
-              maxAge: 65,
-              maxDistanceKm: 0,
-              roles: [],
-              lookingFor: [],
-              tribes: [],
-              verifiedOnly: false,
-              onlineOnly: false,
-              hasPhotosOnly: false
-            })}
-            className="text-[10px] font-bold text-fuchsia-300 hover:text-white px-2.5 py-1 rounded-full bg-fuchsia-500/15 border border-fuchsia-500/30 transition-all active:scale-95"
-          >
-            Resetuj filtry ({activeFilterCount})
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {/* View Mode Switcher: Swipe Cards vs Grid */}
+          <div className="flex items-center gap-1 bg-black/60 border border-white/15 p-1 rounded-2xl backdrop-blur-md shadow-md">
+            <button
+              type="button"
+              id="btn-switch-swipe"
+              onClick={() => setViewMode('swipe')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all active:scale-95 ${
+                viewMode === 'swipe'
+                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.5)]'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="Przełącz na karty do swipe-owania"
+            >
+              <Flame className="w-3.5 h-3.5 fill-current" />
+              <span>Karty</span>
+            </button>
+            <button
+              type="button"
+              id="btn-switch-grid"
+              onClick={() => setViewMode('grid')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all active:scale-95 ${
+                viewMode === 'grid'
+                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.5)]'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="Przełącz na siatkę profili"
+            >
+              <Grid className="w-3.5 h-3.5" />
+              <span>Siatka</span>
+            </button>
+          </div>
+
+          {activeFilterCount > 0 && (
+            <button
+              onClick={() => setFilter({
+                minAge: 18,
+                maxAge: 65,
+                maxDistanceKm: 0,
+                roles: [],
+                lookingFor: [],
+                tribes: [],
+                verifiedOnly: false,
+                onlineOnly: false,
+                hasPhotosOnly: false
+              })}
+              className="text-[10px] font-bold text-fuchsia-300 hover:text-white px-2.5 py-1 rounded-full bg-fuchsia-500/15 border border-fuchsia-500/30 transition-all active:scale-95"
+            >
+              Resetuj ({activeFilterCount})
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Grid Feed */}
+      {/* Feed Content: Swipe Card Deck OR Swipable Grid */}
       {loading ? (
         <Shimmer />
       ) : filteredProfiles.length === 0 ? (
@@ -230,9 +298,9 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
             <Sparkles className="w-6 h-6 text-fuchsia-400" />
           </div>
           <div className="space-y-1">
-            <p className="text-xs font-bold text-slate-200">No profiles match these filters</p>
+            <p className="text-xs font-bold text-slate-200">Brak profili pasujących do filtrów</p>
             <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
-              Try expanding the search radius or adjusting age and selected roles.
+              Spróbuj zwiększyć promień wyszukiwania lub zresetować filtry wieku i preferencji.
             </p>
           </div>
           <button
@@ -249,134 +317,49 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
             })}
             className="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 text-xs font-bold text-white shadow-md shadow-purple-950/40 hover:brightness-110 active:scale-95 transition"
           >
-            Reset Filters
+            Resetuj filtry
           </button>
         </div>
+      ) : viewMode === 'swipe' ? (
+        /* Tactile Motion-Driven Card Deck Mode */
+        <SwipeCardDeck
+          profiles={filteredProfiles}
+          authToken={authToken}
+          currentUser={currentUser}
+          onLikeProfile={onLikeProfile}
+          onOpenChat={onOpenChat}
+          onSelectProfileDetails={setSelectedProfile}
+          onResetFilters={() => setFilter({
+            minAge: 18,
+            maxAge: 65,
+            maxDistanceKm: 100,
+            roles: [],
+            lookingFor: [],
+            tribes: [],
+            verifiedOnly: false,
+            onlineOnly: false,
+            hasPhotosOnly: false
+          })}
+        />
       ) : (
+        /* Multi-Column Swipable Grid Mode */
         <motion.div 
           layout
           className={`grid gap-3 transition-all duration-500 ease-out ${gridClassMap[columns]}`}
         >
           <AnimatePresence>
-            {filteredProfiles.map((p, idx) => (
+            {visibleGridProfiles.map((p, idx) => (
               <React.Fragment key={p.id}>
-                <motion.div
-                  layout
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ duration: 0.3, type: "spring", bounce: 0.2 }}
-                  className="w-full h-full"
-                >
-                  <ProfileAuraFrame
-                    isOnline={p.isOnline}
-                    onClick={() => setSelectedProfile(p)}
-                    className="aspect-[3/4] rounded-[24px] cursor-pointer group transition-all duration-300 ease-out hover:scale-[1.015] active:scale-[0.985] shadow-xl shadow-black/70 h-full w-full relative"
-                    innerClassName="aura-glass-card border border-white/[0.08]"
-                  >
-                    <img
-                      src={p.photos[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
-                      alt={p.displayName}
-                      referrerPolicy="no-referrer"
-                      loading="lazy"
-                      className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
-                    />
-
-                    {/* Soft Top Vignette */}
-                    <div className="absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
-
-                    {/* Top Bar Indicators */}
-                    <div className="absolute top-2.5 inset-x-2.5 flex items-center justify-between pointer-events-none z-10">
-                      {/* Role Badge */}
-                      <span className="bg-black/65 backdrop-blur-md text-fuchsia-300 text-[9px] font-black px-2.5 py-0.5 rounded-full border border-fuchsia-500/35 shadow-md tracking-wider uppercase">
-                        {p.identityRole}
-                      </span>
-
-                      {/* Online Indicator */}
-                      <div className="flex items-center gap-1.5 bg-black/65 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 shadow-md">
-                        <span className={`w-1.5 h-1.5 rounded-full ${p.isOnline ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)] animate-pulse' : 'bg-slate-500'}`} />
-                        <span className="text-[8.5px] font-extrabold text-slate-200 tracking-wider">
-                          {p.isOnline ? 'LIVE' : `${p.lastActiveMinutesAgo || 12}m`}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Quick Tap Feedback Floating Badge */}
-                    {tapSuccessFeedback[p.userId] && (
-                      <div className="absolute inset-0 bg-black/75 backdrop-blur-sm z-30 flex items-center justify-center p-3 animate-in fade-in zoom-in-95 duration-200 pointer-events-none">
-                        <div className="px-3.5 py-2 rounded-2xl bg-gradient-to-r from-fuchsia-600 to-purple-600 border border-white/20 text-white font-black text-xs shadow-2xl tracking-wide flex items-center gap-1.5 animate-bounce">
-                          <span>{tapSuccessFeedback[p.userId]}</span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Quick Tap Menu Overlay */}
-                    {activeTapMenuUserId === p.userId && (
-                      <div
-                        onClick={e => e.stopPropagation()}
-                        className="absolute inset-x-2 bottom-14 bg-black/90 backdrop-blur-xl border border-white/20 rounded-2xl p-2 z-30 shadow-2xl flex items-center justify-around gap-1 animate-in zoom-in-95 duration-150"
-                      >
-                        {[
-                          { type: 'HOT' as const, emoji: '🔥', label: 'Hot' },
-                          { type: 'WOOF' as const, emoji: '🐾', label: 'Woof' },
-                          { type: 'BOLT' as const, emoji: '⚡', label: 'Bolt' },
-                          { type: 'WAVE' as const, emoji: '👋', label: 'Wave' },
-                        ].map(t => (
-                          <button
-                            key={t.type}
-                            type="button"
-                            onClick={e => handleSendQuickTap(e, p.userId, t.type)}
-                            className="flex flex-col items-center p-1.5 rounded-xl hover:bg-white/15 transition active:scale-90"
-                            title={`Wyślij ${t.label}`}
-                          >
-                            <span className="text-xl">{t.emoji}</span>
-                            <span className="text-[8.5px] font-extrabold text-slate-200 mt-0.5">{t.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Cinematic Bottom Fade Overlay */}
-                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#06070c] via-[#06070c]/80 via-45% to-transparent p-3 pt-12 space-y-1 z-10">
-                      <div className="flex items-center justify-between gap-1 overflow-hidden">
-                        <div className="flex items-center gap-1.5 overflow-hidden">
-                          <span className="text-sm font-black text-white tracking-tight drop-shadow-sm truncate">
-                            {p.displayName}, {p.age}
-                          </span>
-                          {p.verified && (
-                            <span className="inline-flex items-center justify-center p-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.35)] shrink-0" title="Verified">
-                              <ShieldCheck className="w-3 h-3 stroke-[2.4]" />
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Quick Tap Trigger Button */}
-                        <button
-                          type="button"
-                          onClick={e => {
-                            e.stopPropagation();
-                            setActiveTapMenuUserId(prev => prev === p.userId ? null : p.userId);
-                          }}
-                          className={`w-7 h-7 rounded-full flex items-center justify-center border transition-all active:scale-90 shrink-0 ${
-                            activeTapMenuUserId === p.userId
-                              ? 'bg-fuchsia-500 border-white text-white shadow-[0_0_12px_rgba(217,70,239,0.8)]'
-                              : 'bg-black/60 border-white/20 text-fuchsia-300 hover:bg-fuchsia-500/30 hover:border-fuchsia-400'
-                          }`}
-                          title="Szybka zaczepka (Quick Tap)"
-                        >
-                          <Zap className="w-3.5 h-3.5 fill-current" />
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[10px] text-slate-300 font-medium">
-                        <span className="truncate max-w-[95px] text-slate-300/90">{p.location || 'Nearby'}</span>
-                        <span className="text-fuchsia-300 font-bold bg-fuchsia-950/50 px-1.5 py-0.5 rounded-md border border-fuchsia-500/25 text-[9.5px] shrink-0">
-                          {formatDistance(p.distanceKm)}
-                        </span>
-                      </div>
-                    </div>
-                  </ProfileAuraFrame>
-                </motion.div>
+                <SwipableGridCard
+                  profile={p}
+                  onSelect={() => setSelectedProfile(p)}
+                  onLike={handleCardLike}
+                  onPass={handleCardPass}
+                  activeTapMenuUserId={activeTapMenuUserId}
+                  setActiveTapMenuUserId={setActiveTapMenuUserId}
+                  tapSuccessFeedback={tapSuccessFeedback}
+                  handleSendQuickTap={handleSendQuickTap}
+                />
 
                 {/* Seamless Native Ad Tile (Shown every AD_FREQUENCY_DISCOVER profiles) */}
                 {(idx + 1) % ADS_CONFIG.AD_FREQUENCY_DISCOVER === 0 && (
@@ -413,8 +396,32 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
           <div className="aura-glass-card rounded-[22px] sm:rounded-[26px] border border-white/15 bg-[#070914]/85 backdrop-blur-2xl shadow-[0_12px_36px_rgba(0,0,0,0.85),0_0_24px_rgba(217,70,239,0.18)_inset] p-2 sm:p-2.5 transition-all duration-300">
             <div className="flex items-center justify-between gap-1.5 sm:gap-2">
               
-              {/* Left: Quick Filter Toggles & Grid Density */}
+              {/* Left: Quick Filter Toggles & Mode */}
               <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                {/* Mode Switcher Button */}
+                <button
+                  type="button"
+                  onClick={() => setViewMode(prev => prev === 'swipe' ? 'grid' : 'swipe')}
+                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] font-extrabold transition-all shrink-0 active:scale-95 ${
+                    viewMode === 'swipe'
+                      ? 'bg-gradient-to-r from-purple-600/30 to-fuchsia-600/30 border border-fuchsia-500/50 text-fuchsia-300 shadow-[0_0_12px_rgba(217,70,239,0.35)]'
+                      : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white'
+                  }`}
+                  title={viewMode === 'swipe' ? 'Przełącz na widok siatki' : 'Przełącz na karty do swipe-owania'}
+                >
+                  {viewMode === 'swipe' ? (
+                    <>
+                      <Grid className="w-3.5 h-3.5 text-fuchsia-300" />
+                      <span>Siatka</span>
+                    </>
+                  ) : (
+                    <>
+                      <Flame className="w-3.5 h-3.5 text-fuchsia-400 fill-current" />
+                      <span>Karty</span>
+                    </>
+                  )}
+                </button>
+
                 {/* Online Filter Toggle */}
                 <button
                   onClick={() => setFilter(prev => ({ ...prev, onlineOnly: !prev.onlineOnly }))}
@@ -443,25 +450,27 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
                   <span className="hidden xs:inline">18+</span>
                 </button>
 
-                {/* Columns Density Switcher */}
-                <div className="flex items-center gap-0.5 bg-black/40 border border-white/10 rounded-full p-0.5 shrink-0">
-                  <div className="px-1.5 opacity-50">
-                    <Grid className="w-3 h-3 text-slate-300" />
+                {/* Columns Density Switcher (Visible in grid mode) */}
+                {viewMode === 'grid' && (
+                  <div className="flex items-center gap-0.5 bg-black/40 border border-white/10 rounded-full p-0.5 shrink-0">
+                    <div className="px-1.5 opacity-50">
+                      <Grid className="w-3 h-3 text-slate-300" />
+                    </div>
+                    {(['auto', 2, 3, 4, 5, 6] as const).map(opt => (
+                      <button
+                        key={opt}
+                        onClick={() => setColumns(opt)}
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-all ${
+                          columns === opt
+                            ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_10px_rgba(217,70,239,0.4)]'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {opt === 'auto' ? 'Auto' : opt}
+                      </button>
+                    ))}
                   </div>
-                  {(['auto', 2, 3, 4, 5, 6] as const).map(opt => (
-                    <button
-                      key={opt}
-                      onClick={() => setColumns(opt)}
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-all ${
-                        columns === opt
-                          ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_10px_rgba(217,70,239,0.4)]'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {opt === 'auto' ? 'Auto' : opt}
-                    </button>
-                  ))}
-                </div>
+                )}
               </div>
 
               {/* Right: Actions (Radar Map & Filters) */}

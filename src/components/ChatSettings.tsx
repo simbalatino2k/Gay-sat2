@@ -1,6 +1,7 @@
 import React from 'react';
 import {
-  Shield, CloudOff, HardDrive, Clock, Lock, Unlock, X, Cloud, CheckCircle2, ShieldCheck
+  Shield, CloudOff, HardDrive, Clock, Lock, Unlock, X, Cloud, CheckCircle2, ShieldCheck,
+  Ban, Flag
 } from 'lucide-react';
 import { Conversation } from '../types';
 
@@ -18,6 +19,8 @@ interface ChatSettingsProps {
   };
   onGrantVaultAccess: (grant: boolean) => Promise<void>;
   onRequestVaultAccess?: () => Promise<void>;
+  onBlockUser: () => void;
+  onReportUser: () => void;
 }
 
 export const ChatSettings: React.FC<ChatSettingsProps> = ({
@@ -29,7 +32,9 @@ export const ChatSettings: React.FC<ChatSettingsProps> = ({
   onToggleDisableAutoBackup,
   vaultStatus,
   onGrantVaultAccess,
-  onRequestVaultAccess
+  onRequestVaultAccess,
+  onBlockUser,
+  onReportUser
 }) => {
   if (!isOpen) return null;
 
@@ -297,6 +302,26 @@ export const ChatSettings: React.FC<ChatSettingsProps> = ({
             )}
           </div>
         </div>
+      </div>
+
+      {/* Safety Actions */}
+      <div className="pt-2 grid grid-cols-2 gap-2 border-t border-white/[0.08]">
+        <button
+          type="button"
+          onClick={onBlockUser}
+          className="py-2.5 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-400 text-[11px] font-bold hover:bg-rose-500/20 transition flex items-center justify-center gap-1.5"
+        >
+          <Ban className="w-4 h-4" />
+          <span>Zablokuj Użytkownika</span>
+        </button>
+        <button
+          type="button"
+          onClick={onReportUser}
+          className="py-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-400 text-[11px] font-bold hover:bg-amber-500/20 transition flex items-center justify-center gap-1.5"
+        >
+          <Flag className="w-4 h-4" />
+          <span>Zgłoś Użytkownika</span>
+        </button>
       </div>
     </div>
   );

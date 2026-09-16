@@ -5,6 +5,9 @@ import { AuraLogo } from './AuraLogo';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   signInWithGoogle, 
+  signInWithApple, 
+  signInWithTwitter, 
+  signInWithFacebook, 
   loginWithFirebaseEmail, 
   registerWithFirebaseEmail, 
   saveProfileToFirestore 
@@ -110,22 +113,34 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     }
   };
 
-  const handleGoogleAuth = async () => {
+  const handleSocialAuth = async (
+    providerName: 'Google' | 'Apple' | 'Twitter' | 'Facebook',
+    authFn: () => Promise<{ token: string; user: any }>
+  ) => {
     setLoading(true);
     setError(null);
     try {
-      const data = await signInWithGoogle();
+      const data = await authFn();
       setSuccess(true);
       setTimeout(() => {
         onComplete(data);
       }, 500);
     } catch (err: any) {
-      console.error('Google Auth Error:', err);
-      setError(err.message || 'Nie udało się zalogować przez Google.');
+      if (err?.code === 'auth/popup-closed-by-user') {
+        setError(`Logowanie przez ${providerName} zostało anulowane.`);
+      } else {
+        console.warn(`[Social Auth] ${providerName} Notice:`, err?.message || err);
+        setError(err?.message || `Nie udało się zalogować przez ${providerName}.`);
+      }
     } finally {
       setLoading(false);
     }
   };
+
+  const handleGoogleAuth = () => handleSocialAuth('Google', signInWithGoogle);
+  const handleAppleAuth = () => handleSocialAuth('Apple', signInWithApple);
+  const handleTwitterAuth = () => handleSocialAuth('Twitter', signInWithTwitter);
+  const handleFacebookAuth = () => handleSocialAuth('Facebook', signInWithFacebook);
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -447,21 +462,72 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
                   </div>
                 ) : (
                   <>
-                    {/* Google Sign-In CTA */}
-                    <button
-                      type="button"
-                      onClick={handleGoogleAuth}
-                      disabled={loading}
-                      className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold text-white transition-all duration-200 active:scale-[0.98] shadow-lg shadow-black/20 group"
-                    >
-                      <svg className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" viewBox="0 0 24 24">
-                        <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.2 9 5 12 5z" />
-                        <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z" />
-                        <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.8s.7 5.1 1.9 7.5l3.7-2.9c-.6-.7-1.1-1.7-1.1-2.9z" />
-                        <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.2-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z" />
-                      </svg>
-                      <span>Zaloguj się przez Google</span>
-                    </button>
+                    {/* Social Sign-In Providers */}
+                    <div className="space-y-2.5">
+                      <div className="grid grid-cols-3 gap-2">
+                        {/* Apple Sign-In */}
+                        <button
+                          type="button"
+                          id="btn-login-apple"
+                          onClick={handleAppleAuth}
+                          disabled={loading}
+                          title="Zaloguj się przez Apple"
+                          className="flex items-center justify-center gap-2 py-3 px-3 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white transition-all duration-200 active:scale-[0.98] group"
+                        >
+                          <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 170 170">
+                            <path d="M150.37 130.25c-2.45 5.66-5.35 10.87-8.71 15.66-4.58 6.53-8.33 11.05-11.22 13.56-4.48 4.12-9.28 6.23-14.42 6.35-3.69 0-8.14-1.05-13.32-3.18-5.19-2.12-9.97-3.17-14.34-3.17-4.58 0-9.49 1.05-14.75 3.17-5.26 2.13-9.5 3.24-12.74 3.35-4.35.13-9.16-1.9-14.42-6.08-3.69-3.04-7.67-7.81-11.96-14.34-5.87-8.91-10.37-18.91-13.5-30-3.13-11.09-4.7-21.52-4.7-31.3 0-14.34 3.73-26.31 11.19-35.91 7.46-9.6 16.73-14.51 27.81-14.73 4.9 0 10.13 1.25 15.69 3.77 5.56 2.52 9.24 3.83 11.04 3.93 1.5.02 5.37-1.35 11.61-4.11 6.24-2.76 11.62-3.96 16.14-3.6 12.01.98 21.6 5.86 28.77 14.65-10.43 6.31-15.54 15.11-15.33 26.4.22 8.91 3.58 16.41 10.08 22.5 6.5 6.09 14.28 9.57 23.34 10.43-1.85 5.66-4.02 11.31-6.51 16.96zM119.22 31.84c0-7.39 2.66-14.34 7.98-20.85 5.32-6.51 11.96-10.54 19.92-12.09.43 1.52.65 3.04.65 4.56 0 7.39-2.77 14.34-8.31 20.85-5.54 6.51-12.18 10.54-19.92 12.09-.22-1.52-.32-3.04-.32-4.56z" />
+                          </svg>
+                          <span className="hidden sm:inline">Apple</span>
+                        </button>
+
+                        {/* Twitter / X Sign-In */}
+                        <button
+                          type="button"
+                          id="btn-login-twitter"
+                          onClick={handleTwitterAuth}
+                          disabled={loading}
+                          title="Zaloguj się przez Twitter (X)"
+                          className="flex items-center justify-center gap-2 py-3 px-3 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white transition-all duration-200 active:scale-[0.98] group"
+                        >
+                          <svg className="w-3.5 h-3.5 shrink-0 fill-current" viewBox="0 0 24 24">
+                            <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                          </svg>
+                          <span className="hidden sm:inline">X / Twitter</span>
+                        </button>
+
+                        {/* Facebook Sign-In */}
+                        <button
+                          type="button"
+                          id="btn-login-facebook"
+                          onClick={handleFacebookAuth}
+                          disabled={loading}
+                          title="Zaloguj się przez Facebook"
+                          className="flex items-center justify-center gap-2 py-3 px-3 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/15 text-xs font-semibold text-white transition-all duration-200 active:scale-[0.98] group"
+                        >
+                          <svg className="w-4 h-4 shrink-0 fill-[#1877F2]" viewBox="0 0 24 24">
+                            <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" />
+                          </svg>
+                          <span className="hidden sm:inline">Facebook</span>
+                        </button>
+                      </div>
+
+                      {/* Google Sign-In Primary Button */}
+                      <button
+                        type="button"
+                        id="btn-login-google"
+                        onClick={handleGoogleAuth}
+                        disabled={loading}
+                        className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-2xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold text-white transition-all duration-200 active:scale-[0.98] shadow-lg shadow-black/20 group"
+                      >
+                        <svg className="w-4 h-4 shrink-0 transition-transform group-hover:scale-110" viewBox="0 0 24 24">
+                          <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.2 9 5 12 5z" />
+                          <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z" />
+                          <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.8s.7 5.1 1.9 7.5l3.7-2.9c-.6-.7-1.1-1.7-1.1-2.9z" />
+                          <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.2-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z" />
+                        </svg>
+                        <span>Kontynuuj przez Google</span>
+                      </button>
+                    </div>
 
                     <div className="relative flex items-center justify-center my-2">
                       <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>

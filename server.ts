@@ -1,3 +1,4 @@
+import { moderateText } from './src/lib/moderation.js';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
   delete (globalThis as any).__dirname;
@@ -9,6 +10,7 @@ import http from 'http';
 import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
 import { store } from './src/db/store';
+import { UserAccount } from './src/types';
 import { QUEER_VENUES, getVenuesNearLocation, searchVenues } from './src/data/queerVenues';
 import { AURA_STICKERS } from './src/data/auraStickers';
 import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
@@ -138,19 +140,19 @@ function authRateLimiter(req: Request, res: Response, next: NextFunction) {
 
 // Custom Auth Request Interface
 interface AuthenticatedRequest extends Request {
-  user?: ReturnType<typeof store.getUserByToken>;
+  user?: UserAccount;
   token?: string;
 }
 
 // Authentication Middleware
-function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+async function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
   if (!authHeader) {
     return res.status(401).json({ error: 'Authentication token required' });
   }
 
   const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-  const user = store.getUserByToken(token);
+  const user = await store.getUserByToken(token);
 
   if (!user) {
     return res.status(401).json({ error: 'Invalid, expired, or deactivated authentication session' });
@@ -165,11 +167,11 @@ function authenticateToken(req: AuthenticatedRequest, res: Response, next: NextF
   next();
 }
 
-function optionalAuthenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+async function optionalAuthenticateToken(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
   if (authHeader) {
     const token = authHeader.replace(/^Bearer\s+/i, '').trim();
-    const user = store.getUserByToken(token);
+    const user = await store.getUserByToken(token);
     if (user && user.status === 'ACTIVE') {
       req.user = user;
       req.token = token;
@@ -212,7 +214,7 @@ app.get('/api/health', (req: Request, res: Response) => {
 });
 
 // Auth: Register
-app.post('/api/auth/register', authRateLimiter, (req: Request, res: Response) => {
+app.post('/api/auth/register', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { email, displayName, age, is18PlusAccepted, isAgeVerified18Plus, password } = req.body;
 
@@ -235,7 +237,7 @@ app.post('/api/auth/register', authRateLimiter, (req: Request, res: Response) =>
       return res.status(400).json({ error: 'Display name must be at least 2 characters long.' });
     }
 
-    const result = store.registerUser(email, cleanName, numAge, 'USER', password);
+    const result = await store.registerUser(email, cleanName, numAge, 'USER', password);
     res.status(201).json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Registration failed' });
@@ -243,14 +245,14 @@ app.post('/api/auth/register', authRateLimiter, (req: Request, res: Response) =>
 });
 
 // Auth: Login
-app.post('/api/auth/login', authRateLimiter, (req: Request, res: Response) => {
+app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
     if (!email || typeof email !== 'string') {
       return res.status(400).json({ error: 'Email address is required.' });
     }
 
-    const result = store.loginUser(email, password);
+    const result = await store.loginUser(email, password);
     if (!result) {
       return res.status(404).json({ error: 'No active account found for this email address. Please register.' });
     }
@@ -261,15 +263,29 @@ app.post('/api/auth/login', authRateLimiter, (req: Request, res: Response) => {
   }
 });
 
+// Auth: Social Fallback / Sandbox Login (when third-party OAuth provider is not yet enabled in Firebase Console)
+app.post('/api/auth/social-dev-login', authRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { provider, email, displayName } = req.body;
+    if (!provider || typeof provider !== 'string') {
+      return res.status(400).json({ error: 'Provider is required' });
+    }
+    const result = await store.loginOrRegisterSocialUser(provider, email, displayName);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Social login failed' });
+  }
+});
+
 // Auth: Forgot Password (Initiate recovery flow)
-app.post('/api/auth/forgot-password', authRateLimiter, (req: Request, res: Response) => {
+app.post('/api/auth/forgot-password', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
     if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       return res.status(400).json({ error: 'Please provide a valid email address.' });
     }
 
-    const result = store.createPasswordReset(email.trim());
+    const result = await store.createPasswordReset(email.trim());
 
     // Prevent account enumeration by always returning a consistent success confirmation
     const responsePayload: any = {
@@ -290,7 +306,7 @@ app.post('/api/auth/forgot-password', authRateLimiter, (req: Request, res: Respo
 });
 
 // Auth: Reset Password (Execute token verification & update)
-app.post('/api/auth/reset-password', authRateLimiter, (req: Request, res: Response) => {
+app.post('/api/auth/reset-password', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { token, newPassword } = req.body;
     if (!token || typeof token !== 'string') {
@@ -301,7 +317,7 @@ app.post('/api/auth/reset-password', authRateLimiter, (req: Request, res: Respon
       return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
     }
 
-    const success = store.resetPasswordWithToken(token.trim(), newPassword);
+    const success = await store.resetPasswordWithToken(token.trim(), newPassword);
     if (!success) {
       return res.status(400).json({ error: 'Password recovery link is invalid or has expired.' });
     }
@@ -338,17 +354,17 @@ app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedR
     }
 
     if (conversationId) {
-      const conv = store.getConversation(conversationId);
+      const conv = await store.getConversation(conversationId);
       if (!conv || !conv.participantIds.includes(req.user!.id)) {
         return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
       }
 
       const otherId = conv.participantIds.find(id => id !== req.user!.id);
       if (otherId) {
-        if (store.isBlocked(req.user!.id, otherId)) {
+        if (await store.isBlocked(req.user!.id, otherId)) {
           return res.status(403).json({ error: 'Cannot upload media to a blocked conversation.' });
         }
-        const otherUser = store.getUserById(otherId);
+        const otherUser = await store.getUserById(otherId);
         if (!otherUser || otherUser.status !== 'ACTIVE') {
           return res.status(403).json({ error: 'Recipient account is not active.' });
         }
@@ -500,7 +516,7 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
     const authHeader = req.headers['authorization'];
     if (authHeader) {
       const cleanToken = authHeader.replace(/^Bearer\s+/i, '').trim();
-      const user = store.getUserByToken(cleanToken);
+      const user = await store.getUserByToken(cleanToken);
       if (user && user.status === 'ACTIVE') {
         requestingUserId = user.id;
       }
@@ -510,12 +526,12 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       const token = String(req.query.token);
       const signedPayload = verifyMediaAccessToken(token);
       if (signedPayload && signedPayload.mediaId === mediaId) {
-        const user = store.getUserById(signedPayload.userId);
+        const user = await store.getUserById(signedPayload.userId);
         if (user && user.status === 'ACTIVE') {
           requestingUserId = user.id;
         }
       } else {
-        const user = store.getUserByToken(token);
+        const user = await store.getUserByToken(token);
         if (user && user.status === 'ACTIVE') {
           requestingUserId = user.id;
         }
@@ -537,25 +553,32 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Media not found or has been deleted.' });
     }
 
+    
+    if (record.category === 'profile_photo' && record.moderationStatus !== 'APPROVED') {
+      if (record.ownerId !== requestingUserId) {
+        return res.status(403).json({ error: 'This profile photo is pending moderation and is currently unavailable.' });
+      }
+    }
+
     // 3. Conversation access control & block check
     if (record.conversationId) {
-      const conv = store.getConversation(record.conversationId);
+      const conv = await store.getConversation(record.conversationId);
       if (!conv || !conv.participantIds.includes(requestingUserId)) {
         return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
       }
 
       const otherId = conv.participantIds.find(id => id !== requestingUserId);
       if (otherId) {
-        if (store.isBlocked(requestingUserId, otherId)) {
+        if (await store.isBlocked(requestingUserId, otherId)) {
           return res.status(403).json({ error: 'Access blocked by user policy.' });
         }
-        const otherUser = store.getUserById(otherId);
+        const otherUser = await store.getUserById(otherId);
         if (!otherUser || otherUser.status !== 'ACTIVE') {
           return res.status(403).json({ error: 'Participant account is inactive.' });
         }
       }
 
-      const msgs = store.getMessages(record.conversationId, requestingUserId);
+      const msgs = await store.getMessages(record.conversationId, requestingUserId);
       const hasActiveMessage = msgs.some(m => 
         m.photo?.mediaId === mediaId || 
         m.voice?.mediaId === mediaId || 
@@ -652,17 +675,26 @@ app.get('/api/auth/me', authenticateToken, (req: AuthenticatedRequest, res: Resp
 });
 
 // Auth: Logout
-app.post('/api/auth/logout', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/logout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   if (req.token) {
-    store.invalidateToken(req.token);
+    await store.invalidateToken(req.token);
   }
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
 // Profile: Update
-app.put('/api/profile', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.put('/api/profile', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = store.updateProfile(req.user!.id, req.body);
+    
+    if (req.body.bio || req.body.displayName) {
+      const textToModerate = `${req.body.displayName || ''} ${req.body.bio || ''}`;
+      const modResult = await moderateText(textToModerate, 'PUBLIC_PROFILE', true);
+      if (!modResult.isApproved) {
+        return res.status(400).json({ error: 'Profile content rejected by safety policy.', reason: modResult.reason });
+      }
+    }
+
+    const updated = await store.updateProfile(req.user!.id, req.body);
     res.json({ profile: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Profile update failed' });
@@ -670,14 +702,14 @@ app.put('/api/profile', authenticateToken, (req: AuthenticatedRequest, res: Resp
 });
 
 // Profile: Add Photo
-app.post('/api/profile/photos', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/profile/photos', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { url, isPrimary } = req.body;
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'Photo URL is required.' });
     }
 
-    const updated = store.addProfilePhoto(req.user!.id, url, Boolean(isPrimary));
+    const updated = await store.addProfilePhoto(req.user!.id, url, Boolean(isPrimary));
     res.json({ profile: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Photo upload failed' });
@@ -685,10 +717,10 @@ app.post('/api/profile/photos', authenticateToken, (req: AuthenticatedRequest, r
 });
 
 // Profile: Delete Photo
-app.delete('/api/profile/photos/:photoId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/profile/photos/:photoId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const photoId = String(req.params.photoId);
-    const updated = store.deleteProfilePhoto(req.user!.id, photoId);
+    const updated = await store.deleteProfilePhoto(req.user!.id, photoId);
     res.json({ profile: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Photo deletion failed' });
@@ -696,13 +728,13 @@ app.delete('/api/profile/photos/:photoId', authenticateToken, (req: Authenticate
 });
 
 // Discovery: Feed & Profiles
-app.get('/api/profiles', (req: Request, res: Response) => {
+app.get('/api/profiles', async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? store.getUserByToken(token) : null;
+    const user = token ? await store.getUserByToken(token) : null;
     const currentUserId = user ? user.id : 'guest';
-    const profiles = store.getDiscoverFeed(currentUserId);
+    const profiles = await store.getDiscoverFeed(currentUserId);
     res.json({ profiles, count: profiles.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch profiles', profiles: [] });
@@ -710,15 +742,15 @@ app.get('/api/profiles', (req: Request, res: Response) => {
 });
 
 // Profile Lookup by User ID
-app.get('/api/profiles/:userId', (req: Request, res: Response) => {
+app.get('/api/profiles/:userId', async (req: Request, res: Response) => {
   try {
     const userId = String(req.params.userId);
     const authHeader = req.headers['authorization'];
     const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? store.getUserByToken(token) : null;
+    const user = token ? await store.getUserByToken(token) : null;
     const requestingUserId = user ? user.id : undefined;
 
-    const profile = store.getProfileById(userId, requestingUserId);
+    const profile = await store.getProfileById(userId, requestingUserId);
     if (!profile) {
       return res.status(404).json({ error: 'User profile not found' });
     }
@@ -728,26 +760,26 @@ app.get('/api/profiles/:userId', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/discover', (req: Request, res: Response) => {
+app.get('/api/discover', async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? store.getUserByToken(token) : null;
+    const user = token ? await store.getUserByToken(token) : null;
     const currentUserId = user ? user.id : 'guest';
-    const feed = store.getDiscoverFeed(currentUserId);
+    const feed = await store.getDiscoverFeed(currentUserId);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch discovery feed', feed: [], profiles: [] });
   }
 });
 
-app.post('/api/discover', (req: Request, res: Response) => {
+app.post('/api/discover', async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers['authorization'];
     const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? store.getUserByToken(token) : null;
+    const user = token ? await store.getUserByToken(token) : null;
     const currentUserId = user ? user.id : 'guest';
-    const feed = store.getDiscoverFeed(currentUserId, req.body);
+    const feed = await store.getDiscoverFeed(currentUserId, req.body);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to fetch discovery feed' });
@@ -782,7 +814,7 @@ app.get('/api/venues', (req: Request, res: Response) => {
 });
 
 // Social: Like / SuperLike (Supports both /api/like and /api/likes)
-const handleLike = (req: AuthenticatedRequest, res: Response) => {
+const handleLike = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.body.targetUserId || req.body.userId;
     const isSuperLike = Boolean(req.body.isSuperLike);
@@ -790,7 +822,7 @@ const handleLike = (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const result = store.likeUser(req.user!.id, targetUserId, isSuperLike);
+    const result = await store.likeUser(req.user!.id, targetUserId, isSuperLike);
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Like interaction failed' });
@@ -800,14 +832,14 @@ app.post('/api/like', authenticateToken, handleLike);
 app.post('/api/likes', authenticateToken, handleLike);
 
 // Social: Block User (Supports both /api/block and /api/blocks)
-const handleBlock = (req: AuthenticatedRequest, res: Response) => {
+const handleBlock = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.body.targetUserId || req.body.blockedUserId || req.body.userId;
     if (!targetUserId || typeof targetUserId !== 'string') {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const record = store.blockUser(req.user!.id, targetUserId);
+    const record = await store.blockUser(req.user!.id, targetUserId);
     res.json({ success: true, blockRecord: record });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Block failed' });
@@ -817,37 +849,39 @@ app.post('/api/block', authenticateToken, handleBlock);
 app.post('/api/blocks', authenticateToken, handleBlock);
 
 // Social: Get Blocked Users
-app.get('/api/blocked', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const blocked = store.getBlockedUsers(req.user!.id);
+app.get('/api/blocked', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const blocked = await store.getBlockedUsers(req.user!.id);
   res.json({ blocked });
 });
 
 // Social: Unblock User
-app.post('/api/unblock', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/unblock', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.body.targetUserId || req.body.blockedUserId;
     if (!targetUserId) {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const success = store.unblockUser(req.user!.id, targetUserId);
+    const success = await store.unblockUser(req.user!.id, targetUserId);
     res.json({ success });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Unblock failed' });
   }
 });
 
-// Safety: Report User (Supports both /api/report and /api/reports)
-const handleReport = (req: AuthenticatedRequest, res: Response) => {
+// Safety: Report User / Message / Media (Supports both /api/report and /api/reports)
+const handleReport = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.body.targetUserId || req.body.reportedUserId || req.body.userId;
     const reason = req.body.reason || 'General Concern';
     const details = req.body.details || '';
+    const reportedMessageId = req.body.reportedMessageId || req.body.messageId;
+    const reportedMediaId = req.body.reportedMediaId || req.body.mediaId;
     if (!targetUserId) {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const report = store.reportUser(req.user!.id, targetUserId, reason, details);
+    const report = await store.reportItem(req.user!.id, targetUserId, reason, details, reportedMessageId, reportedMediaId);
     res.json({ success: true, report });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Safety report submission failed' });
@@ -857,13 +891,13 @@ app.post('/api/report', authenticateToken, handleReport);
 app.post('/api/reports', authenticateToken, handleReport);
 
 // Conversations: Get All
-app.get('/api/conversations', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const conversations = store.getUserConversations(req.user!.id);
+app.get('/api/conversations', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const conversations = await store.getUserConversations(req.user!.id);
   res.json({ conversations });
 });
 
 // Conversations: Get or Start Conversation with a Specific User
-const handleStartConversation = (req: AuthenticatedRequest, res: Response) => {
+const handleStartConversation = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.body.targetUserId || req.body.recipientId || req.body.otherUserId;
     if (!targetUserId || typeof targetUserId !== 'string') {
@@ -874,11 +908,11 @@ const handleStartConversation = (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({ error: 'Cannot start conversation with yourself.' });
     }
 
-    if (store.isBlocked(req.user!.id, targetUserId)) {
+    if (await store.isBlocked(req.user!.id, targetUserId)) {
       return res.status(403).json({ error: 'Cannot start conversation with blocked user.' });
     }
 
-    const conversation = store.getOrCreateConversation(req.user!.id, targetUserId);
+    const conversation = await store.getOrCreateConversation(req.user!.id, targetUserId);
     res.json({ conversation });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to start or retrieve conversation.' });
@@ -888,11 +922,11 @@ app.post('/api/conversations', authenticateToken, handleStartConversation);
 app.post('/api/conversations/start', authenticateToken, handleStartConversation);
 
 // Conversations: Get Messages
-app.get('/api/conversations/:conversationId/messages', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/conversations/:conversationId/messages', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
-    const messages = store.getMessages(conversationId, req.user!.id);
-    store.markMessagesRead(conversationId, req.user!.id);
+    const messages = await store.getMessages(conversationId, req.user!.id);
+    await store.markMessagesRead(conversationId, req.user!.id);
     res.json({ messages });
   } catch (err: any) {
     res.status(403).json({ error: err.message || 'Access to messages denied' });
@@ -900,7 +934,7 @@ app.get('/api/conversations/:conversationId/messages', authenticateToken, (req: 
 });
 
 // Conversations: Send Message
-app.post('/api/conversations/:conversationId/messages', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/conversations/:conversationId/messages', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
     const {
@@ -1047,29 +1081,29 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, (req:
       return res.status(400).json({ error: 'Message content is required.' });
     }
 
-    const message = store.sendMessage(req.user!.id, conversationId, {
-      type: messageType,
-      text,
-      photoUrl,
-      media,
-      linkPreview,
-      location: finalLocation,
-      locationPayload: finalLocationPayload,
-      photo,
-      link,
-      stickerPayload,
-      voice,
-      starVideo,
-      stickerId: finalStickerId,
-      stickerUrl: finalStickerUrl,
-      stickerName: finalStickerName,
-      ttlSeconds: typeof ttlSeconds === 'number' ? ttlSeconds : undefined,
-      isPermanent: Boolean(isPermanent),
-      excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
-      disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined,
-      tapType,
-      vaultAction
-    });
+    const message = await store.sendMessage(req.user!.id, conversationId, {
+          type: messageType,
+          text,
+          photoUrl,
+          media,
+          linkPreview,
+          location: finalLocation,
+          locationPayload: finalLocationPayload,
+          photo,
+          link,
+          stickerPayload,
+          voice,
+          starVideo,
+          stickerId: finalStickerId,
+          stickerUrl: finalStickerUrl,
+          stickerName: finalStickerName,
+          ttlSeconds: typeof ttlSeconds === 'number' ? ttlSeconds : undefined,
+          isPermanent: Boolean(isPermanent),
+          excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
+          disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined,
+          tapType,
+          vaultAction
+        });
     res.status(201).json({ message });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to send message' });
@@ -1077,13 +1111,13 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, (req:
 });
 
 // Conversations: Delete Message (Supports both for_me and for_everyone)
-app.delete('/api/conversations/:conversationId/messages/:messageId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/conversations/:conversationId/messages/:messageId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
     const messageId = String(req.params.messageId);
     const mode = (req.query.mode === 'for_everyone' || req.body?.mode === 'for_everyone') ? 'for_everyone' : 'for_me';
 
-    store.deleteMessage(conversationId, messageId, req.user!.id, mode);
+    await store.deleteMessage(conversationId, messageId, req.user!.id, mode);
     res.json({ success: true, message: 'Message deleted successfully.' });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to delete message' });
@@ -1091,15 +1125,15 @@ app.delete('/api/conversations/:conversationId/messages/:messageId', authenticat
 });
 
 // Update conversation retention and privacy settings
-app.patch('/api/conversations/:conversationId/settings', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.patch('/api/conversations/:conversationId/settings', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
     const { messageTtlSeconds, excludeFromBackup, disableAutoBackup } = req.body;
-    const conversation = store.updateConversationSettings(conversationId, req.user!.id, {
-      messageTtlSeconds: typeof messageTtlSeconds === 'number' ? messageTtlSeconds : undefined,
-      excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
-      disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined
-    });
+    const conversation = await store.updateConversationSettings(conversationId, req.user!.id, {
+          messageTtlSeconds: typeof messageTtlSeconds === 'number' ? messageTtlSeconds : undefined,
+          excludeFromBackup: typeof excludeFromBackup === 'boolean' ? excludeFromBackup : undefined,
+          disableAutoBackup: typeof disableAutoBackup === 'boolean' ? disableAutoBackup : undefined
+        });
     res.json({ success: true, conversation, settings: conversation.settings });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update conversation settings' });
@@ -1107,11 +1141,11 @@ app.patch('/api/conversations/:conversationId/settings', authenticateToken, (req
 });
 
 // Toggle message permanent status (pin/save permanently)
-app.post('/api/conversations/:conversationId/messages/:messageId/permanent', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/conversations/:conversationId/messages/:messageId/permanent', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const conversationId = String(req.params.conversationId);
     const messageId = String(req.params.messageId);
-    const message = store.toggleMessagePermanent(messageId, conversationId, req.user!.id);
+    const message = await store.toggleMessagePermanent(messageId, conversationId, req.user!.id);
     res.json({ success: true, message });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to toggle message permanence' });
@@ -1119,13 +1153,13 @@ app.post('/api/conversations/:conversationId/messages/:messageId/permanent', aut
 });
 
 // Quick Taps (Aura Tap / Woof / Ogień)
-app.post('/api/taps', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/taps', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { targetUserId, tapType } = req.body;
     if (!targetUserId || !tapType) {
       return res.status(400).json({ error: 'targetUserId and tapType are required' });
     }
-    const result = store.sendTap(req.user!.id, targetUserId, tapType);
+    const result = await store.sendTap(req.user!.id, targetUserId, tapType);
     res.status(201).json({ success: true, ...result });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to send tap' });
@@ -1133,15 +1167,16 @@ app.post('/api/taps', authenticateToken, (req: AuthenticatedRequest, res: Respon
 });
 
 // Vault Access: Request Access
-app.post('/api/vault/request', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/vault/request', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { targetUserId } = req.body;
     if (!targetUserId) {
       return res.status(400).json({ error: 'targetUserId is required' });
     }
-    store.requestVaultAccess(req.user!.id, targetUserId);
-    const conv = store.getOrCreateConversation(req.user!.id, targetUserId);
-    const message = store.sendMessage(req.user!.id, conv.id, {
+    await store.requestVaultAccess(req.user!.id, targetUserId);
+    const conv = await store.getOrCreateConversation(req.user!.id, targetUserId);
+
+    const message = await store.sendMessage(req.user!.id, conv.id, {
       type: 'VAULT_ACTION',
       vaultAction: 'REQUEST',
       text: '📸 Poprosił o dostęp do Twojego prywatnego albumu'
@@ -1153,20 +1188,20 @@ app.post('/api/vault/request', authenticateToken, (req: AuthenticatedRequest, re
 });
 
 // Vault Access: Grant / Revoke Access
-app.post('/api/vault/grant', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/vault/grant', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { targetUserId, grant } = req.body;
     if (!targetUserId || grant === undefined) {
       return res.status(400).json({ error: 'targetUserId and grant boolean are required' });
     }
     const isGranted = Boolean(grant);
-    store.grantVaultAccess(req.user!.id, targetUserId, isGranted);
-    const conv = store.getOrCreateConversation(req.user!.id, targetUserId);
-    const message = store.sendMessage(req.user!.id, conv.id, {
-      type: 'VAULT_ACTION',
-      vaultAction: isGranted ? 'GRANT' : 'REVOKE',
-      text: isGranted ? '🔓 Przyznał Ci dostęp do prywatnego albumu' : '🔒 Cofnął dostęp do prywatnego albumu'
-    });
+    await store.grantVaultAccess(req.user!.id, targetUserId, isGranted);
+    const conv = await store.getOrCreateConversation(req.user!.id, targetUserId);
+    const message = await store.sendMessage(req.user!.id, conv.id, {
+          type: 'VAULT_ACTION',
+          vaultAction: isGranted ? 'GRANT' : 'REVOKE',
+          text: isGranted ? '🔓 Przyznał Ci dostęp do prywatnego albumu' : '🔒 Cofnął dostęp do prywatnego albumu'
+        });
     res.json({ success: true, granted: isGranted, message });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update vault access' });
@@ -1174,12 +1209,12 @@ app.post('/api/vault/grant', authenticateToken, (req: AuthenticatedRequest, res:
 });
 
 // Vault Access: Get Status
-app.get('/api/vault/status/:targetUserId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/vault/status/:targetUserId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = String(req.params.targetUserId);
-    const hasAccess = store.hasVaultAccess(targetUserId, req.user!.id);
-    const requested = store.isVaultRequested(req.user!.id, targetUserId);
-    const iGrantedAccess = store.hasVaultAccess(req.user!.id, targetUserId);
+    const hasAccess = await store.hasVaultAccess(targetUserId, req.user!.id);
+    const requested = await store.isVaultRequested(req.user!.id, targetUserId);
+    const iGrantedAccess = await store.hasVaultAccess(req.user!.id, targetUserId);
     res.json({ hasAccess, requested, iGrantedAccess });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to fetch vault status' });
@@ -1187,57 +1222,57 @@ app.get('/api/vault/status/:targetUserId', authenticateToken, (req: Authenticate
 });
 
 // Moments / Stories Routes
-app.get('/api/moments', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const moments = store.getMoments(req.user!.id);
+app.get('/api/moments', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const moments = await store.getMoments(req.user!.id);
   res.json({ moments });
 });
 
-app.post('/api/moments', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/moments', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { mediaUrl, mediaType, caption, privacy, allowedUserIds } = req.body;
     if (!mediaUrl || typeof mediaUrl !== 'string') {
       return res.status(400).json({ error: 'Media URL is required for moment creation.' });
     }
 
-    const moment = store.createMoment(req.user!.id, {
-      mediaUrl,
-      mediaType,
-      caption,
-      privacy,
-      allowedUserIds
-    });
+    const moment = await store.createMoment(req.user!.id, {
+          mediaUrl,
+          mediaType,
+          caption,
+          privacy,
+          allowedUserIds
+        });
     res.status(201).json({ moment });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to post moment' });
   }
 });
 
-app.post('/api/moments/:momentId/like', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/moments/:momentId/like', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const momentId = String(req.params.momentId);
-  const success = store.likeMoment(req.user!.id, momentId);
+  const success = await store.likeMoment(req.user!.id, momentId);
   res.json({ success });
 });
 
-app.post('/api/moments/:momentId/view', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/moments/:momentId/view', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const momentId = String(req.params.momentId);
-  const success = store.viewMoment(req.user!.id, momentId);
+  const success = await store.viewMoment(req.user!.id, momentId);
   res.json({ success });
 });
 
-app.delete('/api/moments/:momentId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/moments/:momentId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   const momentId = String(req.params.momentId);
-  const success = store.deleteMoment(req.user!.id, momentId);
+  const success = await store.deleteMoment(req.user!.id, momentId);
   res.json({ success });
 });
 
-app.post('/api/moments/:momentId/reply', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/moments/:momentId/reply', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { text, targetUserId } = req.body;
     if (!text || !targetUserId) {
       return res.status(400).json({ error: 'Text and targetUserId are required.' });
     }
-    const conv = store.getOrCreateConversation(req.user!.id, targetUserId);
-    const message = store.sendMessage(req.user!.id, conv.id, text);
+    const conv = await store.getOrCreateConversation(req.user!.id, targetUserId);
+    const message = await store.sendMessage(req.user!.id, conv.id, text);
     res.status(201).json({ success: true, message, conversationId: conv.id });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to reply to moment' });
@@ -1247,18 +1282,18 @@ app.post('/api/moments/:momentId/reply', authenticateToken, (req: AuthenticatedR
 // --- GDPR Subject Rights (Articles 15, 16, 17, 18, 20, 21) ---
 
 // Consents Management (Art. 7)
-app.get('/api/gdpr/consents', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/gdpr/consents', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const consents = store.getUserConsents(req.user!.id);
+    const consents = await store.getUserConsents(req.user!.id);
     res.json({ consents });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch consents' });
   }
 });
 
-app.put('/api/gdpr/consents', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.put('/api/gdpr/consents', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const updated = store.updateUserConsents(req.user!.id, req.body);
+    const updated = await store.updateUserConsents(req.user!.id, req.body);
     res.json({ consents: updated, message: 'Privacy consents updated successfully' });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update consents' });
@@ -1266,9 +1301,9 @@ app.put('/api/gdpr/consents', authenticateToken, (req: AuthenticatedRequest, res
 });
 
 // Right to Access & Data Portability (Art. 15 & 20)
-app.get('/api/gdpr/export', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.get('/api/gdpr/export', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const exportData = store.exportUserData(req.user!.id);
+    const exportData = await store.exportUserData(req.user!.id);
     res.setHeader('Content-Disposition', `attachment; filename="aura-gdpr-export-${req.user!.id}.json"`);
     res.setHeader('Content-Type', 'application/json');
     res.json(exportData);
@@ -1301,10 +1336,10 @@ app.post('/api/backup/cloud/run', authenticateToken, async (req: AuthenticatedRe
 });
 
 // Right to Rectification (Art. 16)
-app.post('/api/gdpr/rectify', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/gdpr/rectify', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { email, displayName, bio } = req.body;
-    const user = store.rectifyUserData(req.user!.id, { email, displayName, bio });
+    const user = await store.rectifyUserData(req.user!.id, { email, displayName, bio });
     res.json({ success: true, user, message: 'Data rectified successfully' });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Rectification failed' });
@@ -1312,12 +1347,12 @@ app.post('/api/gdpr/rectify', authenticateToken, (req: AuthenticatedRequest, res
 });
 
 // Right to Restriction of Processing (Art. 18)
-app.post('/api/gdpr/restrict', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/gdpr/restrict', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const reason = (req.body.reason || 'Data subject requested restriction under GDPR Art. 18').toString();
-    const success = store.restrictAccount(req.user!.id, reason);
+    const success = await store.restrictAccount(req.user!.id, reason);
     if (req.token) {
-      store.invalidateToken(req.token);
+      await store.invalidateToken(req.token);
     }
     res.json({ success, message: 'Processing restricted and account suspended' });
   } catch (err: any) {
@@ -1326,10 +1361,10 @@ app.post('/api/gdpr/restrict', authenticateToken, (req: AuthenticatedRequest, re
 });
 
 // Right to Object (Art. 21 - AI & Analytics)
-app.post('/api/gdpr/object', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/gdpr/object', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const reason = (req.body.reason || 'General objection to profiling / AI processing').toString();
-    const success = store.recordObjection(req.user!.id, reason);
+    const success = await store.recordObjection(req.user!.id, reason);
     res.json({ success, message: 'Objection recorded. AI processing and analytics disabled for your account.' });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Objection recording failed' });
@@ -1337,11 +1372,11 @@ app.post('/api/gdpr/object', authenticateToken, (req: AuthenticatedRequest, res:
 });
 
 // Right to Erasure / Account Deletion (Art. 17)
-app.post('/api/gdpr/erase', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/gdpr/erase', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const success = store.eraseUserData(req.user!.id);
+    const success = await store.eraseUserData(req.user!.id);
     if (req.token) {
-      store.invalidateToken(req.token);
+      await store.invalidateToken(req.token);
     }
     res.json({
       success,
@@ -1352,11 +1387,11 @@ app.post('/api/gdpr/erase', authenticateToken, (req: AuthenticatedRequest, res: 
   }
 });
 
-app.delete('/api/account', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/account', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const success = store.eraseUserData(req.user!.id);
+    const success = await store.eraseUserData(req.user!.id);
     if (req.token) {
-      store.invalidateToken(req.token);
+      await store.invalidateToken(req.token);
     }
     res.json({ success, message: 'Account and personal data permanently erased.' });
   } catch (err: any) {
@@ -1367,14 +1402,14 @@ app.delete('/api/account', authenticateToken, (req: AuthenticatedRequest, res: R
 // --- DSA Compliance (Articles 15, 16, 17, 20, 22) ---
 
 // Notice and Action Mechanism (DSA Art. 16)
-app.post('/api/dsa/report', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/dsa/report', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { reportedUserId, reason, details } = req.body;
     if (!reportedUserId || !reason) {
       return res.status(400).json({ error: 'reportedUserId and valid DSA reason are required' });
     }
 
-    const report = store.submitDsaReport(req.user!.id, reportedUserId, reason, details);
+    const report = await store.submitDsaReport(req.user!.id, reportedUserId, reason, details);
     res.status(201).json({
       success: true,
       report,
@@ -1386,26 +1421,26 @@ app.post('/api/dsa/report', authenticateToken, (req: AuthenticatedRequest, res: 
 });
 
 // User's Submitted Reports Status (DSA Art. 16(5))
-app.get('/api/dsa/reports/my', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const reports = store.getUserSubmittedReports(req.user!.id);
+app.get('/api/dsa/reports/my', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const reports = await store.getUserSubmittedReports(req.user!.id);
   res.json({ reports });
 });
 
 // Statement of Reasons / Moderation Notices (DSA Art. 17)
-app.get('/api/dsa/notices', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const notices = store.getModerationNoticesForUser(req.user!.id);
+app.get('/api/dsa/notices', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const notices = await store.getModerationNoticesForUser(req.user!.id);
   res.json({ notices });
 });
 
 // Internal Complaint-Handling System / Appeal (DSA Art. 20)
-app.post('/api/dsa/appeal', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/dsa/appeal', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { noticeId, appealReason } = req.body;
     if (!noticeId || !appealReason || typeof appealReason !== 'string' || appealReason.trim().length < 10) {
       return res.status(400).json({ error: 'noticeId and detailed appealReason (at least 10 chars) are required' });
     }
 
-    const appeal = store.submitDsaAppeal(req.user!.id, noticeId, appealReason);
+    const appeal = await store.submitDsaAppeal(req.user!.id, noticeId, appealReason);
     res.status(201).json({
       success: true,
       appeal,
@@ -1417,8 +1452,8 @@ app.post('/api/dsa/appeal', authenticateToken, (req: AuthenticatedRequest, res: 
 });
 
 // DSA Transparency Report Summary (DSA Art. 15)
-app.get('/api/dsa/transparency', (req: Request, res: Response) => {
-  const stats = store.getAdminStats();
+app.get('/api/dsa/transparency', async (req: Request, res: Response) => {
+  const stats = await store.getAdminStats();
   res.json({
     reportingPeriod: '2026-H1',
     activeRecipientsOfServiceEU: stats.totalUsers,
@@ -1459,8 +1494,8 @@ app.get('/api/ai/transparency', (req: Request, res: Response) => {
 });
 
 // Matches: Get All
-app.get('/api/matches', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const matches = store.getUserMatches(req.user!.id);
+app.get('/api/matches', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const matches = await store.getUserMatches(req.user!.id);
   res.json({ matches });
 });
 
@@ -1471,7 +1506,7 @@ const handleAIIcebreaker = async (req: AuthenticatedRequest, res: Response) => {
   const vibe = req.body.vibe || 'Playful & Witty';
 
   if (!targetProfile && targetUserId) {
-    const foundUser = store.getUserById(targetUserId);
+    const foundUser = await store.getUserById(targetUserId);
     if (foundUser) {
       targetProfile = foundUser.profile;
     }
@@ -1481,7 +1516,7 @@ const handleAIIcebreaker = async (req: AuthenticatedRequest, res: Response) => {
     return res.status(400).json({ error: 'Target profile details required for AI propositions.' });
   }
 
-  if (targetProfile.userId && store.isBlocked(req.user!.id, targetProfile.userId)) {
+  if (targetProfile.userId && await store.isBlocked(req.user!.id, targetProfile.userId)) {
     return res.status(403).json({ error: 'Cannot generate AI propositions for blocked member.' });
   }
 
@@ -1671,11 +1706,11 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
   }
 
   // Idempotency check: Ignore already processed events
-  if (store.isStripeEventProcessed(event.id)) {
+  if (await store.isStripeEventProcessed(event.id)) {
     return res.json({ received: true, message: 'Event already processed' });
   }
 
-  store.recordStripeEvent(event.id, event.type);
+  await store.recordStripeEvent(event.id, event.type);
   console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
 
   try {
@@ -1688,12 +1723,12 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         const planId = session.metadata?.planId || 'aura_vip_monthly';
 
         if (userId) {
-          store.recordStripeSubscription(userId, customerId, subscriptionId, planId, 'active');
+          await store.recordStripeSubscription(userId, customerId, subscriptionId, planId, 'active');
           console.log(`[Stripe Webhook] Activated VIP for user ${userId}`);
         } else if (customerId) {
-          const user = store.findUserByStripeCustomerId(customerId);
+          const user = await store.findUserByStripeCustomerId(customerId);
           if (user) {
-            store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, 'active');
+            await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, 'active');
             console.log(`[Stripe Webhook] Activated VIP for user ${user.id} via customer ID`);
           }
         }
@@ -1710,16 +1745,16 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         const planId = sub.metadata?.planId || 'aura_vip_monthly';
         const userId = sub.metadata?.userId;
 
-        let user = userId ? store.getUserById(userId) : null;
+        let user = userId ? await store.getUserById(userId) : null;
         if (!user && customerId) {
-          user = store.findUserByStripeCustomerId(customerId);
+          user = await store.findUserByStripeCustomerId(customerId);
         }
         if (!user && subscriptionId) {
-          user = store.findUserByStripeSubscriptionId(subscriptionId);
+          user = await store.findUserByStripeSubscriptionId(subscriptionId);
         }
 
         if (user) {
-          store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, status, periodEnd);
+          await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, status, periodEnd);
           console.log(`[Stripe Webhook] Updated subscription for user ${user.id}: status=${status}`);
         }
         break;
@@ -1731,9 +1766,9 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         const customerId = obj.customer as string;
         const subscriptionId = (obj.subscription || obj.id) as string;
 
-        let user = store.findUserByStripeCustomerId(customerId) || store.findUserByStripeSubscriptionId(subscriptionId);
+        let user = await store.findUserByStripeCustomerId(customerId) || await store.findUserByStripeSubscriptionId(subscriptionId);
         if (user) {
-          store.recordStripeSubscription(user.id, customerId, subscriptionId, 'none', 'canceled');
+          await store.recordStripeSubscription(user.id, customerId, subscriptionId, 'none', 'canceled');
           console.log(`[Stripe Webhook] Deactivated VIP for user ${user.id} following cancellation or payment failure`);
         }
         break;
@@ -1879,24 +1914,24 @@ app.post('/api/billing/webhook/apple-storekit', async (req: Request, res: Respon
 });
 
 // Admin: Analytics & Moderation Dashboard
-app.get('/api/admin/stats', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const stats = store.getAdminStats();
+app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const stats = await store.getAdminStats();
   res.json({ stats });
 });
 
-app.get('/api/admin/reports', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const reports = store.getReports();
+app.get('/api/admin/reports', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const reports = await store.getReports();
   res.json({ reports });
 });
 
-const handleAdminSuspend = (req: AuthenticatedRequest, res: Response) => {
+const handleAdminSuspend = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const targetUserId = req.params.userId || req.body.targetUserId;
     if (!targetUserId) {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const success = store.suspendUser(targetUserId);
+    const success = await store.suspendUser(targetUserId);
     res.json({ success, message: `User ${targetUserId} suspended successfully` });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'User suspension failed' });
@@ -1905,14 +1940,14 @@ const handleAdminSuspend = (req: AuthenticatedRequest, res: Response) => {
 app.post('/api/admin/suspend', authenticateToken, requireAdmin, handleAdminSuspend);
 app.post('/api/admin/users/:userId/suspend', authenticateToken, requireAdmin, handleAdminSuspend);
 
-app.post('/api/admin/soft-delete', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/soft-delete', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { targetUserId } = req.body;
     if (!targetUserId) {
       return res.status(400).json({ error: 'Target user ID is required.' });
     }
 
-    const success = store.softDeleteUser(targetUserId);
+    const success = await store.softDeleteUser(targetUserId);
     res.json({ success, message: `User ${targetUserId} soft-deleted successfully` });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Soft delete failed' });
@@ -1920,12 +1955,12 @@ app.post('/api/admin/soft-delete', authenticateToken, requireAdmin, (req: Authen
 });
 
 // Admin: DSA Appeals Management (DSA Art. 20)
-app.get('/api/admin/dsa/appeals', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const appeals = store.getDsaAppeals();
+app.get('/api/admin/dsa/appeals', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const appeals = await store.getDsaAppeals();
   res.json({ appeals });
 });
 
-app.post('/api/admin/dsa/appeals/:appealId/decide', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/dsa/appeals/:appealId/decide', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const appealId = String(req.params.appealId);
     const { outcome, decisionNotes } = req.body;
@@ -1936,7 +1971,7 @@ app.post('/api/admin/dsa/appeals/:appealId/decide', authenticateToken, requireAd
       return res.status(400).json({ error: 'Written decision notes are required under DSA Article 20' });
     }
 
-    const decided = store.adminDecideAppeal(req.user!.id, appealId, outcome, decisionNotes);
+    const decided = await store.adminDecideAppeal(req.user!.id, appealId, outcome, decisionNotes);
     res.json({ success: true, appeal: decided });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to decide appeal' });
@@ -1944,7 +1979,7 @@ app.post('/api/admin/dsa/appeals/:appealId/decide', authenticateToken, requireAd
 });
 
 // Admin: DSA Statement of Reasons Report Decision (DSA Art. 17)
-app.post('/api/admin/dsa/reports/:reportId/decide', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/admin/dsa/reports/:reportId/decide', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const reportId = String(req.params.reportId);
     const { decision, legalBasis, statementOfReasons } = req.body;
@@ -1952,7 +1987,7 @@ app.post('/api/admin/dsa/reports/:reportId/decide', authenticateToken, requireAd
       return res.status(400).json({ error: 'decision, legalBasis, and statementOfReasons are mandatory under DSA Art. 17' });
     }
 
-    const notice = store.adminDecideReport(req.user!.id, reportId, decision, legalBasis, statementOfReasons);
+    const notice = await store.adminDecideReport(req.user!.id, reportId, decision, legalBasis, statementOfReasons);
     res.json({ success: true, notice });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to process report decision' });
@@ -1960,14 +1995,14 @@ app.post('/api/admin/dsa/reports/:reportId/decide', authenticateToken, requireAd
 });
 
 // Admin: Immutable Audit Logs (GDPR Art. 5(2) & DSA Art. 28)
-app.get('/api/admin/audit-logs', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const auditLogs = store.getAdminAuditLogs();
+app.get('/api/admin/audit-logs', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const auditLogs = await store.getAdminAuditLogs();
   res.json({ auditLogs });
 });
 
 // Admin: Purge bot accounts and synthetic profiles
-app.post('/api/admin/purge-bots', authenticateToken, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const result = store.purgeBotAccounts();
+app.post('/api/admin/purge-bots', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  const result = await store.purgeBotAccounts();
   res.json({ success: true, ...result });
 });
 
@@ -2012,6 +2047,9 @@ app.all('/api/*', (req: Request, res: Response) => {
 
 // Vite Server Integration (Dev vs Prod)
 async function startServer() {
+  // Hydrate memory store from PostgreSQL
+  await store.hydrateFromPostgres();
+
   const isProduction =
     process.env.NODE_ENV === 'production' ||
     (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));

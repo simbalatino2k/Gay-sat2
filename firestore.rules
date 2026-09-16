@@ -12,11 +12,10 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Users collection
+    // Users collection (public dating profiles discovery)
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.auth.uid == userId;
-      allow update: if isOwner(userId);
+      allow read: if true;
+      allow create, update: if isAuthenticated() && request.auth.uid == userId;
       allow delete: if isOwner(userId);
     }
 

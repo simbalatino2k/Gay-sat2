@@ -107,6 +107,7 @@ export interface MatchRecord {
   id: string;
   user1Id: string;
   user2Id: string;
+  isSuperMatch?: boolean;
   createdAt: string;
   matchedProfile?: UserProfile;
 }
@@ -127,6 +128,12 @@ export interface ReportRecord {
   status: 'PENDING' | 'RESOLVED' | 'DISMISSED';
   createdAt: string;
   reportedProfile?: UserProfile;
+  reportedMessageId?: string;
+  reportedMediaId?: string;
+  decision?: string;
+  decisionReason?: string;
+  decidedAt?: string;
+  decidedBy?: string;
 }
 
 export type MessageStatus = 'SENT' | 'DELIVERED' | 'READ';
@@ -219,6 +226,7 @@ export interface LocationInfo {
 
 export interface Message {
   id: string;
+  clientMessageId?: string; // Idempotency key for message delivery
   conversationId: string;
   senderId: string;
   receiverId: string;
@@ -280,6 +288,8 @@ export interface Conversation {
   vaultAccessReceived?: boolean; // other user granted their vault to current user
   vaultRequested?: boolean; // current user requested other's vault
   settings?: ConversationSettings;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface FilterState {
@@ -312,6 +322,9 @@ export interface Moment {
   viewsCount: number;
   likesCount: number;
   hasLiked?: boolean;
+  isSensitive?: boolean;
+  isBlurred?: boolean;
+  moderationStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
 }
 
 export interface IcebreakerRequest {
@@ -350,6 +363,7 @@ export interface UserConsents {
   termsAcceptedVersion: string;
   privacyPolicyAcceptedVersion: string;
   updatedAt: string;
+  safeContentEnabled?: boolean; // Safe Content setting: sexual/sensitive content blurred/hidden by default
 }
 
 export interface SessionRecord {

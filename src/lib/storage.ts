@@ -8,6 +8,7 @@ import {
   inspectMp4DurationSeconds 
 } from './mediaSecurity';
 import { MEDIA_LIMITS } from '../config/mediaConfig';
+import { getPostgresPool } from '../db/postgres';
 
 export interface MediaRecord {
   id: string; // Unpredictable crypto UUID
@@ -20,6 +21,8 @@ export interface MediaRecord {
   height?: number;
   duration?: number;
   filename: string; // internal storage path / gcs key
+  moderationStatus?: "PENDING" | "APPROVED" | "REJECTED";
+  moderationReason?: string;
   thumbnailFilename?: string;
   caption?: string;
   createdAt: string;
@@ -296,6 +299,27 @@ export async function processAndSaveMedia(opts: ProcessAndSaveMediaOptions): Pro
   mediaRegistry.set(mediaId, record);
   persistRegistryToDisk();
 
+  const pool = getPostgresPool();
+  if (pool) {
+    pool.query(
+      `INSERT INTO media_records (id, owner_id, category, moderation_status, moderation_reason, mime_type, size, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (id) DO UPDATE SET
+         moderation_status = EXCLUDED.moderation_status,
+         moderation_reason = EXCLUDED.moderation_reason`,
+      [
+        record.id,
+        record.ownerId,
+        record.category,
+        record.moderationStatus || 'PENDING',
+        record.moderationReason || null,
+        record.mimeType,
+        record.size,
+        new Date(record.createdAt)
+      ]
+    ).catch(e => console.error('[Storage PG] Error inserting media record:', e.message));
+  }
+
   return record;
 }
 
@@ -446,4 +470,27 @@ export function deleteMediaFile(filename: string): boolean {
   } catch (err) {
     return false;
   }
+}
+
+
+export function getPendingMedia(): MediaRecord[] {
+  return Array.from(mediaRegistry.values()).filter(m => m.moderationStatus === 'PENDING');
+}
+
+export function updateMediaModeration(mediaId: string, status: 'APPROVED' | 'REJECTED', reason?: string): boolean {
+  const record = mediaRegistry.get(mediaId);
+  if (!record) return false;
+  record.moderationStatus = status;
+  record.moderationReason = reason;
+  persistRegistryToDisk();
+
+  const pool = getPostgresPool();
+  if (pool) {
+    pool.query(
+      'UPDATE media_records SET moderation_status = $1, moderation_reason = $2 WHERE id = $3',
+      [status, reason || null, mediaId]
+    ).catch(e => console.error('[Storage PG] Error updating media moderation:', e.message));
+  }
+
+  return true;
 }

@@ -8,7 +8,8 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "NODE_ENV=production node dist/server.cjs",
     "lint": "tsc --noEmit",
-    "test:billing": "tsx scripts/test_billing_security.ts"
+    "test:billing": "tsx scripts/test_billing_security.ts",
+    "verify:db": "tsx scripts/verify_cloud_sql.ts"
   },
   "dependencies": {
     "@apple/app-store-server-library": "^3.1.0",
@@ -30,7 +31,8 @@
     "react-dom": "^18.3.1",
     "sharp": "^0.35.4",
     "stripe": "^22.6.1",
-    "tailwindcss": "^4.0.0"
+    "tailwindcss": "^4.0.0",
+    "ts-morph": "^28.0.0"
   },
   "devDependencies": {
     "@capacitor/android": "^8.5.2",

@@ -393,6 +393,66 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return `${diffDays}d`;
   };
 
+  const handleBlockUser = async () => {
+    if (!activeConv?.otherParticipant?.userId) return;
+    const confirmed = window.confirm(`Czy na pewno chcesz zablokować użytkownika ${activeConv.otherParticipant.displayName}?`);
+    if (!confirmed) return;
+    
+    setUpdatingSettings(true);
+    try {
+      const res = await fetch('/api/block', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ targetUserId: activeConv.otherParticipant.userId })
+      });
+      if (res.ok) {
+        setActiveConv(null);
+        setConversations(prev => prev.filter(c => c.id !== activeConv.id));
+        setShowPrivacyDrawer(false);
+      } else {
+         console.error('Failed to block user');
+      }
+    } catch (err) {
+      console.error('Failed to block user:', err);
+    } finally {
+      setUpdatingSettings(false);
+    }
+  };
+
+  const handleReportUser = async () => {
+    if (!activeConv?.otherParticipant?.userId) return;
+    const reason = window.prompt(`Dlaczego zgłaszasz użytkownika ${activeConv.otherParticipant.displayName}? (Opcjonalnie)`);
+    if (reason === null) return; // User cancelled
+    
+    setUpdatingSettings(true);
+    try {
+      const res = await fetch('/api/report', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ 
+          targetUserId: activeConv.otherParticipant.userId,
+          reason: reason || 'Brak podanego powodu' 
+        })
+      });
+      if (res.ok) {
+        window.alert('Użytkownik został zgłoszony.');
+        setShowPrivacyDrawer(false);
+      } else {
+        console.error('Failed to report user');
+      }
+    } catch (err) {
+      console.error('Failed to report user:', err);
+    } finally {
+      setUpdatingSettings(false);
+    }
+  };
+
   // Load AI Proposition messages tailored to the other participant
   const loadPropositions = async (otherParticipant: UserProfile | undefined, vibe: PropositionVibe = selectedVibe) => {
     if (!otherParticipant) return;
@@ -769,6 +829,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
               vaultStatus={vaultStatus}
               onGrantVaultAccess={handleGrantVaultAccess}
               onRequestVaultAccess={handleRequestVaultAccessFromChat}
+              onBlockUser={handleBlockUser}
+              onReportUser={handleReportUser}
             />
           )}
 

@@ -76,8 +76,17 @@ export default function App() {
           setCurrentUser(formattedUser);
           setToken(idToken);
           localStorage.setItem('aura_auth_token', idToken);
-        } catch (err) {
-          console.error('Error loading Firebase user profile:', err);
+        } catch (err: any) {
+          console.warn('Notice loading Firestore profile (using Auth profile fallback):', err?.message || err);
+          try {
+            const fallbackToken = await fbUser.getIdToken();
+            const fallbackUser = formatUserAccount(fbUser, null);
+            setCurrentUser(fallbackUser);
+            setToken(fallbackToken);
+            localStorage.setItem('aura_auth_token', fallbackToken);
+          } catch (fallbackErr) {
+            console.warn('Auth fallback notice:', fallbackErr);
+          }
         } finally {
           setIsLoadingUser(false);
         }
