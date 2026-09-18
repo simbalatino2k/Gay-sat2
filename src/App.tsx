@@ -69,8 +69,13 @@ export default function App() {
         try {
           const idToken = await fbUser.getIdToken();
           const userDocRef = doc(db, 'users', fbUser.uid);
-          const userDocSnap = await getDoc(userDocRef);
-          const firestoreData = userDocSnap.exists() ? userDocSnap.data() : null;
+          let firestoreData = null;
+          try {
+            const userDocSnap = await getDoc(userDocRef);
+            firestoreData = userDocSnap.exists() ? userDocSnap.data() : null;
+          } catch (docErr: any) {
+            console.warn('Notice reading profile from Firestore (continuing with auth details):', docErr?.message || docErr);
+          }
 
           const formattedUser = formatUserAccount(fbUser, firestoreData);
           setCurrentUser(formattedUser);
@@ -366,6 +371,8 @@ export default function App() {
             {activeTab === 'map' && (
               <MapView
                 authToken={token}
+                currentUser={currentUser}
+                onUpdateUser={(updated) => setCurrentUser(updated)}
                 onOpenProfile={(prof) => setSelectedProfile(prof)}
                 onOpenChat={handleOpenChatWithUser}
                 onOpenPremium={() => setActiveTab('settings')}

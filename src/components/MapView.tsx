@@ -7,7 +7,7 @@ import {
   useApiLoadingStatus,
   APILoadingStatus
 } from '@vis.gl/react-google-maps';
-import { UserProfile, QueerVenue, LocationPrivacyMode } from '../types';
+import { UserProfile, QueerVenue, LocationPrivacyMode, UserAccount } from '../types';
 import { formatDistance, formatDistanceDescriptive } from '../utils/formatDistance';
 import {
   MapPin,
@@ -34,7 +34,11 @@ import {
   ChevronUp,
   X,
   Navigation as NavigationIcon,
-  AlertCircle
+  AlertCircle,
+  Moon,
+  Settings2,
+  Check,
+  Crown
 } from 'lucide-react';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -43,6 +47,8 @@ import { getVenuesNearLocation } from '../data/queerVenues';
 
 interface MapViewProps {
   authToken: string | null;
+  currentUser?: UserAccount | null;
+  onUpdateUser?: (user: UserAccount) => void;
   onOpenProfile: (profile: UserProfile) => void;
   onOpenChat: (userId: string) => void;
   onOpenPremium?: () => void;
@@ -68,7 +74,92 @@ const GLOBAL_CITY_PRESETS: CityPreset[] = [
   { name: 'Tokyo', country: 'JP', lat: 35.6908, lng: 139.7088, zoom: 14 },
   { name: 'Madrid', country: 'ES', lat: 40.4227, lng: -3.6978, zoom: 14 },
   { name: 'Sydney', country: 'AU', lat: -33.8798, lng: 151.2158, zoom: 13 },
-  { name: 'Los Angeles', country: 'US', lat: 34.0886, lng: -118.3812, zoom: 13 }
+  { name: 'Los Angeles', country: 'US', lat: 34.0886, lng: -118.3812, zoom: 13 },
+  { name: 'Warsaw', country: 'PL', lat: 52.2297, lng: 21.0122, zoom: 13 }
+];
+
+export type NightModeType = 'official_night' | 'aura_night' | 'satellite_night';
+
+// Official Google Maps Night Mode Theme (Classic high-contrast dark theme by Google)
+export const GOOGLE_MAPS_OFFICIAL_NIGHT_STYLES: google.maps.MapTypeStyle[] = [
+  { elementType: 'geometry', stylers: [{ color: '#242f3e' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#242f3e' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#746855' }] },
+  {
+    featureType: 'administrative.locality',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#d59563' }]
+  },
+  {
+    featureType: 'poi',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#d59563' }]
+  },
+  {
+    featureType: 'poi.park',
+    elementType: 'geometry',
+    stylers: [{ color: '#263c3f' }]
+  },
+  {
+    featureType: 'poi.park',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#6b9a76' }]
+  },
+  {
+    featureType: 'road',
+    elementType: 'geometry',
+    stylers: [{ color: '#38414e' }]
+  },
+  {
+    featureType: 'road',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#212a37' }]
+  },
+  {
+    featureType: 'road',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#9ca5b3' }]
+  },
+  {
+    featureType: 'road.highway',
+    elementType: 'geometry',
+    stylers: [{ color: '#746855' }]
+  },
+  {
+    featureType: 'road.highway',
+    elementType: 'geometry.stroke',
+    stylers: [{ color: '#1f2835' }]
+  },
+  {
+    featureType: 'road.highway',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#f3d19c' }]
+  },
+  {
+    featureType: 'transit',
+    elementType: 'geometry',
+    stylers: [{ color: '#2f3948' }]
+  },
+  {
+    featureType: 'transit.station',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#d59563' }]
+  },
+  {
+    featureType: 'water',
+    elementType: 'geometry',
+    stylers: [{ color: '#17263c' }]
+  },
+  {
+    featureType: 'water',
+    elementType: 'labels.text.fill',
+    stylers: [{ color: '#515c6d' }]
+  },
+  {
+    featureType: 'water',
+    elementType: 'labels.text.stroke',
+    stylers: [{ color: '#17263c' }]
+  }
 ];
 
 // Custom AURA Dark-Neon Google Maps Theme: Ultra-deep #050507 black base, violet/purple road hierarchy,
@@ -332,6 +423,9 @@ const AURA_MAP_STYLES: google.maps.MapTypeStyle[] = [
 function getInitialRegionByTimezone(): { lat: number; lng: number; name: string } {
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    if (tz.includes('Warsaw') || tz.includes('Poland')) {
+      return { lat: 52.2297, lng: 21.0122, name: 'Warsaw, Poland' };
+    }
     if (tz.includes('London') || tz.includes('Dublin')) {
       return { lat: 51.5074, lng: -0.1278, name: 'London, UK' };
     }
@@ -399,13 +493,26 @@ const MemberMarkerItem: React.FC<{
   profile: UserProfile;
   isSelected: boolean;
   onSelect: () => void;
-}> = React.memo(({ profile, isSelected, onSelect }) => {
+  isLocked?: boolean;
+  isUserPremium?: boolean;
+  onLockedClick?: () => void;
+}> = React.memo(({ profile, isSelected, onSelect, isLocked = false, isUserPremium = false, onLockedClick }) => {
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isLocked) {
+      if (onLockedClick) {
+        onLockedClick();
+      } else {
+        onSelect();
+      }
+      return;
+    }
+    onSelect();
+  };
+
   return (
     <div
-      onClick={e => {
-        e.stopPropagation();
-        onSelect();
-      }}
+      onClick={handleClick}
       className={`relative cursor-pointer transition-all duration-300 group select-none ${
         isSelected ? 'scale-115 z-40' : 'hover:scale-110 z-20'
       }`}
@@ -413,7 +520,9 @@ const MemberMarkerItem: React.FC<{
       {/* High-visibility Neon Outer Glow Aura */}
       <div
         className={`absolute -inset-2 rounded-full transition-all duration-300 blur-sm ${
-          isSelected
+          isLocked
+            ? 'bg-amber-500/20 group-hover:bg-amber-500/40 opacity-70'
+            : isSelected
             ? 'bg-gradient-to-r from-fuchsia-500 via-purple-500 to-violet-500 opacity-95 shadow-[0_0_28px_rgba(217,70,239,0.95)] scale-110'
             : 'bg-gradient-to-r from-purple-500 to-fuchsia-500 opacity-50 group-hover:opacity-90 group-hover:shadow-[0_0_20px_rgba(192,132,252,0.85)]'
         }`}
@@ -421,28 +530,41 @@ const MemberMarkerItem: React.FC<{
 
       {/* Black glass container with vibrant AURA LED perimeter */}
       <ProfileAuraFrame
-        isOnline={profile.isOnline}
+        isOnline={!isLocked && profile.isOnline}
         intensity={isSelected ? 'prominent' : 'subtle'}
         className={`relative w-11 h-11 rounded-full transition-all drop-shadow-[0_4px_16px_rgba(0,0,0,0.95)] ring-2 ${
-          isSelected ? 'scale-110 ring-fuchsia-400 shadow-[0_0_22px_rgba(217,70,239,0.75)]' : 'ring-purple-400/60 group-hover:ring-fuchsia-400'
+          isLocked
+            ? 'ring-amber-500/50 group-hover:ring-amber-400'
+            : isSelected
+            ? 'scale-110 ring-fuchsia-400 shadow-[0_0_22px_rgba(217,70,239,0.75)]'
+            : 'ring-purple-400/60 group-hover:ring-fuchsia-400'
         }`}
       >
         <img
           src={profile.photos[0]?.url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&q=80'}
           alt={profile.displayName}
           referrerPolicy="no-referrer"
-          className="w-full h-full object-cover bg-black"
+          className={`w-full h-full object-cover bg-black transition-all ${
+            isLocked ? 'filter blur-[3.5px] scale-105 opacity-65' : ''
+          }`}
         />
 
+        {/* Lock overlay badge for 2.1km+ profiles when user is non-premium */}
+        {isLocked && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/55 backdrop-blur-[1px] rounded-full z-15">
+            <Lock className="w-3.5 h-3.5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.9)] animate-pulse" />
+          </div>
+        )}
+
         {/* Verification Shield Badge */}
-        {profile.verified && (
+        {!isLocked && profile.verified && (
           <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-[#050507] border border-cyan-400 flex items-center justify-center text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.8)] z-10">
             <ShieldCheck className="w-2.5 h-2.5" />
           </span>
         )}
 
         {/* Emerald Online Pulse */}
-        {profile.isOnline && (
+        {!isLocked && profile.isOnline && (
           <span className="absolute bottom-0 right-0 flex h-3 w-3 z-10">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-80" />
             <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-400 border border-[#050507] shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
@@ -453,15 +575,27 @@ const MemberMarkerItem: React.FC<{
       {/* High-contrast Name and Distance Badge */}
       <div
         className={`absolute -bottom-5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full backdrop-blur-md text-[10px] font-semibold whitespace-nowrap transition-all shadow-xl flex items-center gap-1.5 border ${
-          isSelected
+          isLocked
+            ? 'bg-[#0f0b18]/95 border-amber-500/50 text-amber-200 group-hover:border-amber-400 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+            : isSelected
             ? 'bg-[#050507] border-fuchsia-400 text-fuchsia-100 shadow-[0_0_14px_rgba(217,70,239,0.7)]'
             : 'bg-[#050507]/95 border-purple-500/40 text-slate-100 group-hover:border-purple-400 group-hover:text-purple-200'
         }`}
       >
-        <span>{profile.displayName}</span>
-        <span className="text-[9px] text-purple-300 font-medium">
-          • {profile.approximateArea || formatDistance(profile.distanceKm)}
-        </span>
+        {isLocked ? (
+          <>
+            <Crown className="w-2.5 h-2.5 text-amber-400" />
+            <span className="text-amber-200 font-bold">2.1km+</span>
+            <span className="text-[9px] text-amber-400/90 font-mono">Premium</span>
+          </>
+        ) : (
+          <>
+            <span>{profile.displayName}</span>
+            <span className="text-[9px] text-purple-300 font-medium">
+              • {profile.approximateArea || formatDistance(profile.distanceKm)}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -559,35 +693,30 @@ const GoogleMapsLiveRendererContent: React.FC<{
   setSelectedUser: (u: UserProfile | null) => void;
   setSelectedVenue: (v: QueerVenue | null) => void;
   onAuthError: () => void;
+  nightMode: NightModeType;
+  styles: google.maps.MapTypeStyle[];
+  isUserPremium?: boolean;
+  onOpenPremium?: () => void;
 }> = (props) => {
   const status = useApiLoadingStatus();
-
-  const isAdvancedMarkerSupported = typeof window !== 'undefined' &&
-    Boolean(
-      (window as any).google?.maps?.marker?.AdvancedMarkerElement &&
-      (window as any).google?.maps?.Map
-    );
 
   useEffect(() => {
     if (status === APILoadingStatus.AUTH_FAILURE || status === APILoadingStatus.FAILED) {
       console.warn('Google Maps loading status failed:', status);
       props.onAuthError();
-    } else if (status === APILoadingStatus.LOADED && !isAdvancedMarkerSupported) {
-      console.warn('AdvancedMarkerElement not available in current Maps session. Falling back to radar.');
-      props.onAuthError();
     }
-  }, [status, isAdvancedMarkerSupported, props.onAuthError]);
+  }, [status, props.onAuthError]);
 
   const initialCenter = useMemo(() => {
     return props.cameraTarget || { lat: 51.5074, lng: -0.1278 };
   }, []);
 
-  if (status !== APILoadingStatus.LOADED || !isAdvancedMarkerSupported) {
+  if (status !== APILoadingStatus.LOADED) {
     return (
       <div className="w-full h-full flex items-center justify-center bg-[#050507]">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 rounded-full border-2 border-fuchsia-500/30 border-t-fuchsia-400 animate-spin" />
-          <span className="text-[10px] text-fuchsia-300 font-bold tracking-widest uppercase animate-pulse">Establishing Secure Uplink...</span>
+          <span className="text-[10px] text-fuchsia-300 font-bold tracking-widest uppercase animate-pulse">Łączenie z Google Maps (Tryb Nocny)...</span>
         </div>
       </div>
     );
@@ -600,7 +729,8 @@ const GoogleMapsLiveRendererContent: React.FC<{
         defaultCenter={initialCenter}
         defaultZoom={props.cameraZoom}
         colorScheme="DARK"
-        styles={AURA_MAP_STYLES}
+        mapTypeId={props.nightMode === 'satellite_night' ? 'hybrid' : 'roadmap'}
+        styles={props.nightMode === 'satellite_night' ? undefined : props.styles}
         internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
         style={{ width: '100%', height: '100%' }}
         gestureHandling="greedy"
@@ -627,15 +757,23 @@ const GoogleMapsLiveRendererContent: React.FC<{
               return null;
             }
 
+            const isLocked = !props.isUserPremium && (profile.distanceKm !== undefined && profile.distanceKm !== null && profile.distanceKm > 2.0);
+
             return (
               <AdvancedMarker
                 key={profile.id}
                 position={{ lat: profile.lat, lng: profile.lng }}
-                title={profile.displayName}
+                title={isLocked ? 'Członek poza strefą 2 km (AURA Premium)' : profile.displayName}
               >
                 <MemberMarkerItem
                   profile={profile}
                   isSelected={props.selectedUser?.id === profile.id}
+                  isLocked={isLocked}
+                  isUserPremium={props.isUserPremium}
+                  onLockedClick={() => {
+                    props.setSelectedUser(profile);
+                    props.setSelectedVenue(null);
+                  }}
                   onSelect={() => {
                     props.setSelectedUser(profile);
                     props.setSelectedVenue(null);
@@ -699,6 +837,10 @@ const GoogleMapsLiveRenderer: React.FC<{
   setSelectedUser: (u: UserProfile | null) => void;
   setSelectedVenue: (v: QueerVenue | null) => void;
   onAuthError: () => void;
+  nightMode: NightModeType;
+  styles: google.maps.MapTypeStyle[];
+  isUserPremium?: boolean;
+  onOpenPremium?: () => void;
 }> = (props) => {
   useEffect(() => {
     const handleAuthFail = () => props.onAuthError();
@@ -716,19 +858,13 @@ const GoogleMapsLiveRenderer: React.FC<{
         console.warn('APIProvider failed to load Google Maps SDK. Switching to radar fallback.');
         props.onAuthError();
       }}
-      onLoad={() => {
-        if (typeof window !== 'undefined' && !(window as any).google?.maps?.marker?.AdvancedMarkerElement) {
-          console.warn('Google Maps loaded without AdvancedMarkerElement, switching to radar fallback.');
-          props.onAuthError();
-        }
-      }}
     >
       <GoogleMapsLiveRendererContent {...props} />
     </APIProvider>
   );
 };
 
-// Tactical Interactive Radar Screen (Clean zero-dependency fallback adhering to AURA palette)
+// Tactical Interactive Radar Screen with Real Dark-Matter Street Tiles (100% functional Night Mode)
 const RadarCanvasView: React.FC<{
   center: { lat: number; lng: number };
   zoom: number;
@@ -744,6 +880,9 @@ const RadarCanvasView: React.FC<{
   onZoomOut: () => void;
   onResetCenter: () => void;
   authErrorOccurred: boolean;
+  onOpenNightModeSettings?: () => void;
+  isUserPremium?: boolean;
+  onOpenPremium?: () => void;
 }> = ({
   center,
   zoom,
@@ -758,7 +897,10 @@ const RadarCanvasView: React.FC<{
   onZoomIn,
   onZoomOut,
   onResetCenter,
-  authErrorOccurred
+  authErrorOccurred,
+  onOpenNightModeSettings,
+  isUserPremium,
+  onOpenPremium
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
@@ -811,22 +953,69 @@ const RadarCanvasView: React.FC<{
     setIsDragging(false);
   };
 
-  // Geographic Mercator projection centered dynamically anywhere on Earth
-  const pxPerKm = 32 * Math.pow(1.35, zoom - 12);
+  // Spherical Mercator projection coordinates for real-world night tiles and accurate pin placement
+  const tileZoom = Math.min(18, Math.max(1, Math.round(zoom)));
+  const scale = Math.pow(2, zoom - tileZoom);
+  const n = Math.pow(2, tileZoom);
+  const tileSize = 256 * scale;
+
+  const latRadCenter = (center.lat * Math.PI) / 180;
+  const centerWorldX = ((center.lng + 180) / 360) * 256 * n;
+  const centerWorldY =
+    ((1 - Math.log(Math.tan(latRadCenter) + 1 / Math.cos(latRadCenter)) / Math.PI) / 2) * 256 * n;
+
   const cx = dimensions.width / 2 + panOffset.x;
   const cy = dimensions.height / 2 + panOffset.y;
 
-  const latRad = (center.lat * Math.PI) / 180;
-  const projectCoords = (lat: number, lng: number) => {
-    const dLatKm = (lat - center.lat) * 111.0;
-    const dLngKm = (lng - center.lng) * (111.0 * Math.cos(latRad));
-    return {
-      x: cx + dLngKm * pxPerKm,
-      y: cy - dLatKm * pxPerKm
-    };
-  };
+  const projectCoords = useCallback(
+    (lat: number, lng: number) => {
+      const clampedLat = Math.max(-85, Math.min(85, lat));
+      const rad = (clampedLat * Math.PI) / 180;
+      const wx = ((lng + 180) / 360) * 256 * n;
+      const wy = ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * 256 * n;
+      return {
+        x: cx + (wx - centerWorldX) * scale,
+        y: cy + (wy - centerWorldY) * scale
+      };
+    },
+    [cx, cy, centerWorldX, centerWorldY, scale, n]
+  );
 
-  const rangeRings = [1, 2.5, 5, 8, 12, 18];
+  const minTileX = Math.floor((centerWorldX - cx / scale) / 256);
+  const maxTileX = Math.floor((centerWorldX + (dimensions.width - cx) / scale) / 256);
+  const minTileY = Math.floor((centerWorldY - cy / scale) / 256);
+  const maxTileY = Math.floor((centerWorldY + (dimensions.height - cy) / scale) / 256);
+
+  const tiles = useMemo(() => {
+    if (dimensions.width <= 0 || dimensions.height <= 0) return [];
+    const list: Array<{ key: string; url: string; left: number; top: number; size: number }> = [];
+    const subdomains = ['a', 'b', 'c', 'd'];
+    const startX = Math.max(minTileX, minTileX);
+    const endX = Math.min(maxTileX, minTileX + 16);
+    const startY = Math.max(0, minTileY);
+    const endY = Math.min(n - 1, maxTileY);
+
+    for (let tx = startX; tx <= endX; tx++) {
+      for (let ty = startY; ty <= endY; ty++) {
+        const wrappedTx = ((tx % n) + n) % n;
+        const left = cx + (tx * 256 - centerWorldX) * scale;
+        const top = cy + (ty * 256 - centerWorldY) * scale;
+        const sub = subdomains[Math.abs(tx + ty) % subdomains.length];
+        list.push({
+          key: `${tileZoom}_${tx}_${ty}`,
+          url: `https://${sub}.basemaps.cartocdn.com/dark_all/${tileZoom}/${wrappedTx}/${ty}.png`,
+          left,
+          top,
+          size: tileSize
+        });
+      }
+    }
+    return list;
+  }, [tileZoom, scale, n, centerWorldX, centerWorldY, cx, cy, minTileX, maxTileX, minTileY, maxTileY, dimensions.width, dimensions.height, tileSize]);
+
+  // Geodesic physical range rings in pixels
+  const pxPerKm = Math.max(0.001, (256 * n * scale) / (40075 * Math.max(0.1, Math.cos(latRadCenter))));
+  const rangeRings = [1, 2, 5, 8, 12, 18];
 
   return (
     <div
@@ -839,10 +1028,30 @@ const RadarCanvasView: React.FC<{
         isDragging ? 'grabbing' : 'grab'
       } bg-[#050507]`}
     >
-      {/* Background Radar Grid */}
+      {/* High-Contrast Real Night Mode Street Tiles (CartoDB Dark Matter) */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden select-none">
+        {tiles.map(tile => (
+          <img
+            key={tile.key}
+            src={tile.url}
+            alt=""
+            loading="eager"
+            referrerPolicy="no-referrer"
+            className="absolute object-cover opacity-85 pointer-events-none filter contrast-110 brightness-95"
+            style={{
+              left: `${tile.left}px`,
+              top: `${tile.top}px`,
+              width: `${tile.size}px`,
+              height: `${tile.size}px`
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Cyber-Radar HUD & Concentric Range Overlay */}
       <div className="absolute inset-0 pointer-events-none">
         <div
-          className="absolute inset-0 opacity-[0.05]"
+          className="absolute inset-0 opacity-[0.03]"
           style={{
             backgroundImage:
               'radial-gradient(#a855f7 1px, transparent 1px), linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px)',
@@ -854,6 +1063,7 @@ const RadarCanvasView: React.FC<{
         <svg className="absolute inset-0 w-full h-full">
           {rangeRings.map(km => {
             const r = km * pxPerKm;
+            const isTwoKmRing = km === 2;
             return (
               <g key={km}>
                 <circle
@@ -861,18 +1071,19 @@ const RadarCanvasView: React.FC<{
                   cy={cy}
                   r={r}
                   fill="none"
-                  stroke="rgba(168, 85, 247, 0.14)"
-                  strokeWidth="1"
-                  strokeDasharray="4 6"
+                  stroke={isTwoKmRing ? 'rgba(217, 70, 239, 0.45)' : 'rgba(168, 85, 247, 0.16)'}
+                  strokeWidth={isTwoKmRing ? '1.5' : '1'}
+                  strokeDasharray={isTwoKmRing ? '6 4' : '4 6'}
                 />
                 <text
                   x={cx + r + 4}
                   y={cy - 4}
-                  fill="rgba(192, 132, 252, 0.4)"
-                  fontSize="9"
+                  fill={isTwoKmRing ? 'rgba(244, 114, 182, 0.85)' : 'rgba(192, 132, 252, 0.45)'}
+                  fontSize={isTwoKmRing ? '10' : '9'}
+                  fontWeight={isTwoKmRing ? 'bold' : 'normal'}
                   fontFamily="monospace"
                 >
-                  {km} km
+                  {km} km {isTwoKmRing ? '(Strefa Darmowa)' : ''}
                 </text>
               </g>
             );
@@ -884,7 +1095,7 @@ const RadarCanvasView: React.FC<{
             y1={0}
             x2={cx}
             y2={dimensions.height}
-            stroke="rgba(255, 255, 255, 0.04)"
+            stroke="rgba(255, 255, 255, 0.05)"
             strokeWidth="1"
           />
           <line
@@ -892,7 +1103,7 @@ const RadarCanvasView: React.FC<{
             y1={cy}
             x2={dimensions.width}
             y2={cy}
-            stroke="rgba(255, 255, 255, 0.04)"
+            stroke="rgba(255, 255, 255, 0.05)"
             strokeWidth="1"
           />
 
@@ -948,6 +1159,8 @@ const RadarCanvasView: React.FC<{
             return null;
           }
 
+          const isLocked = !isUserPremium && (profile.distanceKm !== undefined && profile.distanceKm !== null && profile.distanceKm > 2.0);
+
           return (
             <div
               key={profile.id}
@@ -957,6 +1170,12 @@ const RadarCanvasView: React.FC<{
               <MemberMarkerItem
                 profile={profile}
                 isSelected={selectedUser?.id === profile.id}
+                isLocked={isLocked}
+                isUserPremium={isUserPremium}
+                onLockedClick={() => {
+                  onSelectUser(profile);
+                  onSelectVenue(null);
+                }}
                 onSelect={() => {
                   onSelectUser(profile);
                   onSelectVenue(null);
@@ -1021,17 +1240,27 @@ const RadarCanvasView: React.FC<{
         </button>
       </div>
 
-      {/* Informative Radar Telemetry Banner */}
+      {/* Informative Radar Telemetry & Night Mode Banner */}
       <div className="absolute top-20 left-3 right-3 z-30 pointer-events-none flex justify-center">
-        <div className="pointer-events-auto max-w-lg flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-[#080a18]/90 border border-purple-500/30 text-[11px] text-slate-300 backdrop-blur-xl shadow-2xl">
-          <Radio className="w-3.5 h-3.5 text-fuchsia-400 shrink-0 animate-pulse" />
+        <div className="pointer-events-auto max-w-xl flex items-center gap-2.5 px-3.5 py-2 rounded-2xl bg-[#080a18]/90 border border-fuchsia-500/30 text-[11px] text-slate-300 backdrop-blur-xl shadow-2xl">
+          <Moon className="w-3.5 h-3.5 text-fuchsia-400 shrink-0 animate-pulse" />
           <div className="flex-1 truncate">
-            {authErrorOccurred ? (
-              <span>Google Maps Key Restricted. Operating in Tactical Radar Mode.</span>
-            ) : (
-              <span>Interactive Tactical Radar Active • Showing approximate radius locations.</span>
-            )}
+            <span className="font-semibold text-white">Tryb Nocny Aktywny:</span>{' '}
+            <span className="text-fuchsia-300">
+              {authErrorOccurred
+                ? 'Nocna mapa wektorowa z ulicami (CartoDB Dark Matter)'
+                : 'Interaktywna nocna mapa ulic i lokali'}
+            </span>
           </div>
+          {onOpenNightModeSettings && (
+            <button
+              onClick={onOpenNightModeSettings}
+              className="px-2.5 py-1 rounded-lg bg-fuchsia-600/30 hover:bg-fuchsia-600/50 border border-fuchsia-400/30 text-[10px] font-bold text-fuchsia-200 transition-all active:scale-95 whitespace-nowrap flex items-center gap-1"
+            >
+              <Settings2 className="w-3 h-3 text-fuchsia-300" />
+              <span>Ustawienia mapy</span>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1062,12 +1291,88 @@ const isValidGoogleMapsKey = (key?: string | null): boolean => {
 
 export const MapView: React.FC<MapViewProps> = ({
   authToken,
+  currentUser,
+  onUpdateUser,
   onOpenProfile,
   onOpenChat,
   onOpenPremium
 }) => {
+  // Radius filter mode for distance: '2km' (standard free zone) | 'unlimited' (2.1km+ premium)
+  const [radiusFilter, setRadiusFilter] = useState<'2km' | 'unlimited'>('2km');
+  const [showPremiumModal, setShowPremiumModal] = useState(false);
+  const isUserPremium = Boolean(currentUser?.isPremium);
+
+  // User-configured or system Google Maps API Key State
+  const [customApiKey, setCustomApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem('aura_google_maps_api_key') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [inputApiKey, setInputApiKey] = useState<string>('');
+  const [keySaveMessage, setKeySaveMessage] = useState<string>('');
+
   const rawApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-  const isKeyConfigured = isValidGoogleMapsKey(rawApiKey);
+  const effectiveApiKey = useMemo<string>(() => {
+    if (isValidGoogleMapsKey(customApiKey)) return customApiKey;
+    if (isValidGoogleMapsKey(rawApiKey)) return rawApiKey as string;
+    return '';
+  }, [customApiKey, rawApiKey]);
+
+  const isKeyConfigured = Boolean(effectiveApiKey);
+
+  // Night Mode selection state
+  const [nightMode, setNightMode] = useState<NightModeType>(() => {
+    try {
+      return (localStorage.getItem('aura_map_night_mode') as NightModeType) || 'official_night';
+    } catch {
+      return 'official_night';
+    }
+  });
+
+  const [isNightModeModalOpen, setIsNightModeModalOpen] = useState(false);
+
+  const handleSetNightMode = (mode: NightModeType) => {
+    setNightMode(mode);
+    try {
+      localStorage.setItem('aura_map_night_mode', mode);
+    } catch {}
+  };
+
+  const handleSaveCustomKey = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = inputApiKey.trim();
+    if (!isValidGoogleMapsKey(trimmed)) {
+      setKeySaveMessage('Błąd: Klucz musi zaczynać się od "AIza" i zawierać od 35 do 45 znaków.');
+      return;
+    }
+    try {
+      localStorage.setItem('aura_google_maps_api_key', trimmed);
+    } catch {}
+    setCustomApiKey(trimmed);
+    setAuthErrorOccurred(false);
+    setKeySaveMessage('Klucz zapisany! Aktywacja Google Maps...');
+    setTimeout(() => {
+      setKeySaveMessage('');
+      setIsNightModeModalOpen(false);
+    }, 1200);
+  };
+
+  const handleClearCustomKey = () => {
+    try {
+      localStorage.removeItem('aura_google_maps_api_key');
+    } catch {}
+    setCustomApiKey('');
+    setInputApiKey('');
+    setKeySaveMessage('Własny klucz został usunięty.');
+    setTimeout(() => setKeySaveMessage(''), 1500);
+  };
+
+  const activeGoogleMapsStyles = useMemo(() => {
+    if (nightMode === 'aura_night') return AURA_MAP_STYLES;
+    return GOOGLE_MAPS_OFFICIAL_NIGHT_STYLES;
+  }, [nightMode]);
 
   const [authErrorOccurred, setAuthErrorOccurred] = useState(false);
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
@@ -1321,6 +1626,19 @@ export const MapView: React.FC<MapViewProps> = ({
   // Filter venues based on active filter
   const showMembers = activeFilter === 'all' || activeFilter === 'members';
 
+  // Radius-filtered profiles: standard free limit is 2.0 km, unlimited for premium or unlocked mode
+  const filteredProfiles = useMemo(() => {
+    return profiles.filter(p => {
+      // If user selected 2km strict filter, only show users within 2km (or users without distance)
+      if (radiusFilter === '2km') {
+        if (p.distanceKm !== undefined && p.distanceKm !== null && p.distanceKm > 2.0) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [profiles, radiusFilter]);
+
   const filteredVenues = useMemo(() => {
     return venues.filter(v => {
       if (activeFilter === 'all') return true;
@@ -1377,6 +1695,19 @@ export const MapView: React.FC<MapViewProps> = ({
             </span>
           </button>
 
+          {/* Night Mode & Engine Selector Pill */}
+          <button
+            onClick={() => setIsNightModeModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-[#090b18]/90 border border-fuchsia-500/30 text-xs font-semibold backdrop-blur-xl shadow-lg hover:border-fuchsia-400 transition-all active:scale-95 text-slate-200 hover:text-white shrink-0 aura-glass-card"
+            title="Wybierz motyw nocny lub skonfiguruj Google Maps"
+          >
+            <Moon className="w-3.5 h-3.5 text-fuchsia-400 animate-pulse" />
+            <span className="hidden md:inline text-[11px]">Tryb:</span>
+            <span className="text-[11px] font-bold text-fuchsia-300">
+              {nightMode === 'official_night' ? 'Nocny (Google)' : nightMode === 'aura_night' ? 'Nocny (Neon)' : 'Nocny (Satelita)'}
+            </span>
+          </button>
+
           {/* Near Me GPS Trigger */}
           <button
             onClick={handleLocateMe}
@@ -1411,8 +1742,44 @@ export const MapView: React.FC<MapViewProps> = ({
           ))}
         </div>
 
-        {/* Row 3: Category Layer Filters */}
+        {/* Row 3: Category Layer & Radius Filters */}
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pointer-events-auto py-0.5">
+          {/* Distance Radius Filter Buttons: 2 km standard vs 2.1km+ Premium */}
+          <div className="flex items-center bg-[#070914]/90 p-0.5 rounded-full border border-purple-500/30 shrink-0">
+            <button
+              onClick={() => setRadiusFilter('2km')}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all flex items-center gap-1 ${
+                radiusFilter === '2km'
+                  ? 'bg-fuchsia-600 text-white shadow-[0_0_10px_rgba(217,70,239,0.5)]'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Widok użytkowników do 2 km (Strefa Podstawowa)"
+            >
+              <span>≤ 2 km</span>
+            </button>
+            <button
+              onClick={() => {
+                if (!isUserPremium) {
+                  setShowPremiumModal(true);
+                } else {
+                  setRadiusFilter('unlimited');
+                }
+              }}
+              className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all flex items-center gap-1 ${
+                radiusFilter === 'unlimited'
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-black shadow-[0_0_10px_rgba(245,158,11,0.6)]'
+                  : 'text-amber-300/80 hover:text-amber-200'
+              }`}
+              title="Widok użytkowników 2.1km+ (Opcja Premium)"
+            >
+              <Crown className="w-2.5 h-2.5 text-amber-300" />
+              <span>2.1km+</span>
+              {!isUserPremium && <Lock className="w-2.5 h-2.5 text-amber-400" />}
+            </button>
+          </div>
+
+          <div className="h-4 w-px bg-white/10 shrink-0 mx-0.5" />
+
           <button
             onClick={() => setActiveFilter('all')}
             className={`px-3 py-1 rounded-full text-[11px] font-bold tracking-tight shadow-md border backdrop-blur-md transition-all active:scale-95 flex items-center gap-1.5 whitespace-nowrap ${
@@ -1422,7 +1789,7 @@ export const MapView: React.FC<MapViewProps> = ({
             }`}
           >
             <Layers className="w-3 h-3" />
-            <span>All ({profiles.length + filteredVenues.length})</span>
+            <span>All ({filteredProfiles.length + filteredVenues.length})</span>
           </button>
 
           <button
@@ -1434,7 +1801,7 @@ export const MapView: React.FC<MapViewProps> = ({
             }`}
           >
             <Users className="w-3 h-3 text-emerald-400" />
-            <span>Members ({profiles.length})</span>
+            <span>Members ({filteredProfiles.length})</span>
           </button>
 
           <button
@@ -1526,7 +1893,7 @@ export const MapView: React.FC<MapViewProps> = ({
                 center={cameraTarget || { lat: 51.5074, lng: -0.1278 }}
                 zoom={cameraZoom}
                 userLocation={userLocation}
-                profiles={profiles}
+                profiles={filteredProfiles}
                 venues={filteredVenues}
                 showMembers={showMembers}
                 selectedUser={selectedUser}
@@ -1537,22 +1904,29 @@ export const MapView: React.FC<MapViewProps> = ({
                 onZoomOut={() => setCameraZoom(z => Math.max(2, z - 1))}
                 onResetCenter={handleLocateMe}
                 authErrorOccurred={authErrorOccurred}
+                onOpenNightModeSettings={() => setIsNightModeModalOpen(true)}
+                isUserPremium={isUserPremium}
+                onOpenPremium={() => setShowPremiumModal(true)}
               />
             }
           >
             <GoogleMapsLiveRenderer
-              apiKey={rawApiKey!}
+              apiKey={effectiveApiKey}
               cameraTarget={cameraTarget}
               cameraZoom={cameraZoom}
               userLocation={userLocation}
               showMembers={showMembers}
-              profiles={profiles}
+              profiles={filteredProfiles}
               filteredVenues={filteredVenues}
               selectedUser={selectedUser}
               selectedVenue={selectedVenue}
               setSelectedUser={setSelectedUser}
               setSelectedVenue={setSelectedVenue}
               onAuthError={() => setAuthErrorOccurred(true)}
+              nightMode={nightMode}
+              styles={activeGoogleMapsStyles}
+              isUserPremium={isUserPremium}
+              onOpenPremium={() => setShowPremiumModal(true)}
             />
           </ErrorBoundary>
         ) : (
@@ -1560,7 +1934,7 @@ export const MapView: React.FC<MapViewProps> = ({
             center={cameraTarget}
             zoom={cameraZoom}
             userLocation={userLocation}
-            profiles={profiles}
+            profiles={filteredProfiles}
             venues={filteredVenues}
             showMembers={showMembers}
             selectedUser={selectedUser}
@@ -1574,6 +1948,9 @@ export const MapView: React.FC<MapViewProps> = ({
               setCameraZoom(13);
             }}
             authErrorOccurred={authErrorOccurred}
+            onOpenNightModeSettings={() => setIsNightModeModalOpen(true)}
+            isUserPremium={isUserPremium}
+            onOpenPremium={() => setShowPremiumModal(true)}
           />
         )}
       </div>
@@ -1608,7 +1985,7 @@ export const MapView: React.FC<MapViewProps> = ({
             <div className="flex items-center gap-3 min-w-0">
               <div className="relative shrink-0">
                 <ProfileAuraFrame
-                  isOnline={selectedUser.isOnline}
+                  isOnline={!(selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium) && selectedUser.isOnline}
                   className="w-14 h-14 rounded-2xl shrink-0 shadow-lg"
                 >
                   <img
@@ -1618,10 +1995,19 @@ export const MapView: React.FC<MapViewProps> = ({
                     }
                     alt={selectedUser.displayName}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
+                    className={`w-full h-full object-cover transition-all ${
+                      selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium
+                        ? 'filter blur-[4px] opacity-70'
+                        : ''
+                    }`}
                   />
+                  {selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/50 rounded-2xl">
+                      <Lock className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.9)] animate-pulse" />
+                    </div>
+                  )}
                 </ProfileAuraFrame>
-                {selectedUser.isOnline && (
+                {selectedUser.isOnline && !(selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium) && (
                   <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 border-2 border-black shadow z-10" />
                 )}
               </div>
@@ -1651,6 +2037,26 @@ export const MapView: React.FC<MapViewProps> = ({
             </button>
           </div>
 
+          {/* 2.1km+ Premium Locked Banner */}
+          {selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium && (
+            <div className="mt-3 p-3 rounded-2xl bg-gradient-to-r from-amber-950/60 via-purple-950/60 to-amber-950/60 border border-amber-500/40 text-left">
+              <div className="flex items-center gap-2 text-amber-300 font-bold text-xs mb-1">
+                <Crown className="w-3.5 h-3.5 text-amber-400" />
+                <span>Profil poza zasięgiem bezpłatnym (2.1km+)</span>
+              </div>
+              <p className="text-[11px] text-amber-100/90 leading-relaxed mb-2.5">
+                Darmowa mapa obejmuje użytkowników w promieniu do 2 km. Odblokuj AURA Premium, aby przeglądać i pisać do osób w promieniu 2.1 km i więcej na całym świecie!
+              </p>
+              <button
+                onClick={() => setShowPremiumModal(true)}
+                className="w-full py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-500 via-yellow-500 to-amber-600 text-black shadow-lg hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-1.5"
+              >
+                <Crown className="w-3.5 h-3.5" />
+                <span>Odblokuj AURA Premium</span>
+              </button>
+            </div>
+          )}
+
           {/* Privacy Guarantee Pill */}
           <div className="mt-3 px-2.5 py-1.5 rounded-xl bg-purple-950/40 border border-purple-500/20 flex items-center justify-between text-[11px]">
             <span className="text-slate-300 flex items-center gap-1">
@@ -1673,22 +2079,43 @@ export const MapView: React.FC<MapViewProps> = ({
           <div className="grid grid-cols-2 gap-2 mt-4 pt-2 border-t border-white/10">
             <button
               onClick={() => {
-                onOpenProfile(selectedUser);
-                setSelectedUser(null);
+                if (selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium) {
+                  setShowPremiumModal(true);
+                } else {
+                  onOpenProfile(selectedUser);
+                  setSelectedUser(null);
+                }
               }}
               className="py-2.5 rounded-xl text-xs font-bold bg-white/10 hover:bg-white/15 text-white transition-all text-center border border-white/10 active:scale-95"
             >
-              View Full Profile
+              {selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium ? 'Odblokuj profil' : 'View Full Profile'}
             </button>
             <button
               onClick={() => {
-                onOpenChat(selectedUser.userId);
-                setSelectedUser(null);
+                if (selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium) {
+                  setShowPremiumModal(true);
+                } else {
+                  onOpenChat(selectedUser.userId);
+                  setSelectedUser(null);
+                }
               }}
-              className="py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-fuchsia-600 via-purple-600 to-violet-700 hover:brightness-110 text-white transition-all flex items-center justify-center gap-1.5 shadow-lg active:scale-95"
+              className={`py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-lg active:scale-95 ${
+                selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-500 text-black hover:brightness-110'
+                  : 'bg-gradient-to-r from-fuchsia-600 via-purple-600 to-violet-700 hover:brightness-110 text-white'
+              }`}
             >
-              <MessageSquare className="w-3.5 h-3.5" />
-              <span>Direct Chat</span>
+              {selectedUser.distanceKm && selectedUser.distanceKm > 2.0 && !isUserPremium ? (
+                <>
+                  <Crown className="w-3.5 h-3.5 text-black" />
+                  <span>Czat (Premium)</span>
+                </>
+              ) : (
+                <>
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Direct Chat</span>
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -1910,6 +2337,244 @@ export const MapView: React.FC<MapViewProps> = ({
                   </div>
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Night Mode & Google Maps Engine Modal */}
+      {isNightModeModalOpen && (
+        <div
+          onClick={() => setIsNightModeModalOpen(false)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-lg aura-glass-card-elevated rounded-[28px] border border-fuchsia-500/30 p-6 shadow-2xl text-left space-y-5 my-8"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-fuchsia-950/60 border border-fuchsia-500/40 flex items-center justify-center text-fuchsia-400">
+                  <Moon className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Tryb Nocny & Ustawienia Mapy</h3>
+                  <p className="text-[11px] text-fuchsia-300/80">Google Maps Platform & Tactical Radar</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsNightModeModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-xl hover:bg-white/10"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* 1. Motyw Nocny (Night Mode Styles) */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
+                <span>1. Wybierz Wariant Trybu Nocnego</span>
+              </label>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSetNightMode('official_night')}
+                  className={`p-3 rounded-2xl border text-left transition-all relative ${
+                    nightMode === 'official_night'
+                      ? 'bg-purple-900/40 border-fuchsia-400 text-white ring-1 ring-fuchsia-400/50 shadow-md'
+                      : 'bg-white/[0.03] border-white/10 text-slate-300 hover:bg-white/[0.06]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-white">Google Nocny</span>
+                    {nightMode === 'official_night' && <Check className="w-3.5 h-3.5 text-fuchsia-400" />}
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Oficjalny styl nocny Google Maps (granat + bursztyn)
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSetNightMode('aura_night')}
+                  className={`p-3 rounded-2xl border text-left transition-all relative ${
+                    nightMode === 'aura_night'
+                      ? 'bg-purple-900/40 border-fuchsia-400 text-white ring-1 ring-fuchsia-400/50 shadow-md'
+                      : 'bg-white/[0.03] border-white/10 text-slate-300 hover:bg-white/[0.06]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-white">AURA Neon</span>
+                    {nightMode === 'aura_night' && <Check className="w-3.5 h-3.5 text-fuchsia-400" />}
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Ciemny fiolet, głęboka czerń i neonowe akcenty
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSetNightMode('satellite_night')}
+                  className={`p-3 rounded-2xl border text-left transition-all relative ${
+                    nightMode === 'satellite_night'
+                      ? 'bg-purple-900/40 border-fuchsia-400 text-white ring-1 ring-fuchsia-400/50 shadow-md'
+                      : 'bg-white/[0.03] border-white/10 text-slate-300 hover:bg-white/[0.06]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-white">Satelita Nocny</span>
+                    {nightMode === 'satellite_night' && <Check className="w-3.5 h-3.5 text-fuchsia-400" />}
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Hybrydowe zdjęcia satelitarne z ciemnymi etykietami
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            {/* 2. Status Silnika Mapy (Engine Status) */}
+            <div className="p-3.5 rounded-2xl bg-black/40 border border-purple-500/20 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-300">Aktualny silnik wyświetlania:</span>
+                <span className={`text-xs font-black px-2.5 py-0.5 rounded-full ${
+                  shouldUseLiveGoogleMaps
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-purple-500/20 text-fuchsia-300 border border-fuchsia-500/30'
+                }`}>
+                  {shouldUseLiveGoogleMaps ? 'Google Maps Live' : 'Interaktywna Mapa Wektorowa (Dark Matter)'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                {shouldUseLiveGoogleMaps
+                  ? 'Klucz Google Maps jest aktywny. Wszystkie kafelki, ulice i lokale renderowane są przez oficjalne Google Maps SDK w wybranym trybie nocnym.'
+                  : 'Aplikacja korzysta z wbudowanej, interaktywnej mapy nocnej (CartoDB Dark Matter) z precyzyjną siatką radarową i prawdziwymi ulicami.'}
+              </p>
+            </div>
+
+            {/* 3. Wprowadzanie / Aktualizacja Klucza Google Maps API */}
+            <form onSubmit={handleSaveCustomKey} className="space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center justify-between">
+                <span>2. Klucz Google Maps Platform API</span>
+                {customApiKey && (
+                  <button
+                    type="button"
+                    onClick={handleClearCustomKey}
+                    className="text-[10px] font-bold text-red-400 hover:text-red-300"
+                  >
+                    Usuń zapisany klucz
+                  </button>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={inputApiKey}
+                  onChange={e => setInputApiKey(e.target.value)}
+                  placeholder={customApiKey ? 'Wprowadzono własny klucz (wklej nowy aby zmienić)' : 'Wklej oficjalny klucz AIzaSy...'}
+                  className="flex-1 bg-[#090b16] border border-purple-500/30 focus:border-fuchsia-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none font-mono"
+                />
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:brightness-110 text-white font-bold text-xs shadow-lg active:scale-95 whitespace-nowrap transition-all"
+                >
+                  Zapisz i aktywuj
+                </button>
+              </div>
+
+              {keySaveMessage && (
+                <p className="text-xs text-fuchsia-300 font-medium">{keySaveMessage}</p>
+              )}
+
+              <p className="text-[10px] text-slate-400 leading-normal">
+                Wskazówka: Prawidłowy klucz Google Cloud API zaczyna się od ciągu <code className="text-fuchsia-300 bg-black/40 px-1 py-0.5 rounded">AIza...</code>.
+                Klucz zapisywany jest wyłącznie lokalnie w przeglądarce.
+              </p>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* AURA Premium 2.1km+ Radius Modal */}
+      {showPremiumModal && (
+        <div
+          onClick={() => setShowPremiumModal(false)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-md aura-glass-card-elevated rounded-[28px] border border-amber-500/40 p-6 shadow-2xl text-left space-y-4 my-8 relative overflow-hidden"
+          >
+            {/* Ambient gold glow */}
+            <div className="absolute -top-16 -right-16 w-36 h-36 bg-amber-500/20 rounded-full blur-3xl pointer-events-none" />
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400 to-yellow-600 flex items-center justify-center text-black font-black shadow-lg">
+                  <Crown className="w-5 h-5 text-black" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">AURA Premium — Radar 2.1km+</h3>
+                  <p className="text-[11px] text-amber-300/80">Nieograniczony zasięg wyszukiwania</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowPremiumModal(false)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-xl hover:bg-white/10"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-amber-950/40 border border-amber-500/30 space-y-2 text-xs text-amber-100">
+              <div className="flex items-center gap-2 font-bold text-amber-300">
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span>Zasięg darmowy: do 2 km</span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                W wersji standardowej widzisz użytkowników w promieniu do 2.0 km. Wersja <strong>AURA Premium</strong> znosi wszelkie ograniczenia odległości (2.1 km i więcej) i umożliwia bezpośredni kontakt z każdym członkiem społeczności.
+              </p>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center gap-2.5 text-slate-200">
+                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-[10px]">✓</div>
+                <span>Widok członków w odległości 2.1 km i dalej (bez limitu)</span>
+              </div>
+              <div className="flex items-center gap-2.5 text-slate-200">
+                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-[10px]">✓</div>
+                <span>Brak rozmycia profilów i zdjęć poza strefą 2 km</span>
+              </div>
+              <div className="flex items-center gap-2.5 text-slate-200">
+                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-[10px]">✓</div>
+                <span>Nielimitowane wiadomości i funkcja teleportu do miast</span>
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col gap-2">
+              <button
+                onClick={() => {
+                  if (onUpdateUser && currentUser) {
+                    onUpdateUser({ ...currentUser, isPremium: true });
+                  }
+                  setRadiusFilter('unlimited');
+                  setShowPremiumModal(false);
+                  if (onOpenPremium) {
+                    onOpenPremium();
+                  }
+                }}
+                className="w-full py-3 rounded-2xl bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:brightness-110 text-black font-extrabold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2"
+              >
+                <Crown className="w-4 h-4 text-black" />
+                <span>Aktywuj AURA Premium (2.1km+)</span>
+              </button>
+              <button
+                onClick={() => setShowPremiumModal(false)}
+                className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 text-center"
+              >
+                Pozostań przy strefie 2 km
+              </button>
             </div>
           </div>
         </div>

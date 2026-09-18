@@ -12,6 +12,11 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // Test connection health check
+    match /test/{testId} {
+      allow read: if true;
+    }
+
     // Users collection (public dating profiles discovery)
     match /users/{userId} {
       allow read: if true;

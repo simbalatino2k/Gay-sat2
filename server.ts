@@ -38,6 +38,7 @@ import {
   signMediaAccessToken 
 } from './src/lib/mediaSecurity';
 import { cloudBackupService } from './src/services/cloudBackupService';
+import { WebSocketServer, WebSocket } from 'ws';
 import {
   verifyGooglePlayPurchase,
   verifyAppleStoreKitTransaction,
@@ -694,10 +695,44 @@ app.put('/api/profile', authenticateToken, async (req: AuthenticatedRequest, res
       }
     }
 
+    if (req.body.userMode) {
+      const allowedModes = ['ONLINE', 'HOT_NOW', 'FLYING_MOOD', 'DISPONIBLE', 'CHILL', 'OFFLINE'];
+      if (!allowedModes.includes(req.body.userMode)) {
+        return res.status(400).json({ error: 'Invalid user status mode' });
+      }
+      req.body.modeUpdatedAt = new Date().toISOString();
+      if (req.body.userMode === 'OFFLINE') {
+        req.body.isOnline = false;
+      } else {
+        req.body.isOnline = true;
+      }
+    }
+
     const updated = await store.updateProfile(req.user!.id, req.body);
     res.json({ profile: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Profile update failed' });
+  }
+});
+
+// Dedicated Status Mode update endpoint
+app.put('/api/users/status-mode', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { mode } = req.body;
+    const allowedModes = ['ONLINE', 'HOT_NOW', 'FLYING_MOOD', 'DISPONIBLE', 'CHILL', 'OFFLINE'];
+    if (!mode || !allowedModes.includes(mode)) {
+      return res.status(400).json({ error: 'Invalid status mode. Allowed: ONLINE, HOT_NOW, FLYING_MOOD, DISPONIBLE, CHILL, OFFLINE' });
+    }
+    const modeUpdatedAt = new Date().toISOString();
+    const isOnline = mode !== 'OFFLINE';
+    const updated = await store.updateProfile(req.user!.id, {
+      userMode: mode,
+      modeUpdatedAt,
+      isOnline
+    });
+    res.json({ success: true, profile: updated, userMode: mode, modeUpdatedAt });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update status mode' });
   }
 });
 
@@ -2055,6 +2090,94 @@ async function startServer() {
     (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));
 
   const httpServer = http.createServer(app);
+
+  // WebRTC Video Calling Signaling Server (path: /ws/webrtc)
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws/webrtc' });
+  // Map of userId -> Set of active WebSockets
+  const connectedCallSockets = new Map<string, Set<WebSocket>>();
+
+  wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+    let authenticatedUserId: string | null = null;
+
+    ws.on('message', async (data: any) => {
+      try {
+        const message = JSON.parse(data.toString());
+        const { type } = message;
+
+        if (type === 'AUTH') {
+          const { token } = message;
+          if (token) {
+            const user = await store.getUserByToken(token);
+            if (user && user.status === 'ACTIVE') {
+              authenticatedUserId = user.id;
+              if (!connectedCallSockets.has(user.id)) {
+                connectedCallSockets.set(user.id, new Set());
+              }
+              connectedCallSockets.get(user.id)!.add(ws);
+              ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', userId: user.id }));
+              return;
+            }
+          }
+          ws.send(JSON.stringify({ type: 'AUTH_FAILED', error: 'Authentication failed' }));
+          return;
+        }
+
+        if (!authenticatedUserId) {
+          ws.send(JSON.stringify({ type: 'ERROR', error: 'Unauthorized. Send AUTH first.' }));
+          return;
+        }
+
+        // WebRTC Signaling routing (CALL_REQUEST, CALL_ACCEPT, CALL_REJECT, CALL_END, OFFER, ANSWER, ICE_CANDIDATE)
+        const { targetUserId } = message;
+        if (targetUserId) {
+          // Verify neither user blocked the other
+          const isBlocked = await store.isBlocked(authenticatedUserId, targetUserId);
+          if (isBlocked) {
+            ws.send(JSON.stringify({ type: 'CALL_FAILED', reason: 'BLOCKED', targetUserId }));
+            return;
+          }
+
+          const targetSockets = connectedCallSockets.get(targetUserId);
+          if (targetSockets && targetSockets.size > 0) {
+            const forwardPayload = JSON.stringify({
+              ...message,
+              senderId: authenticatedUserId
+            });
+            targetSockets.forEach(targetWs => {
+              if (targetWs.readyState === WebSocket.OPEN) {
+                targetWs.send(forwardPayload);
+              }
+            });
+          } else if (type === 'CALL_REQUEST') {
+            // Target is currently offline for calls
+            ws.send(JSON.stringify({
+              type: 'CALL_REJECTED',
+              senderId: targetUserId,
+              reason: 'USER_OFFLINE'
+            }));
+          }
+        }
+      } catch (err: any) {
+        console.error('[WebRTC WSS] Message handling error:', err.message);
+      }
+    });
+
+    ws.on('close', () => {
+      if (authenticatedUserId) {
+        const userSockets = connectedCallSockets.get(authenticatedUserId);
+        if (userSockets) {
+          userSockets.delete(ws);
+          if (userSockets.size === 0) {
+            connectedCallSockets.delete(authenticatedUserId);
+          }
+        }
+      }
+    });
+
+    ws.on('error', (err) => {
+      console.warn('[WebRTC WSS] Socket error:', err.message);
+    });
+  });
 
   if (!isProduction) {
     // Development mode: conditionally initialize Vite development server & HMR

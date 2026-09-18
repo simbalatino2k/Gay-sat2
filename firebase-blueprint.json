@@ -3,76 +3,112 @@
     "users": {
       "title": "User Profiles",
       "description": "User accounts, authentication details, and public gay & queer profiles",
-      "fields": {
+      "type": "object",
+      "properties": {
         "email": { "type": "string", "description": "User email address" },
         "role": { "type": "string", "description": "User system role (USER, SUPERADMIN)" },
         "status": { "type": "string", "description": "Account status (ACTIVE, SUSPENDED, DELETED)" },
         "isAgeVerified18Plus": { "type": "boolean", "description": "18+ age gate verification flag" },
-        "displayName": { "type": "string", "description": "Public display name" },
+        "displayName": { "type": "string", "description": "Public display name", "maxLength": 100 },
         "age": { "type": "number", "description": "Age" },
         "identityRole": { "type": "string", "description": "Sexual position / identity role" },
-        "location": { "type": "string", "description": "City / region location" },
-        "bio": { "type": "string", "description": "Biography" },
-        "photos": { "type": "array", "description": "Array of photo objects with url and primary flags" },
+        "location": { "type": "string", "description": "City / region location", "maxLength": 120 },
+        "bio": { "type": "string", "description": "Biography", "maxLength": 1000 },
         "createdAt": { "type": "string", "description": "Creation timestamp" },
         "updatedAt": { "type": "string", "description": "Last update timestamp" }
-      }
+      },
+      "required": ["email", "displayName"]
     },
     "conversations": {
       "title": "Direct Conversations",
       "description": "Chat conversation threads between pairs of users",
-      "fields": {
+      "type": "object",
+      "properties": {
         "participantIds": { "type": "array", "description": "Array of participant user IDs" },
-        "lastMessage": { "type": "object", "description": "Latest message object summary" },
         "updatedAt": { "type": "string", "description": "Last message timestamp" }
-      }
+      },
+      "required": ["participantIds"]
     },
     "messages": {
       "title": "Chat Messages",
       "description": "Individual messages inside conversation threads",
-      "fields": {
-        "conversationId": { "type": "string", "description": "Conversation ID" },
-        "senderId": { "type": "string", "description": "Sender user ID" },
-        "receiverId": { "type": "string", "description": "Recipient user ID" },
-        "text": { "type": "string", "description": "Message text" },
-        "photoUrl": { "type": "string", "description": "Optional attached photo URL" },
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string", "description": "Conversation ID", "maxLength": 128 },
+        "senderId": { "type": "string", "description": "Sender user ID", "maxLength": 128 },
+        "receiverId": { "type": "string", "description": "Recipient user ID", "maxLength": 128 },
+        "text": { "type": "string", "description": "Message text", "maxLength": 4000 },
+        "photoUrl": { "type": "string", "description": "Optional attached photo URL", "maxLength": 2048 },
         "status": { "type": "string", "description": "Read status (SENT, DELIVERED, READ)" },
         "createdAt": { "type": "string", "description": "Timestamp" }
-      }
+      },
+      "required": ["conversationId", "senderId", "receiverId"]
     },
     "moments": {
       "title": "24h Moments",
       "description": "Ephemeral 24-hour photo and text stories shared on the network",
-      "fields": {
-        "userId": { "type": "string", "description": "Creator user ID" },
-        "mediaUrl": { "type": "string", "description": "Photo/video media URL" },
-        "mediaType": { "type": "string", "description": "photo or video" },
-        "caption": { "type": "string", "description": "Optional moment caption" },
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Creator user ID", "maxLength": 128 },
+        "mediaUrl": { "type": "string", "description": "Photo/video media URL", "maxLength": 2048 },
+        "mediaType": { "type": "string", "description": "photo or video", "enum": ["photo", "video"] },
+        "caption": { "type": "string", "description": "Optional moment caption", "maxLength": 500 },
         "privacy": { "type": "string", "description": "Privacy setting (everyone, connections)" },
         "createdAt": { "type": "string", "description": "Creation timestamp" },
         "expiresAt": { "type": "string", "description": "24-hour expiry timestamp" },
         "viewsCount": { "type": "number", "description": "Number of views" },
         "likesCount": { "type": "number", "description": "Number of likes" }
-      }
+      },
+      "required": ["userId", "mediaUrl"]
     },
     "likes": {
       "title": "User Likes",
       "description": "Like and superlike records for matching",
-      "fields": {
-        "fromUserId": { "type": "string", "description": "Liker user ID" },
-        "toUserId": { "type": "string", "description": "Liked user ID" },
+      "type": "object",
+      "properties": {
+        "fromUserId": { "type": "string", "description": "Liker user ID", "maxLength": 128 },
+        "toUserId": { "type": "string", "description": "Liked user ID", "maxLength": 128 },
         "isSuperLike": { "type": "boolean", "description": "Superlike flag" },
         "createdAt": { "type": "string", "description": "Timestamp" }
-      }
+      },
+      "required": ["fromUserId", "toUserId"]
     },
     "matches": {
       "title": "User Matches",
       "description": "Mutual match connections",
-      "fields": {
-        "user1Id": { "type": "string", "description": "First user ID" },
-        "user2Id": { "type": "string", "description": "Second user ID" },
+      "type": "object",
+      "properties": {
+        "user1Id": { "type": "string", "description": "First user ID", "maxLength": 128 },
+        "user2Id": { "type": "string", "description": "Second user ID", "maxLength": 128 },
         "createdAt": { "type": "string", "description": "Match timestamp" }
-      }
+      },
+      "required": ["user1Id", "user2Id"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profile collection"
+    },
+    "/conversations/{conversationId}": {
+      "schema": "conversations",
+      "description": "Chat conversation threads"
+    },
+    "/messages/{messageId}": {
+      "schema": "messages",
+      "description": "Chat messages collection"
+    },
+    "/moments/{momentId}": {
+      "schema": "moments",
+      "description": "Stories and moments collection"
+    },
+    "/likes/{likeId}": {
+      "schema": "likes",
+      "description": "Likes and superlikes collection"
+    },
+    "/matches/{matchId}": {
+      "schema": "matches",
+      "description": "Mutual matches collection"
     }
   }
 }

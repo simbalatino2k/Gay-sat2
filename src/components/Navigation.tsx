@@ -1,5 +1,5 @@
 import React from 'react';
-import { Compass, Heart, MessageSquare, User, Sparkles, MapPin, Settings } from 'lucide-react';
+import { Compass, Heart, MessageSquare, User, Sparkles, MapPin } from 'lucide-react';
 import { UserAccount } from '../types';
 
 export type NavTab = 'discover' | 'map' | 'matches' | 'chat' | 'profile' | 'settings' | 'admin';
@@ -133,25 +133,6 @@ export const Navigation: React.FC<NavigationProps> = ({
             <span className="text-[10px] mt-0.5 tracking-tight relative z-10">Profile</span>
             {activeTab === 'profile' && (
               <span className="absolute bottom-1 w-2.5 h-0.5 rounded-full bg-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.9)]" />
-            )}
-          </button>
-
-          {/* Settings & Privacy Tab */}
-          <button
-            onClick={() => onSelectTab('settings')}
-            className={`flex flex-col items-center justify-center min-w-[50px] min-h-[50px] px-1.5 py-1 rounded-2xl transition-all duration-300 relative active:scale-95 group ${
-              activeTab === 'settings'
-                ? 'text-amber-300 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {activeTab === 'settings' && (
-              <div className="absolute inset-0 rounded-2xl bg-amber-500/[0.12] border border-amber-500/25 pointer-events-none transition-all duration-300 shadow-[0_0_16px_rgba(245,158,11,0.2)_inset]" />
-            )}
-            <Settings className={`w-5 h-5 transition-transform duration-300 ${activeTab === 'settings' ? 'stroke-[2.5px] scale-110 text-amber-300 drop-shadow-[0_0_12px_rgba(245,158,11,0.7)]' : 'group-hover:scale-105'}`} />
-            <span className="text-[10px] mt-0.5 tracking-tight relative z-10">Settings</span>
-            {activeTab === 'settings' && (
-              <span className="absolute bottom-1 w-2.5 h-0.5 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(245,158,11,0.9)]" />
             )}
           </button>
 

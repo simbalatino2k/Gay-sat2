@@ -38,6 +38,14 @@ export interface ProfilePhoto {
 
 export type LocationPrivacyMode = 'APPROXIMATE' | 'EXACT' | 'HIDDEN';
 
+export type UserStatusMode = 
+  | 'ONLINE' 
+  | 'HOT_NOW' 
+  | 'FLYING_MOOD' 
+  | 'DISPONIBLE' 
+  | 'CHILL' 
+  | 'OFFLINE';
+
 export interface UserProfile {
   id: string;
   userId: string;
@@ -61,6 +69,8 @@ export interface UserProfile {
   verified: boolean;
   isOnline: boolean;
   lastActiveMinutesAgo: number;
+  userMode?: UserStatusMode;
+  modeUpdatedAt?: string;
   instagramHandle?: string;
   spotifyTopArtist?: string;
   isPremium?: boolean;

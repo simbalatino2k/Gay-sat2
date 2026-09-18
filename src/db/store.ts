@@ -1030,7 +1030,9 @@ export class DataStore {
       'identityRole',
       'locationPrivacy',
       'approximateArea',
-      'location'
+      'location',
+      'userMode',
+      'modeUpdatedAt'
     ];
 
     const safeProfileUpdates: Partial<UserProfile> = {};

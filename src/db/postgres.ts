@@ -314,6 +314,8 @@ export async function initPostgresSchema(): Promise<boolean> {
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS analytics_cookies BOOLEAN DEFAULT FALSE;
 
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id VARCHAR(128);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS mode_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
 
       CREATE TABLE IF NOT EXISTS vault_grants (
         owner_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -405,12 +407,14 @@ export class PostgresStoreAdapter {
           id, email, display_name, age, role, status, bio,
           sexual_role, tribe, looking_for, vibe, interests,
           location, photos, is_verified, is_premium, premium_tier, privacy,
+          user_mode, mode_updated_at,
           created_at, updated_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12,
           $13, $14, $15, $16, $17, $18,
-          $19, CURRENT_TIMESTAMP
+          $19, CURRENT_TIMESTAMP,
+          $20, CURRENT_TIMESTAMP
         )
         ON CONFLICT (id) DO UPDATE SET
           email = EXCLUDED.email,
@@ -430,6 +434,8 @@ export class PostgresStoreAdapter {
           is_premium = EXCLUDED.is_premium,
           premium_tier = EXCLUDED.premium_tier,
           privacy = EXCLUDED.privacy,
+          user_mode = EXCLUDED.user_mode,
+          mode_updated_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP`,
         [
           user.id, user.email, user.profile.displayName, user.profile.age, user.role, user.status, p.bio || null,
@@ -444,6 +450,7 @@ export class PostgresStoreAdapter {
           user.isPremium || p.isPremium || false,
           p.premiumTier || 'none',
           JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          p.userMode || 'ONLINE',
           user.createdAt
         ]
       );
@@ -479,12 +486,14 @@ export class PostgresStoreAdapter {
           id, email, display_name, age, role, status, bio,
           sexual_role, tribe, looking_for, vibe, interests,
           location, photos, is_verified, is_premium, premium_tier, privacy,
+          user_mode, mode_updated_at,
           created_at, updated_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7,
           $8, $9, $10, $11, $12,
           $13, $14, $15, $16, $17, $18,
-          $19, CURRENT_TIMESTAMP
+          $19, CURRENT_TIMESTAMP,
+          $20, CURRENT_TIMESTAMP
         )
         ON CONFLICT (id) DO UPDATE SET
           email = EXCLUDED.email,
@@ -504,6 +513,8 @@ export class PostgresStoreAdapter {
           is_premium = EXCLUDED.is_premium,
           premium_tier = EXCLUDED.premium_tier,
           privacy = EXCLUDED.privacy,
+          user_mode = EXCLUDED.user_mode,
+          mode_updated_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP`,
         [
           user.id,
@@ -524,6 +535,7 @@ export class PostgresStoreAdapter {
           user.isPremium || p.isPremium || false,
           p.premiumTier || null,
           JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          p.userMode || 'ONLINE',
           user.createdAt || new Date().toISOString()
         ]
       );
@@ -874,6 +886,8 @@ export class PostgresStoreAdapter {
         verified: !!row.is_verified,
         isOnline: true,
         lastActiveMinutesAgo: 0,
+        userMode: row.user_mode || 'ONLINE',
+        modeUpdatedAt: row.mode_updated_at instanceof Date ? row.mode_updated_at.toISOString() : (row.mode_updated_at || undefined),
         isPremium: !!row.is_premium,
         premiumTier: row.premium_tier
       }

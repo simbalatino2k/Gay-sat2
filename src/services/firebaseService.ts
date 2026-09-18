@@ -24,7 +24,9 @@ import {
   appleProvider, 
   twitterProvider, 
   facebookProvider, 
-  db 
+  db,
+  handleFirestoreError,
+  OperationType
 } from '../lib/firebase';
 import { UserAccount, UserProfile } from '../types';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
@@ -87,11 +89,20 @@ async function signInWithOAuthProvider(
     const token = await fbUser.getIdToken();
 
     const userDocRef = doc(db, 'users', fbUser.uid);
-    const userDocSnap = await getDoc(userDocRef);
+    let userDocSnap: any;
+    try {
+      userDocSnap = await getDoc(userDocRef);
+    } catch (err: any) {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.GET, `users/${fbUser.uid}`);
+      }
+      console.warn('Notice loading Firestore profile in OAuth flow:', err);
+      userDocSnap = { exists: () => false, data: () => null };
+    }
 
     let userAccount: UserAccount;
 
-    if (userDocSnap.exists()) {
+    if (userDocSnap && userDocSnap.exists()) {
       const firestoreData = userDocSnap.data();
       userAccount = formatUserAccount(fbUser, firestoreData);
     } else {
@@ -107,18 +118,25 @@ async function signInWithOAuthProvider(
         ]
       });
 
-      await setDoc(userDocRef, {
-        uid: fbUser.uid,
-        email: fbUser.email,
-        displayName: userAccount.profile.displayName,
-        role: 'USER',
-        status: 'ACTIVE',
-        isAgeVerified18Plus: true,
-        authProvider: providerName.toLowerCase(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        profile: userAccount.profile
-      });
+      try {
+        await setDoc(userDocRef, {
+          uid: fbUser.uid,
+          email: fbUser.email,
+          displayName: userAccount.profile.displayName,
+          role: 'USER',
+          status: 'ACTIVE',
+          isAgeVerified18Plus: true,
+          authProvider: providerName.toLowerCase(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          profile: userAccount.profile
+        });
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          handleFirestoreError(err, OperationType.WRITE, `users/${fbUser.uid}`);
+        }
+        console.warn('Notice saving profile to Firestore in OAuth flow:', err);
+      }
     }
 
     return { token, user: userAccount };
@@ -205,17 +223,24 @@ export async function registerWithFirebaseEmail(
   });
 
   const userDocRef = doc(db, 'users', fbUser.uid);
-  await setDoc(userDocRef, {
-    uid: fbUser.uid,
-    email: fbUser.email,
-    displayName: userAccount.profile.displayName,
-    role: 'USER',
-    status: 'ACTIVE',
-    isAgeVerified18Plus: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    profile: userAccount.profile
-  });
+  try {
+    await setDoc(userDocRef, {
+      uid: fbUser.uid,
+      email: fbUser.email,
+      displayName: userAccount.profile.displayName,
+      role: 'USER',
+      status: 'ACTIVE',
+      isAgeVerified18Plus: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      profile: userAccount.profile
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `users/${fbUser.uid}`);
+    }
+    console.warn('Notice saving profile to Firestore in register:', err);
+  }
 
   return { token, user: userAccount };
 }
@@ -232,11 +257,17 @@ export async function loginWithFirebaseEmail(
   const token = await fbUser.getIdToken();
 
   const userDocRef = doc(db, 'users', fbUser.uid);
-  const userDocSnap = await getDoc(userDocRef);
-
   let firestoreData = null;
-  if (userDocSnap.exists()) {
-    firestoreData = userDocSnap.data();
+  try {
+    const userDocSnap = await getDoc(userDocRef);
+    if (userDocSnap.exists()) {
+      firestoreData = userDocSnap.data();
+    }
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.GET, `users/${fbUser.uid}`);
+    }
+    console.warn('Notice loading Firestore user document:', err);
   }
 
   const userAccount = formatUserAccount(fbUser, firestoreData);
@@ -251,19 +282,25 @@ export async function saveProfileToFirestore(
   updates: Partial<UserProfile>
 ): Promise<void> {
   const userDocRef = doc(db, 'users', uid);
-  const userDocSnap = await getDoc(userDocRef);
-
-  if (userDocSnap.exists()) {
-    const existing = userDocSnap.data();
-    const updatedProfile = {
-      ...(existing.profile || {}),
-      ...updates
-    };
-    await updateDoc(userDocRef, {
-      profile: updatedProfile,
-      displayName: updates.displayName || existing.displayName,
-      updatedAt: new Date().toISOString()
-    });
+  try {
+    const userDocSnap = await getDoc(userDocRef);
+    if (userDocSnap.exists()) {
+      const existing = userDocSnap.data();
+      const updatedProfile = {
+        ...(existing.profile || {}),
+        ...updates
+      };
+      await updateDoc(userDocRef, {
+        profile: updatedProfile,
+        displayName: updates.displayName || existing.displayName,
+        updatedAt: new Date().toISOString()
+      });
+    }
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
+    }
+    console.warn('Notice updating profile in Firestore:', err);
   }
 }
 
