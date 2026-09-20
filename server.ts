@@ -7,10 +7,13 @@ if ((globalThis as any).__dirname === '.') {
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import http from 'http';
+import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
 import { store } from './src/db/store';
 import { UserAccount } from './src/types';
+import { inspectSharedAlbum, executePhotoImport } from './src/lib/albumImporter';
+import { getPostgresPool } from './src/db/postgres';
 import { QUEER_VENUES, getVenuesNearLocation, searchVenues } from './src/data/queerVenues';
 import { AURA_STICKERS } from './src/data/auraStickers';
 import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
@@ -51,6 +54,53 @@ import { BILLING_PLANS, STORE_PRODUCT_IDS } from './src/config/billingConfig';
 // Initialize Media Storage subsystem
 initStorage();
 
+// WebRTC Signaling Active Connections & Session Registry
+export const connectedCallSockets = new Map<string, Set<WebSocket>>();
+export const activeCallPairs = new Map<string, string>(); // userId -> partnerUserId
+
+export function terminateActiveCallBetweenUsers(userA: string, userB: string, reason = 'BLOCKED') {
+  const socketsA = connectedCallSockets.get(userA);
+  const socketsB = connectedCallSockets.get(userB);
+
+  const payload = JSON.stringify({
+    type: 'CALL_TERMINATED',
+    reason,
+    senderId: userA,
+    targetUserId: userB
+  });
+
+  if (socketsA) {
+    socketsA.forEach(s => {
+      if (s.readyState === WebSocket.OPEN) {
+        try { s.send(payload); } catch {}
+      }
+    });
+  }
+  if (socketsB) {
+    socketsB.forEach(s => {
+      if (s.readyState === WebSocket.OPEN) {
+        try { s.send(payload); } catch {}
+      }
+    });
+  }
+
+  activeCallPairs.delete(userA);
+  activeCallPairs.delete(userB);
+
+  // Broadcast to PostgreSQL channel for multi-instance Cloud Run containers
+  const pool = getPostgresPool();
+  if (pool) {
+    pool.query('SELECT pg_notify($1, $2)', [
+      'aura_webrtc_signals',
+      JSON.stringify({
+        targetUserId: userB,
+        senderId: userA,
+        message: { type: 'CALL_TERMINATED', reason, senderId: userA }
+      })
+    ]).catch(() => {});
+  }
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 35 * 1024 * 1024 } // 35 MB limit (supports up to 30 MB Star Video)
@@ -58,7 +108,7 @@ const upload = multer({
 
 // Initialize Express App
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // Security & Parsing Middlewares with rawBody capture for webhook signature verification
 app.use(
@@ -204,14 +254,110 @@ function getGeminiClient(): GoogleGenAI {
 
 // --- REST API ENDPOINTS ---
 
-// Health & Status
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({
+// Health & Probes: Liveness vs Readiness (Requirement 5)
+// 1. Liveness probe: returns 200 as long as the process is alive
+app.get(['/api/health/liveness', '/api/health/live', '/api/liveness', '/healthz'], (_req: Request, res: Response) => {
+  res.status(200).json({
     status: 'ok',
+    probe: 'liveness',
     app: 'AURA GAY 18+',
     environment: process.env.NODE_ENV || 'development',
+    uptimeSeconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
+});
+
+// 2. Readiness probe: returns 200 ONLY when PostgreSQL is connected and schema ready; returns 503 if unavailable
+app.get(['/api/health/readiness', '/api/health/ready', '/api/readiness', '/readyz'], async (_req: Request, res: Response) => {
+  const ready = await store.isReady();
+  const dbStatus = store.getDatabaseStatus();
+
+  if (!ready) {
+    return res.status(503).json({
+      status: 'unavailable',
+      probe: 'readiness',
+      ready: false,
+      database: dbStatus,
+      error: 'PostgreSQL database connection is unavailable or schema is not ready',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  return res.status(200).json({
+    status: 'ok',
+    probe: 'readiness',
+    ready: true,
+    database: dbStatus,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 3. Main /api/health endpoint: returns 503 if database is not ready (never report ready based on HTTP alone)
+app.get('/api/health', async (req: Request, res: Response) => {
+  const probe = req.query.probe as string | undefined;
+  if (probe === 'liveness') {
+    return res.status(200).json({
+      status: 'ok',
+      probe: 'liveness',
+      app: 'AURA GAY 18+',
+      environment: process.env.NODE_ENV || 'development',
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  const ready = await store.isReady();
+  const dbStatus = store.getDatabaseStatus();
+
+  if (!ready) {
+    return res.status(503).json({
+      status: 'unavailable',
+      probe: 'readiness',
+      ready: false,
+      app: 'AURA GAY 18+',
+      environment: process.env.NODE_ENV || 'development',
+      database: dbStatus,
+      error: 'PostgreSQL database connection is unavailable or schema is not ready',
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  return res.status(200).json({
+    status: 'ok',
+    probe: 'readiness',
+    ready: true,
+    app: 'AURA GAY 18+',
+    environment: process.env.NODE_ENV || 'development',
+    database: dbStatus,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Database Readiness Guard for all functional API endpoints
+// In production or on Cloud Run, when PostgreSQL is not connected, return 503 to prevent unpersisted fake writes to RAM/disk
+app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
+  // Allow health probes and readiness checks
+  if (
+    req.path === '/health' ||
+    req.path.startsWith('/health') ||
+    req.path === '/liveness' ||
+    req.path === '/readiness' ||
+    req.path === '/live' ||
+    req.path === '/ready'
+  ) {
+    return next();
+  }
+
+  const ready = await store.isReady();
+  if (!ready) {
+    const dbStatus = store.getDatabaseStatus();
+    return res.status(503).json({
+      error: 'Database service unavailable',
+      message: 'PostgreSQL database is required and not ready. Operation rejected to prevent unpersisted data loss.',
+      database: dbStatus
+    });
+  }
+  next();
 });
 
 // Auth: Register
@@ -260,22 +406,16 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
 
     res.json(result);
   } catch (err: any) {
+    if (err.status === 503 || (err.message && err.message.toLowerCase().includes('database'))) {
+      return res.status(503).json({ error: 'Database service unavailable' });
+    }
     res.status(400).json({ error: err.message || 'Login failed' });
   }
 });
 
-// Auth: Social Fallback / Sandbox Login (when third-party OAuth provider is not yet enabled in Firebase Console)
-app.post('/api/auth/social-dev-login', authRateLimiter, async (req: Request, res: Response) => {
-  try {
-    const { provider, email, displayName } = req.body;
-    if (!provider || typeof provider !== 'string') {
-      return res.status(400).json({ error: 'Provider is required' });
-    }
-    const result = await store.loginOrRegisterSocialUser(provider, email, displayName);
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Social login failed' });
-  }
+// Auth: Social Fallback / Sandbox Login - PERMANENTLY DISABLED FOR SECURITY
+app.post('/api/auth/social-dev-login', (_req: Request, res: Response) => {
+  res.status(403).json({ error: 'Endpoint /api/auth/social-dev-login has been disabled for security reasons.' });
 });
 
 // Auth: Forgot Password (Initiate recovery flow)
@@ -670,6 +810,149 @@ app.get('/api/media/files/:filename', (req: Request, res: Response) => {
   res.sendFile(fileInfo.path);
 });
 
+// Photo Album Import: Inspect Shared Album (iCloud & Google Photos)
+app.post('/api/album/import/inspect', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rateCheck = checkRateLimit(`import-inspect:${req.user!.id}`, { max: 10, windowMs: 60000 });
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Zbyt wiele zapytań. Spróbuj ponownie za chwilę.' });
+    }
+
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({ error: 'Wymagany jest poprawny adres URL albumu.' });
+    }
+
+    const inspectResult = await inspectSharedAlbum(url);
+    res.json(inspectResult);
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Wystąpił błąd podczas weryfikacji albumu.'
+    });
+  }
+});
+
+// Photo Album Import: Execute Import of Selected Photos
+app.post('/api/album/import/execute', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rateCheck = checkRateLimit(`import-exec:${req.user!.id}`, { max: 5, windowMs: 60000 });
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ error: 'Przekroczono limit prób importu. Odczekaj chwilę.' });
+    }
+
+    const { photos, primaryPhotoId } = req.body;
+    if (!Array.isArray(photos) || photos.length === 0) {
+      return res.status(400).json({ error: 'Wymagane jest wybranie co najmniej jednego zdjęcia do importu.' });
+    }
+
+    const user = req.user!;
+    const currentPhotos = user.profile.photos || [];
+    const availableSlots = Math.max(0, 6 - currentPhotos.length);
+
+    if (availableSlots <= 0) {
+      return res.status(400).json({ error: 'Osiągnięto maksymalny limit 6 zdjęć w profilu.' });
+    }
+
+    // Limit to available slots
+    const photosToProcess = photos.slice(0, availableSlots);
+
+    const importResult = await executePhotoImport(user.id, photosToProcess, primaryPhotoId);
+
+    // Update user profile in PostgreSQL database store
+    const newPhotosToAdd = importResult.results
+      .filter(r => r.success && r.url)
+      .map((r, idx) => ({
+        id: `ph-${Date.now()}-${idx}`,
+        url: r.url!,
+        isPrimary: r.isPrimary || (currentPhotos.length === 0 && idx === 0)
+      }));
+
+    let updatedPhotos = [...currentPhotos];
+    if (newPhotosToAdd.length > 0) {
+      if (newPhotosToAdd.some(p => p.isPrimary)) {
+        updatedPhotos = updatedPhotos.map(p => ({ ...p, isPrimary: false }));
+      }
+      updatedPhotos.push(...newPhotosToAdd);
+      updatedPhotos = updatedPhotos.slice(0, 6);
+      if (!updatedPhotos.some(p => p.isPrimary) && updatedPhotos.length > 0) {
+        updatedPhotos[0].isPrimary = true;
+      }
+      await store.updateProfile(user.id, { photos: updatedPhotos });
+    }
+
+    res.json({
+      success: true,
+      importedCount: importResult.importedCount,
+      failedCount: importResult.failedCount,
+      results: importResult.results,
+      updatedPhotos
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Wystąpił błąd podczas importowania zdjęć.'
+    });
+  }
+});
+
+// WebRTC: Ephemeral ICE & TURN Credentials (RFC 5766 HMAC-SHA1)
+app.get('/api/webrtc/ice-servers', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  const turnSecret = process.env.TURN_SECRET;
+  const turnUrls = process.env.TURN_URLS;
+
+  const defaultStun = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+  ];
+
+  if (!turnSecret || !turnUrls) {
+    return res.json({
+      iceServers: defaultStun,
+      turnConfigured: false,
+      productionReadiness: {
+        turnReady: false,
+        blocker: 'MISSING_TURN_CONFIGURATION',
+        message: 'Brak konfiguracji TURN_SECRET / TURN_URLS w środowisku. P2P STUN działa w sieciach otwartych, ale symetryczny NAT operatorów komórkowych wymaga przekaźnika TURN.'
+      }
+    });
+  }
+
+  try {
+    const ttlSeconds = 3600; // 1 hour validity
+    const expiry = Math.floor(Date.now() / 1000) + ttlSeconds;
+    const username = `${expiry}:${req.user!.id}`;
+    const credential = crypto
+      .createHmac('sha1', turnSecret)
+      .update(username)
+      .digest('base64');
+
+    const urls = turnUrls.split(',').map(u => u.trim());
+
+    res.json({
+      iceServers: [
+        ...defaultStun,
+        {
+          urls,
+          username,
+          credential
+        }
+      ],
+      turnConfigured: true,
+      productionReadiness: {
+        turnReady: true,
+        expiresAt: new Date(expiry * 1000).toISOString()
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      iceServers: defaultStun,
+      turnConfigured: false,
+      error: err.message
+    });
+  }
+});
+
+
 // Auth: Get Current Profile
 app.get('/api/auth/me', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
   res.json({ user: req.user });
@@ -875,6 +1158,7 @@ const handleBlock = async (req: AuthenticatedRequest, res: Response) => {
     }
 
     const record = await store.blockUser(req.user!.id, targetUserId);
+    terminateActiveCallBetweenUsers(req.user!.id, targetUserId, 'BLOCKED');
     res.json({ success: true, blockRecord: record });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Block failed' });
@@ -2082,19 +2366,57 @@ app.all('/api/*', (req: Request, res: Response) => {
 
 // Vite Server Integration (Dev vs Prod)
 async function startServer() {
-  // Hydrate memory store from PostgreSQL
-  await store.hydrateFromPostgres();
-
   const isProduction =
     process.env.NODE_ENV === 'production' ||
     (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));
+
+  // 1. Inicjalizacja bazy PostgreSQL przed startem nasłuchiwania
+  const dbInitOk = await store.initializeDatabase();
+  const dbStatus = store.getDatabaseStatus();
+  if (dbInitOk) {
+    console.log('[DataStore] PostgreSQL persistence layer connected and schema ready.');
+  } else if (dbStatus.provider === 'local') {
+    console.warn('[DataStore] Running in local development mode with standalone storage (ALLOW_LOCAL_STORAGE=true).');
+  } else {
+    console.error('[DataStore FAIL-CLOSED] PostgreSQL database connection unavailable. Persistent database is required on Cloud Run/production. Readiness probe will report 503.');
+  }
+
+  // 2. Hydrate memory store from PostgreSQL
+  await store.hydrateFromPostgres();
 
   const httpServer = http.createServer(app);
 
   // WebRTC Video Calling Signaling Server (path: /ws/webrtc)
   const wss = new WebSocketServer({ server: httpServer, path: '/ws/webrtc' });
-  // Map of userId -> Set of active WebSockets
-  const connectedCallSockets = new Map<string, Set<WebSocket>>();
+
+  // PostgreSQL PubSub listener for multi-instance Cloud Run WebRTC signaling
+  const pool = getPostgresPool();
+  if (pool) {
+    pool.connect().then(client => {
+      client.query('LISTEN aura_webrtc_signals').catch(e => console.warn('[WebRTC PG Listen] Failed:', e.message));
+      client.on('notification', (msg) => {
+        if (msg.channel === 'aura_webrtc_signals' && msg.payload) {
+          try {
+            const data = JSON.parse(msg.payload);
+            const { targetUserId, message: remoteMessage } = data;
+            if (targetUserId) {
+              const localSockets = connectedCallSockets.get(targetUserId);
+              if (localSockets && localSockets.size > 0) {
+                const payloadStr = JSON.stringify(remoteMessage);
+                localSockets.forEach(ws => {
+                  if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(payloadStr);
+                  }
+                });
+              }
+            }
+          } catch (err) {
+            // Ignore parse errors on broadcast
+          }
+        }
+      });
+    }).catch(() => {});
+  }
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     let authenticatedUserId: string | null = null;
@@ -2127,7 +2449,7 @@ async function startServer() {
           return;
         }
 
-        // WebRTC Signaling routing (CALL_REQUEST, CALL_ACCEPT, CALL_REJECT, CALL_END, OFFER, ANSWER, ICE_CANDIDATE)
+        // WebRTC Signaling routing (CALL_REQUEST, CALL_ACCEPTED, CALL_REJECTED, CALL_END, OFFER, ANSWER, ICE_CANDIDATE)
         const { targetUserId } = message;
         if (targetUserId) {
           // Verify neither user blocked the other
@@ -2137,24 +2459,44 @@ async function startServer() {
             return;
           }
 
+          if (type === 'CALL_ACCEPTED') {
+            activeCallPairs.set(authenticatedUserId, targetUserId);
+            activeCallPairs.set(targetUserId, authenticatedUserId);
+          } else if (type === 'CALL_END' || type === 'CALL_REJECTED') {
+            activeCallPairs.delete(authenticatedUserId);
+            activeCallPairs.delete(targetUserId);
+          }
+
+          const forwardPayload = {
+            ...message,
+            senderId: authenticatedUserId
+          };
+          const forwardPayloadStr = JSON.stringify(forwardPayload);
+
           const targetSockets = connectedCallSockets.get(targetUserId);
           if (targetSockets && targetSockets.size > 0) {
-            const forwardPayload = JSON.stringify({
-              ...message,
-              senderId: authenticatedUserId
-            });
             targetSockets.forEach(targetWs => {
               if (targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(forwardPayload);
+                targetWs.send(forwardPayloadStr);
               }
             });
           } else if (type === 'CALL_REQUEST') {
-            // Target is currently offline for calls
-            ws.send(JSON.stringify({
-              type: 'CALL_REJECTED',
-              senderId: targetUserId,
-              reason: 'USER_OFFLINE'
-            }));
+            // Check if recipient is on another Cloud Run instance or offline
+            // Publish to PG first
+            if (pool) {
+              pool.query('SELECT pg_notify($1, $2)', [
+                'aura_webrtc_signals',
+                JSON.stringify({ targetUserId, senderId: authenticatedUserId, message: forwardPayload })
+              ]).catch(() => {});
+            }
+          }
+
+          // Always broadcast across instances for cross-container calls
+          if (pool && type !== 'CALL_REQUEST') {
+            pool.query('SELECT pg_notify($1, $2)', [
+              'aura_webrtc_signals',
+              JSON.stringify({ targetUserId, senderId: authenticatedUserId, message: forwardPayload })
+            ]).catch(() => {});
           }
         }
       } catch (err: any) {
@@ -2164,6 +2506,11 @@ async function startServer() {
 
     ws.on('close', () => {
       if (authenticatedUserId) {
+        const partnerId = activeCallPairs.get(authenticatedUserId);
+        if (partnerId) {
+          terminateActiveCallBetweenUsers(authenticatedUserId, partnerId, 'DISCONNECTED');
+        }
+
         const userSockets = connectedCallSockets.get(authenticatedUserId);
         if (userSockets) {
           userSockets.delete(ws);
@@ -2200,8 +2547,8 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    // Production mode: serve pre-built static assets and index.html from dist without Vite
-    const distPath = path.join(process.cwd(), 'dist');
+    // Production mode: serve pre-built static assets and index.html exclusively from dist/web
+    const distPath = path.join(process.cwd(), 'dist', 'web');
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));

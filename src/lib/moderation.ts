@@ -1,5 +1,4 @@
 import { GoogleGenAI, Type, Schema } from '@google/genai';
-import { getStore } from '../db/store.js'; // Assuming we export a way to get store
 
 let ai: GoogleGenAI | null = null;
 if (process.env.GEMINI_API_KEY) {
@@ -24,22 +23,42 @@ const moderationSchema: Schema = {
   required: ['isApproved', 'confidence']
 };
 
-export async function moderateText(text: string, category: ModerationCategory, aiConsent: boolean = true): Promise<ModerationResult> {
-  if (category === "PRIVATE_CHAT" && !aiConsent) {
-    // User opted out of AI analysis for private content.
-    // We cannot send to Gemini. Use a basic regex for safety or just approve.
-    return { isApproved: true, confidence: 1.0, reason: "Skipped AI moderation due to privacy opt-out" };
+export async function moderateText(
+  text: string,
+  category: ModerationCategory,
+  aiConsent: boolean = true,
+  timeoutMs: number = 5000
+): Promise<ModerationResult> {
+  // 1. Private chat privacy check: Do not send to AI without explicit user consent.
+  // Skipping AI analysis must not be recorded as positive AI verification (confidence must be 0).
+  if (category === 'PRIVATE_CHAT' && !aiConsent) {
+    return {
+      isApproved: true,
+      confidence: 0,
+      reason: 'Skipped AI moderation due to lack of consent (not verified by AI)'
+    };
   }
 
-  // Fail closed if no AI
-  if (!ai) return { isApproved: false, reason: 'Moderation service unavailable', confidence: 1.0 };
-  
-  const systemInstruction = category === 'PUBLIC_PROFILE' 
+  // 2. Fail closed if AI moderation is unavailable
+  if (!ai) {
+    return {
+      isApproved: false,
+      reason: 'Moderation service unavailable',
+      confidence: 0
+    };
+  }
+
+  // 3. Strict separation of public profile vs. private chat guidelines
+  const systemInstruction = category === 'PUBLIC_PROFILE'
     ? 'You are a strict Trust & Safety moderator for an 18+ dating app. This text is for a PUBLIC profile. Reject any text containing hate speech, illegal acts, CSAM, non-consensual content, or extreme toxicity. Flirting and adult themes are allowed, but public profiles must not contain explicit pornographic text or solicitations for illegal sex work.'
     : 'You are a Trust & Safety moderator for an 18+ dating app. This text is a PRIVATE chat between consenting adults. Adult language, roleplay, and explicit consensual flirting are completely ALLOWED. Only reject CSAM, terrorist content, severe non-consensual harm, or illegal drug trafficking.';
 
   try {
-    const response = await ai.models.generateContent({
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Moderation request timed out')), timeoutMs);
+    });
+
+    const generatePromise = ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: text,
       config: {
@@ -50,12 +69,54 @@ export async function moderateText(text: string, category: ModerationCategory, a
       }
     });
 
-    if (!response.text) return { isApproved: false, reason: 'AI returned empty', confidence: 0 };
-    const result = JSON.parse(response.text) as ModerationResult;
-    return result;
+    const response = await Promise.race([generatePromise, timeoutPromise]);
+
+    if (!response || !response.text) {
+      return {
+        isApproved: false,
+        reason: 'Moderation service returned empty response',
+        confidence: 0
+      };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(response.text);
+    } catch {
+      return {
+        isApproved: false,
+        reason: 'Moderation service returned unparseable JSON',
+        confidence: 0
+      };
+    }
+
+    // 4. Runtime validation: isApproved must be boolean, confidence must be a number between 0 and 1
+    if (
+      typeof parsed?.isApproved !== 'boolean' ||
+      typeof parsed?.confidence !== 'number' ||
+      isNaN(parsed.confidence) ||
+      parsed.confidence < 0 ||
+      parsed.confidence > 1
+    ) {
+      return {
+        isApproved: false,
+        reason: 'Invalid moderation response schema from model',
+        confidence: 0
+      };
+    }
+
+    return {
+      isApproved: parsed.isApproved,
+      confidence: parsed.confidence,
+      reason: typeof parsed.reason === 'string' ? parsed.reason : undefined
+    };
   } catch (err: any) {
-    console.error('Moderation error:', err);
-    // Fail closed
-    return { isApproved: false, reason: 'Moderation timeout or error', confidence: 0 };
+    console.error('[Moderation] Error or timeout during text moderation:', err.message || err);
+    // Fail closed: blocked on error/timeout for safety
+    return {
+      isApproved: false,
+      reason: 'Moderation request timeout or error',
+      confidence: 0
+    };
   }
 }

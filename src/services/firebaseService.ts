@@ -63,11 +63,10 @@ export function formatUserAccount(
     lastActiveMinutesAgo: 0
   };
 
-  const isSuper = (fbUser.email || '').toLowerCase().trim() === 'adas.stasz1@gmail.com';
   return {
     id: fbUser.uid,
     email: fbUser.email || '',
-    role: isSuper ? 'SUPERADMIN' : (firestoreData?.role || 'USER'),
+    role: firestoreData?.role || 'USER',
     status: firestoreData?.status || 'ACTIVE',
     isAgeVerified18Plus: true,
     createdAt: firestoreData?.createdAt || new Date().toISOString(),

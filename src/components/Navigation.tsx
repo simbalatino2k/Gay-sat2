@@ -19,9 +19,9 @@ export const Navigation: React.FC<NavigationProps> = ({
 }) => {
   return (
     <>
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-white/[0.09] bg-[#070810]/95 backdrop-blur-3xl px-2 py-1.5 shadow-[0_-12px_36px_rgba(0,0,0,0.85)]">
-        <div className="max-w-md mx-auto flex items-center justify-around">
+      {/* Persistent Bottom Navigation Bar - Fixed & Always Visible */}
+      <nav className="fixed bottom-0 inset-x-0 z-50 border-t border-white/[0.12] bg-[#070810]/98 backdrop-blur-3xl px-2 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-[0_-12px_36px_rgba(0,0,0,0.95)]">
+        <div className="max-w-md mx-auto flex items-center justify-around w-full">
           
           {/* Discover Tab */}
           <button
@@ -110,12 +110,12 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             onClick={() => onSelectTab('profile')}
             className={`flex flex-col items-center justify-center min-w-[58px] min-h-[50px] px-2 py-1 rounded-2xl transition-all duration-300 relative active:scale-95 group ${
-              activeTab === 'profile'
+              activeTab === 'profile' || activeTab === 'settings'
                 ? 'text-purple-300 font-bold'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            {activeTab === 'profile' && (
+            {(activeTab === 'profile' || activeTab === 'settings') && (
               <div className="absolute inset-0 rounded-2xl bg-purple-500/[0.12] border border-purple-500/25 pointer-events-none transition-all duration-300 shadow-[0_0_16px_rgba(168,85,247,0.2)_inset]" />
             )}
             {currentUser?.profile?.photos?.[0]?.url ? (
@@ -124,14 +124,14 @@ export const Navigation: React.FC<NavigationProps> = ({
                 alt="Profile"
                 referrerPolicy="no-referrer"
                 className={`w-5 h-5 rounded-full object-cover border transition-all duration-300 ${
-                  activeTab === 'profile' ? 'border-purple-400 ring-2 ring-purple-400/50 scale-110 shadow-[0_0_10px_rgba(168,85,247,0.7)]' : 'border-white/20 group-hover:scale-105'
+                  activeTab === 'profile' || activeTab === 'settings' ? 'border-purple-400 ring-2 ring-purple-400/50 scale-110 shadow-[0_0_10px_rgba(168,85,247,0.7)]' : 'border-white/20 group-hover:scale-105'
                 }`}
               />
             ) : (
-              <User className={`w-5 h-5 transition-transform duration-300 ${activeTab === 'profile' ? 'stroke-[2.5px] scale-110 text-purple-300 drop-shadow-[0_0_12px_rgba(168,85,247,0.7)]' : 'group-hover:scale-105'}`} />
+              <User className={`w-5 h-5 transition-transform duration-300 ${activeTab === 'profile' || activeTab === 'settings' ? 'stroke-[2.5px] scale-110 text-purple-300 drop-shadow-[0_0_12px_rgba(168,85,247,0.7)]' : 'group-hover:scale-105'}`} />
             )}
             <span className="text-[10px] mt-0.5 tracking-tight relative z-10">Profile</span>
-            {activeTab === 'profile' && (
+            {(activeTab === 'profile' || activeTab === 'settings') && (
               <span className="absolute bottom-1 w-2.5 h-0.5 rounded-full bg-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.9)]" />
             )}
           </button>

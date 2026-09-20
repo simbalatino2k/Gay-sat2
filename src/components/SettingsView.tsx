@@ -25,7 +25,8 @@ import {
   MapPin,
   CheckCircle,
   Zap,
-  Crown
+  Crown,
+  ArrowLeft
 } from 'lucide-react';
 import { AdSlot } from './ads';
 import { getAdConsent, saveAdConsent } from '../config/adsConfig';
@@ -358,10 +359,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     <div className="w-full max-w-md mx-auto space-y-4 pb-28 pt-1 px-3">
       {/* Header */}
       <div className="flex items-center justify-between px-1">
-        <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
-          <Shield className="w-4 h-4 text-purple-400" />
-          <span>Settings & Privacy Center</span>
-        </h2>
+        <div className="flex items-center gap-2">
+          {onSelectTab && (
+            <button
+              type="button"
+              onClick={() => onSelectTab('profile')}
+              className="p-1.5 -ml-1 text-slate-400 hover:text-white rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/10 transition active:scale-95 flex items-center justify-center"
+              title="Wróć do Profilu"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+          )}
+          <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
+            <Shield className="w-4 h-4 text-purple-400" />
+            <span>Settings & Privacy Center</span>
+          </h2>
+        </div>
         <span className="text-[10px] font-bold text-fuchsia-400 bg-fuchsia-500/10 px-2.5 py-1 rounded-full border border-fuchsia-500/30 flex items-center gap-1">
           <Sparkles className="w-3 h-3" /> GDPR & DSA Certified
         </span>

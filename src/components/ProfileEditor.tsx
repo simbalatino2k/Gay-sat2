@@ -1,12 +1,14 @@
 import React, { useState, useRef } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
-import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield } from 'lucide-react';
+import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2 } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
+import { ImportAlbumModal } from './ImportAlbumModal';
 
 interface ProfileEditorProps {
   profile: UserProfile;
   authToken: string;
   onProfileUpdated: (updated: UserProfile) => void;
+  onOpenSettings?: () => void;
 }
 
 const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bottom', 'Side', 'Unspecified'];
@@ -16,7 +18,8 @@ const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking',
 export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   profile,
   authToken,
-  onProfileUpdated
+  onProfileUpdated,
+  onOpenSettings
 }) => {
   const [displayName, setDisplayName] = useState(profile.displayName);
   const [age, setAge] = useState(profile.age);
@@ -35,6 +38,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   const [photos, setPhotos] = useState(profile.photos || []);
   const [newPhotoUrl, setNewPhotoUrl] = useState('');
   const [showAlbumPicker, setShowAlbumPicker] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -192,12 +196,50 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     <div className="w-full max-w-md mx-auto space-y-4 pb-24 pt-1 px-3">
       <div className="flex items-center justify-between px-1">
         <h2 className="text-base font-extrabold text-white tracking-wide">Edit Profile</h2>
-        {savedSuccess && (
-          <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 shadow-sm animate-pulse-green">
-            <Check className="w-3.5 h-3.5" /> Saved!
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {savedSuccess && (
+            <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 shadow-sm animate-pulse-green">
+              <Check className="w-3.5 h-3.5" /> Saved!
+            </span>
+          )}
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 hover:text-white border border-purple-500/30 hover:border-purple-500/50 text-xs font-bold transition active:scale-95 shadow-sm"
+              title="Przejdź do Ustawień"
+            >
+              <Settings className="w-3.5 h-3.5 text-purple-400" />
+              <span>Ustawienia</span>
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Quick Settings Access Card */}
+      {onOpenSettings && (
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="w-full p-3.5 rounded-2xl aura-glass-card border border-white/10 hover:border-purple-500/40 bg-[#0d0f1b]/80 hover:bg-[#131627] flex items-center justify-between transition-all group active:scale-[0.99] shadow-lg text-left"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400 group-hover:scale-105 transition-transform">
+              <Settings className="w-4.5 h-4.5" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-white group-hover:text-purple-300 transition-colors flex items-center gap-1.5">
+                <span>Centrum Ustawień i Prywatności</span>
+                <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/30">Konto</span>
+              </div>
+              <div className="text-[11px] text-slate-400">
+                Prywatność, bezpieczeństwo, subskrypcja, RODO/DSA i wylogowanie
+              </div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-purple-300 group-hover:translate-x-0.5 transition-transform" />
+        </button>
+      )}
 
       <form onSubmit={handleSave} className="space-y-3.5">
         
@@ -208,15 +250,25 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               <Camera className="w-4 h-4 text-fuchsia-400" />
               <span>Gallery ({photos.length}/6)</span>
             </label>
-            <button
-              type="button"
-              onClick={() => setShowAlbumPicker(!showAlbumPicker)}
-              className="text-[11px] font-semibold text-fuchsia-300 hover:text-white flex items-center gap-1 bg-fuchsia-950/40 border border-fuchsia-500/30 px-2.5 py-1 rounded-full transition active:scale-95 shadow-sm"
-            >
-              <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
-              <span>AURA Album</span>
-              {showAlbumPicker ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowImportModal(true)}
+                className="text-[11px] font-semibold text-purple-300 hover:text-white flex items-center gap-1 bg-purple-950/40 border border-purple-500/30 px-2.5 py-1 rounded-full transition active:scale-95 shadow-sm"
+              >
+                <Link2 className="w-3.5 h-3.5 text-fuchsia-400" />
+                <span>Importuj z linku</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAlbumPicker(!showAlbumPicker)}
+                className="text-[11px] font-semibold text-fuchsia-300 hover:text-white flex items-center gap-1 bg-fuchsia-950/40 border border-fuchsia-500/30 px-2.5 py-1 rounded-full transition active:scale-95 shadow-sm"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                <span>AURA Album</span>
+                {showAlbumPicker ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+            </div>
           </div>
 
           {/* Google Photos Album Picker Dropdown */}
@@ -559,7 +611,36 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           {saving ? 'Saving Profile...' : 'Save Changes'}
         </button>
 
+        {onOpenSettings && (
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="w-full py-2.5 px-4 rounded-xl border border-white/10 hover:border-purple-500/30 bg-white/[0.03] hover:bg-purple-500/10 text-xs font-semibold text-slate-400 hover:text-purple-300 flex items-center justify-center gap-2 transition active:scale-[0.99]"
+            >
+              <Settings className="w-3.5 h-3.5 text-purple-400" />
+              <span>Przejdź do pełnych ustawień konta</span>
+            </button>
+          </div>
+        )}
+
       </form>
+
+      {/* Album Import Modal (iCloud & Google Photos) */}
+      <ImportAlbumModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        authToken={authToken}
+        currentPhotoCount={photos.length}
+        onPhotosImported={(newPhotos) => {
+          setPhotos(newPhotos);
+          onProfileUpdated({
+            ...profile,
+            photos: newPhotos
+          });
+          setShowImportModal(false);
+        }}
+      />
     </div>
   );
 };

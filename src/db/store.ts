@@ -38,7 +38,65 @@ const INITIAL_CONVERSATIONS: Conversation[] = [];
 const INITIAL_MESSAGES: Record<string, Message[]> = {};
 const INITIAL_MOMENTS: Moment[] = [];
 
+// Google/Firebase public certificate cache for cryptographic JWT signature verification
+let googleCertsCache: Record<string, string> = {};
+let googleCertsExpiry = 0;
+
+async function getGooglePublicCertificate(kid: string): Promise<string | null> {
+  const now = Date.now();
+  if (!googleCertsCache[kid] || now > googleCertsExpiry) {
+    try {
+      const res = await fetch('https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com');
+      if (res.ok) {
+        googleCertsCache = await res.json();
+        const cacheControl = res.headers.get('cache-control');
+        const maxAgeMatch = cacheControl ? cacheControl.match(/max-age=(\d+)/) : null;
+        const maxAgeSec = maxAgeMatch ? parseInt(maxAgeMatch[1], 10) : 3600;
+        googleCertsExpiry = now + maxAgeSec * 1000;
+      }
+    } catch (e: any) {
+      console.error('[JWT Verification] Failed to fetch Google public certs:', e.message || e);
+    }
+  }
+  return googleCertsCache[kid] || null;
+}
+
+function verifyJwtSignature(token: string, pemCert: string): boolean {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const signedData = `${parts[0]}.${parts[1]}`;
+    const verifier = crypto.createVerify('RSA-SHA256');
+    verifier.update(signedData);
+    return verifier.verify(pemCert, Buffer.from(parts[2], 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+export function isCloudRunEnvironment(): boolean {
+  return !!(process.env.K_SERVICE || process.env.K_REVISION || process.env.K_CONFIGURATION);
+}
+
+export function isProductionEnvironment(): boolean {
+  return process.env.NODE_ENV === 'production' || isCloudRunEnvironment();
+}
+
+export function isLocalStorageAllowed(): boolean {
+  // Local storage mode is allowed ONLY in local development and ONLY when explicitly enabled
+  // NEVER allowed on Cloud Run or in production environments
+  if (isCloudRunEnvironment() || process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  return process.env.ALLOW_LOCAL_STORAGE === 'true' || process.env.ALLOW_DEV_LOCAL_STORE === 'true';
+}
+
 export class DataStore {
+  private pgAdapter: PostgresStoreAdapter | null = null;
+  private isDatabaseReady: boolean = false;
+  private databaseError: string | null = null;
+  private initPromise: Promise<boolean> | null = null;
+  private dbFilePath = path.join(process.cwd(), 'data', 'aura_db.json');
 
   public async hydrateFromPostgres(): Promise<void> {
     if (!this.pgAdapter) return;
@@ -99,16 +157,28 @@ export class DataStore {
   private vaultAccess: Map<string, Set<string>> = new Map(); // ownerUserId -> Set of granted userIds
   private vaultRequests: Map<string, Set<string>> = new Map(); // targetUserId -> Set of requester userIds
   private cloudBackupHistory: CloudBackupRecord[] = [];
-  private pgAdapter: PostgresStoreAdapter | null = null;
-  private dbFilePath = path.join(process.cwd(), 'data', 'aura_db.json');
+  public ensureWriteAllowed(): void {
+    if (this.pgAdapter) {
+      return; // PostgreSQL is connected and active
+    }
+
+    if (isProductionEnvironment() || isCloudRunEnvironment()) {
+      throw new Error(
+        '[DataStore FAIL-CLOSED] Database write rejected: Persistent PostgreSQL is mandatory in production and on Cloud Run. Standalone/RAM fallback is strictly disabled to prevent unpersisted state and silent data loss.'
+      );
+    }
+
+    if (!isLocalStorageAllowed()) {
+      throw new Error(
+        '[DataStore FAIL-CLOSED] Database write rejected: PostgreSQL is not connected. Local storage mode is disabled by default. Set ALLOW_LOCAL_STORAGE=true in development to explicitly opt-in.'
+      );
+    }
+  }
 
   private saveToDisk(): void {
-    // In production, local JSON storage is strictly prohibited
-    if (process.env.NODE_ENV === 'production') {
-      return;
-    }
-    // Only save to disk if explicitly permitted in development
-    if (process.env.ALLOW_DEV_LOCAL_STORE !== 'true') {
+    this.ensureWriteAllowed();
+    // In production or on Cloud Run, local JSON storage is strictly prohibited
+    if (isProductionEnvironment() || isCloudRunEnvironment() || !isLocalStorageAllowed()) {
       return;
     }
 
@@ -146,10 +216,7 @@ export class DataStore {
   }
 
   private loadFromDisk(): boolean {
-    if (process.env.NODE_ENV === 'production') {
-      return false;
-    }
-    if (process.env.ALLOW_DEV_LOCAL_STORE !== 'true') {
+    if (isProductionEnvironment() || isCloudRunEnvironment() || !isLocalStorageAllowed()) {
       return false;
     }
 
@@ -182,7 +249,6 @@ export class DataStore {
       return true;
     } catch (err: any) {
       console.error('[DataStore] Critical error loading file store:', err.message);
-      // NEVER overwrite broken database with empty state! Preserve the file:
       try {
         const backupCorrupt = path.join(process.cwd(), 'data', `aura_db.corrupt.${Date.now()}.json`);
         fs.copyFileSync(this.dbFilePath, backupCorrupt);
@@ -194,47 +260,113 @@ export class DataStore {
     }
   }
 
-  constructor() {
-    // Check for PostgreSQL configuration
-    const pool = getPostgresPool();
-    if (pool) {
+  public async initializeDatabase(): Promise<boolean> {
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      const isCloudRun = isCloudRunEnvironment();
+      const isProd = isProductionEnvironment();
+      const allowLocal = isLocalStorageAllowed();
+
+      const pool = getPostgresPool();
+      if (!pool) {
+        if (isProd || isCloudRun) {
+          const errMsg =
+            '[DataStore CRITICAL] Neither DATABASE_URL nor Cloud SQL parameters configured in production/Cloud Run!\n' +
+            'Persistent PostgreSQL instance is strictly required to prevent data loss across container revisions.\n' +
+            'Production fallback to RAM/file storage is disabled.';
+          console.error(errMsg);
+          this.isDatabaseReady = false;
+          this.databaseError = 'DATABASE_URL or Cloud SQL connection is not configured on Cloud Run / production';
+          return false;
+        }
+
+        if (allowLocal) {
+          console.warn('[DataStore] Running with development standalone storage (ALLOW_LOCAL_STORAGE=true).');
+          this.isDatabaseReady = true;
+          this.databaseError = null;
+          return true;
+        }
+
+        const errMsg =
+          '[DataStore ERROR] PostgreSQL not configured in development.\n' +
+          'Set DATABASE_URL or set ALLOW_LOCAL_STORAGE=true to explicitly allow local storage in development.';
+        console.error(errMsg);
+        this.isDatabaseReady = false;
+        this.databaseError = 'PostgreSQL not configured. Set ALLOW_LOCAL_STORAGE=true to enable local development mode.';
+        return false;
+      }
+
       this.pgAdapter = new PostgresStoreAdapter(pool);
-      initPostgresSchema().then((ok) => {
+      try {
+        const ok = await initPostgresSchema();
         if (ok) {
           console.log('[DataStore] PostgreSQL persistence layer connected and schema ready.');
+          await this.hydrateFromPostgres();
+          this.isDatabaseReady = true;
+          this.databaseError = null;
+          return true;
         } else {
-          console.error('[DataStore] PostgreSQL schema initialization failed.');
+          console.error('[DataStore CRITICAL] PostgreSQL schema initialization failed.');
+          this.pgAdapter = null;
+          this.isDatabaseReady = false;
+          this.databaseError = 'PostgreSQL schema initialization failed';
+          return false;
         }
-      }).catch((e) => {
-        console.error('[DataStore] PostgreSQL connection error:', e.message);
-      });
-    } else {
-      if (process.env.NODE_ENV === 'production') {
-        console.error(
-          '[DataStore CRITICAL] Neither DATABASE_URL nor SQL_HOST is configured for PostgreSQL in production!\n' +
-          'Production requires a persistent Cloud SQL PostgreSQL instance to prevent data loss across Cloud Run container lifecycles.'
-        );
+      } catch (e: any) {
+        console.error('[DataStore CRITICAL] PostgreSQL connection error:', e.message || e);
+        this.pgAdapter = null;
+        this.isDatabaseReady = false;
+        this.databaseError = e.message || 'PostgreSQL connection failed';
+        return false;
       }
+    })();
+    return this.initPromise;
+  }
+
+  public async isReady(): Promise<boolean> {
+    if (!this.initPromise) {
+      return await this.initializeDatabase();
     }
+    await this.initPromise;
+    return this.isDatabaseReady;
+  }
+
+  public getDatabaseStatus(): {
+    connected: boolean;
+    provider: 'postgresql' | 'local' | 'none';
+    isCloudRun: boolean;
+    error: string | null;
+  } {
+    return {
+      connected: this.isDatabaseReady,
+      provider: this.pgAdapter ? 'postgresql' : (this.isDatabaseReady && isLocalStorageAllowed() ? 'local' : 'none'),
+      isCloudRun: isCloudRunEnvironment(),
+      error: this.databaseError
+    };
+  }
+
+  constructor() {
+    this.initializeDatabase().catch(() => {});
 
     if (this.loadFromDisk()) {
       console.log('[DataStore] Loaded development local data from disk.');
       this.purgeBotAccounts();
     } else {
-      console.log('[DataStore] Clean database initialized (zero bots).');
-      // Notice: Do NOT call saveToDisk() here to prevent overwriting failed files
+      if (isLocalStorageAllowed()) {
+        console.log('[DataStore] Clean development local database initialized (zero bots).');
+      } else {
+        console.log('[DataStore] Standalone local storage disabled (awaiting PostgreSQL connection).');
+      }
     }
   }
 
   /**
    * Purges all bot, test, synthetic, and non-real accounts, sessions, moments, and messages.
-   * Protects real verified user accounts (such as adas.stasz1@gmail.com) and promotes the primary owner to SUPERADMIN.
    */
   public async purgeBotAccounts(): Promise<{ purgedUsersCount: number; purgedMomentsCount: number }> {
     const isBotUser = (userId: string, email?: string): boolean => {
       if (userId === 'YfFbq4qTCjZYMPZUZEZPzrkOM2k2') return false;
       const lowerEmail = (email || '').toLowerCase().trim();
-      if (lowerEmail === 'adas.stasz1@gmail.com') return false;
 
       // Known seeded bot IDs
       if (
@@ -270,9 +402,6 @@ export class DataStore {
     for (const [id, user] of this.users.entries()) {
       if (isBotUser(id, user.email)) {
         botUserIds.add(id);
-      } else if (user.email?.toLowerCase().trim() === 'adas.stasz1@gmail.com') {
-        user.role = 'SUPERADMIN';
-        user.status = 'ACTIVE';
       }
     }
 
@@ -443,55 +572,80 @@ export class DataStore {
 
   public async loginUser(email: string, password?: string): Promise<{ token: string; user: UserAccount } | null> {
     const cleanEmail = email.toLowerCase().trim();
-    let user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
-    if (!user && this.pgAdapter) {
-      user = (await this.pgAdapter.getUserByEmail(cleanEmail)) || undefined;
-      if (user) {
+    let user: UserAccount | null | undefined = undefined;
+    let stored: string | null | undefined = undefined;
+
+    // Przy logowaniu odczytuj aktualny status konta i hash hasła z PostgreSQL
+    if (this.pgAdapter) {
+      try {
+        const dbUser = await this.pgAdapter.getUserByEmail(cleanEmail);
+        if (!dbUser) return null;
+        user = dbUser;
         this.users.set(user.id, user);
+
+        stored = await this.pgAdapter.getPasswordHash(user.id);
+        if (stored) {
+          this.userPasswords.set(user.id, stored);
+        }
+      } catch (dbErr: any) {
+        console.error('[PostgreSQL] Database error during loginUser:', dbErr.message || dbErr);
+        const err: any = new Error('Database service unavailable');
+        err.status = 503;
+        throw err;
       }
+    } else {
+      user = Array.from(this.users.values()).find(u => u.email === cleanEmail);
+      if (!user) return null;
+      stored = this.userPasswords.get(user.id);
     }
-    if (!user) return null;
 
     if (user.status !== 'ACTIVE') {
       throw new Error(`Account is ${user.status.toLowerCase()}`);
     }
 
-    let stored = this.userPasswords.get(user.id);
-    if (!stored && this.pgAdapter) {
-      const dbHash = await this.pgAdapter.getPasswordHash(user.id);
-      if (dbHash) {
-        stored = dbHash;
-        this.userPasswords.set(user.id, dbHash);
-      }
+    // Usuń możliwość ustawiania hasła podczas logowania do konta bez hasła
+    if (!stored) {
+      throw new Error('This account has no password configured. Please use your linked OAuth identity or password recovery.');
     }
 
-    if (stored) {
-      if (!password) {
-        throw new Error('Password is required for this account.');
-      }
-      const [salt, hash] = stored.split(':');
-      if (salt && hash) {
-        const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
-        if (testHash !== hash) {
-          throw new Error('Invalid email or password');
-        }
-      }
-    } else {
-      if (!password) {
-        throw new Error('This account was created with Google or has no password set. Please provide a password to initialize your account credentials.');
-      }
-      const salt = crypto.randomBytes(16).toString('hex');
-      const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-      const newHash = `${salt}:${hash}`;
-      this.userPasswords.set(user.id, newHash);
-      if (this.pgAdapter) {
-        await this.pgAdapter.saveUserPassword(user.id, newHash);
-      }
+    if (!password) {
+      throw new Error('Password is required for this account.');
     }
 
+    // Odrzucaj uszkodzone hashe; porównuj poprawne hashe przez crypto.timingSafeEqual
+    const parts = stored.split(':');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw new Error('Corrupted password credentials format. Please reset your password.');
+    }
+    const [salt, hashHex] = parts;
+    if (!/^[0-9a-fA-F]+$/.test(salt) || !/^[0-9a-fA-F]+$/.test(hashHex)) {
+      throw new Error('Corrupted password credentials encoding. Please reset your password.');
+    }
+
+    const expectedHashBuf = Buffer.from(hashHex, 'hex');
+    const computedHashBuf = crypto.scryptSync(password, salt, 64);
+    if (computedHashBuf.length !== expectedHashBuf.length || !crypto.timingSafeEqual(computedHashBuf, expectedHashBuf)) {
+      throw new Error('Invalid email or password');
+    }
+
+    // Zapisz sesję przed zwróceniem sukcesu. Logowanie nie może nadpisywać profilu ani statusu użytkownika.
     const token = `aura_sess_${user.id}_${crypto.randomBytes(24).toString('hex')}`;
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const expiresDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const expiresAt = expiresDate.toISOString();
+
+    // Po odrzuceniu sesji przez PostgreSQL nie korzystaj z zapasowej sesji w RAM.
+    if (this.pgAdapter) {
+      try {
+        await this.pgAdapter.saveSession(token, user.id, expiresDate);
+      } catch (dbErr: any) {
+        console.error('[PostgreSQL] Database error creating session:', dbErr.message || dbErr);
+        const err: any = new Error('Database service unavailable');
+        err.status = 503;
+        throw err;
+      }
+    }
+
     const sessionRecord: SessionRecord = {
       token,
       userId: user.id,
@@ -502,10 +656,6 @@ export class DataStore {
     this.sessions.set(token, sessionRecord);
     this.tokens.set(token, user.id);
     this.saveToDisk();
-
-    if (this.pgAdapter) {
-      await this.pgAdapter.saveUserAndSession(user, token, new Date(expiresAt));
-    }
 
     return { token, user };
   }
@@ -551,137 +701,155 @@ export class DataStore {
         this.users.set(dbUser.id, dbUser);
         return dbUser;
       }
-      if (cleanToken.startsWith('aura_sess_')) {
-        // If it's an aura_sess_ token and not in PostgreSQL, it was revoked or expired
+      // Po odrzuceniu sesji przez PostgreSQL nie korzystaj z zapasowej sesji w RAM!
+      if (!cleanToken.includes('.')) {
         return null;
       }
     }
 
-    // 1. Modern session lookup with expiration check
-    const session = this.sessions.get(cleanToken);
-    if (session) {
-      if (new Date(session.expiresAt).getTime() < Date.now()) {
-        // Expired
-        this.sessions.delete(cleanToken);
-        this.tokens.delete(cleanToken);
-        this.saveToDisk();
+    // 1. In-memory session lookup (strictly when PostgreSQL is not configured)
+    if (!this.pgAdapter) {
+      const session = this.sessions.get(cleanToken);
+      if (session) {
+        if (new Date(session.expiresAt).getTime() < Date.now()) {
+          this.sessions.delete(cleanToken);
+          this.tokens.delete(cleanToken);
+          this.saveToDisk();
+          return null;
+        }
+        session.lastUsedAt = new Date().toISOString();
+        const user = this.users.get(session.userId);
+        if (user && user.status === 'ACTIVE') {
+          return user;
+        }
         return null;
       }
-      session.lastUsedAt = new Date().toISOString();
-      const user = this.users.get(session.userId);
-      if (user && user.status === 'ACTIVE') {
-        return user;
+
+      const userId = this.tokens.get(cleanToken);
+      if (userId) {
+        const user = this.users.get(userId);
+        if (user && user.status === 'ACTIVE') {
+          return user;
+        }
+        return null;
       }
-      return null;
     }
 
-    // 2. Legacy fallback session map
-    const userId = this.tokens.get(cleanToken);
-    if (userId) {
-      const user = this.users.get(userId);
-      if (user && user.status === 'ACTIVE') {
-        const now = new Date();
-        this.sessions.set(cleanToken, {
-          token: cleanToken,
-          userId,
-          createdAt: now.toISOString(),
-          expiresAt: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-          lastUsedAt: now.toISOString()
-        });
-        return user;
-      }
-      return null;
-    }
-
-    // 3. Fallback for legacy tokens: explicitly reject fake demo tokens
+    // 2. Reject fake demo tokens
     if (cleanToken === 'demo-token' || cleanToken === 'aura-demo-token' || cleanToken === 'aura_auth_token') {
       return null;
     }
 
-    // 4. Secure decode Firebase JWT token if passed
+    // 3. Cryptographically verify Firebase / Google JWT token
+    // Nie akceptuj JWT przez samo dekodowanie. Wymagana jest weryfikacja podpisu, issuer, audience i expiry.
+    // Nie przyznawaj administratora na podstawie adresu e-mail.
     if (cleanToken.includes('.')) {
       try {
         const parts = cleanToken.split('.');
-        if (parts.length === 3) {
-          const headerStr = Buffer.from(parts[0], 'base64').toString('utf-8');
-          const header = JSON.parse(headerStr);
-          // Only standard RS256 Firebase tokens are valid
-          if (header.alg !== 'RS256') {
-            return null;
-          }
+        if (parts.length !== 3) return null;
 
-          const payloadStr = Buffer.from(parts[1], 'base64').toString('utf-8');
-          const payload = JSON.parse(payloadStr);
-
-          // Verify standard claims against Firebase project
-          const validProjectIds = [
-            'ai-studio-aura-0580ece6-7701-4148-bdcf-9accc85a9917',
-            'aura-dating-gay-mab'
-          ];
-          const validIssuers = validProjectIds.map(id => `https://securetoken.google.com/${id}`);
-          if (!validProjectIds.includes(payload.aud) || !validIssuers.includes(payload.iss)) {
-            return null;
-          }
-
-          // Check expiration
-          const nowSec = Math.floor(Date.now() / 1000);
-          if (!payload.exp || payload.exp < nowSec) {
-            return null;
-          }
-
-          const fbUid = payload.user_id || payload.sub;
-          if (fbUid && typeof fbUid === 'string' && fbUid.length > 3) {
-            let user = this.users.get(fbUid);
-            if (!user) {
-              const email = payload.email || `${fbUid}@user.auragay.com`;
-              const isSuperAdmin = email.toLowerCase().trim() === 'adas.stasz1@gmail.com';
-              user = {
-                id: fbUid,
-                email,
-                role: isSuperAdmin ? 'SUPERADMIN' : 'USER',
-                status: 'ACTIVE',
-                isAgeVerified18Plus: true,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                profile: {
-                  id: `prof-${fbUid}`,
-                  userId: fbUid,
-                  displayName: (payload.name || email.split('@')[0] || 'AURA Member').replace(/<[^>]*>?/gm, ''),
-                  age: 26,
-                  identityRole: 'Versatile',
-                  location: 'Global Member',
-                  distanceKm: 1.2,
-                  locationPrivacy: 'APPROXIMATE',
-                  approximateArea: 'Within ~1 km',
-                  bio: 'Connecting on AURA 18+.',
-                  lookingFor: ['Dating', 'Friends'],
-                  tribes: ['Clean Cut'],
-                  interests: ['Design', 'Music', 'Fitness'],
-                  photos: [
-                    { id: `ph-${fbUid}-1`, url: payload.picture || AURA_ALBUM_PHOTOS[0], isPrimary: true }
-                  ],
-                  verified: true,
-                  isOnline: true,
-                  lastActiveMinutesAgo: 0
-                }
-              };
-              this.users.set(fbUid, user);
-              this.saveToDisk();
-            }
-            const now = new Date();
-            this.sessions.set(cleanToken, {
-              token: cleanToken,
-              userId: fbUid,
-              createdAt: now.toISOString(),
-              expiresAt: new Date(payload.exp * 1000).toISOString(),
-              lastUsedAt: now.toISOString()
-            });
-            this.tokens.set(cleanToken, fbUid);
-            return user;
-          }
+        const headerStr = Buffer.from(parts[0], 'base64url').toString('utf-8');
+        const header = JSON.parse(headerStr);
+        if (header.alg !== 'RS256' || !header.kid) {
+          return null;
         }
-      } catch (err) {
-        // Not a valid JWT or parse error, reject
+
+        const pemCert = await getGooglePublicCertificate(header.kid);
+        if (!pemCert) {
+          return null;
+        }
+
+        const isSignatureValid = verifyJwtSignature(cleanToken, pemCert);
+        if (!isSignatureValid) {
+          console.warn('[JWT Verification] RSA-SHA256 signature verification failed for token');
+          return null;
+        }
+
+        const payloadStr = Buffer.from(parts[1], 'base64url').toString('utf-8');
+        const payload = JSON.parse(payloadStr);
+
+        // Verify standard claims against Firebase project
+        const validProjectIds = [
+          'ai-studio-aura-0580ece6-7701-4148-bdcf-9accc85a9917',
+          'aura-dating-gay-mab'
+        ];
+        const validIssuers = validProjectIds.map(id => `https://securetoken.google.com/${id}`);
+        if (!validProjectIds.includes(payload.aud) || !validIssuers.includes(payload.iss)) {
+          return null;
+        }
+
+        // Check expiration
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (!payload.exp || payload.exp < nowSec) {
+          return null;
+        }
+
+        const fbUid = payload.user_id || payload.sub;
+        if (fbUid && typeof fbUid === 'string' && fbUid.length > 3) {
+          let user: UserAccount | null | undefined = undefined;
+          if (this.pgAdapter) {
+            user = await this.pgAdapter.getUserById(fbUid);
+          } else {
+            user = this.users.get(fbUid);
+          }
+
+          if (!user) {
+            const email = payload.email || `${fbUid}@user.auragay.com`;
+            // Do NOT grant admin based on email address! Role is strictly USER.
+            user = {
+              id: fbUid,
+              email,
+              role: 'USER',
+              status: 'ACTIVE',
+              isAgeVerified18Plus: true,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              profile: {
+                id: `prof-${fbUid}`,
+                userId: fbUid,
+                displayName: (payload.name || email.split('@')[0] || 'AURA Member').replace(/<[^>]*>?/gm, ''),
+                age: 26,
+                identityRole: 'Versatile',
+                location: 'Global Member',
+                distanceKm: 1.2,
+                locationPrivacy: 'APPROXIMATE',
+                approximateArea: 'Within ~1 km',
+                bio: 'Connecting on AURA 18+.',
+                lookingFor: ['Dating', 'Friends'],
+                tribes: ['Clean Cut'],
+                interests: ['Design', 'Music', 'Fitness'],
+                photos: [
+                  { id: `ph-${fbUid}-1`, url: payload.picture || AURA_ALBUM_PHOTOS[0], isPrimary: true }
+                ],
+                verified: true,
+                isOnline: true,
+                lastActiveMinutesAgo: 0
+              }
+            };
+
+            if (this.pgAdapter) {
+              await this.pgAdapter.saveUserAndSession(user, cleanToken, new Date(payload.exp * 1000));
+            }
+            this.users.set(fbUid, user);
+            this.saveToDisk();
+          }
+
+          if (this.pgAdapter) {
+            await this.pgAdapter.saveSession(cleanToken, fbUid, new Date(payload.exp * 1000));
+          }
+
+          this.sessions.set(cleanToken, {
+            token: cleanToken,
+            userId: fbUid,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(payload.exp * 1000).toISOString(),
+            lastUsedAt: new Date().toISOString()
+          });
+          this.tokens.set(cleanToken, fbUid);
+          return user;
+        }
+      } catch (err: any) {
+        console.error('[JWT Verification] Error during token verification:', err.message || err);
         return null;
       }
     }
@@ -1993,18 +2161,25 @@ export class DataStore {
       const otherUser = this.users.get(userBId);
       if (!otherUser) throw new Error('Recipient user not found');
 
-      conv = {
-        id: `conv-${Date.now()}`,
+      const newConv: Conversation = {
+        id: crypto.randomUUID(),
         participantIds: [userAId, userBId],
         unreadCount: 0,
-        otherParticipant: this.sanitizeProfilePrivacy(otherUser.profile, userAId)
+        otherParticipant: this.sanitizeProfilePrivacy(otherUser.profile, userAId),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
       };
-      this.conversations.set(conv.id, conv);
-      this.messages.set(conv.id, []);
+
+      if (this.pgAdapter) {
+        await this.pgAdapter.saveConversation(newConv);
+      }
+
+      this.conversations.set(newConv.id, newConv);
+      this.messages.set(newConv.id, []);
       this.saveToDisk();
+      return newConv;
     }
 
-    if (this.pgAdapter && typeof (this.pgAdapter as any).saveConversation === "function") { await (this.pgAdapter as any).saveConversation({ id: conv.id, participants: conv.participantIds, isMatch: false, createdAt: new Date().toISOString() }); }
     return conv;
   }
 
@@ -2334,19 +2509,23 @@ export class DataStore {
       createdAt: new Date().toISOString()
     };
 
+    const updatedConv: Conversation = {
+      ...conv,
+      lastMessage: newMessage,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveMessage(newMessage);
+      await this.pgAdapter.saveConversation(updatedConv);
+    }
+
     const msgs = this.messages.get(conversationId) || [];
     msgs.push(newMessage);
     this.messages.set(conversationId, msgs);
 
-    conv.lastMessage = newMessage;
-    this.conversations.set(conversationId, conv);
-
+    this.conversations.set(conversationId, updatedConv);
     this.saveToDisk();
-
-    if (this.pgAdapter) {
-      await this.pgAdapter.saveMessage(newMessage);
-      await this.pgAdapter.saveConversation(conv);
-    }
 
     return newMessage;
   }

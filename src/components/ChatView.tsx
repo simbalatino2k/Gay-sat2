@@ -3,13 +3,14 @@ import { Conversation, Message, UserProfile, TapType } from '../types';
 import {
   Send, Image as ImageIcon, ArrowLeft, Check, CheckCheck, Sparkles, User, ShieldCheck,
   RefreshCw, ChevronDown, ChevronUp, Plus, Clock, Timer, Pin, Shield, ShieldOff,
-  Lock, Unlock, Zap, Flame, Hand, Bookmark, AlertCircle, HardDrive, CloudOff
+  Lock, Unlock, Zap, Flame, Hand, Bookmark, AlertCircle, HardDrive, CloudOff, Video
 } from 'lucide-react';
 import { formatDistance } from '../utils/formatDistance';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { AuraChatOrbGraphic } from './AuraGraphics';
 import { ChatMediaMenu, PhotoMessage, LinkMessage, LocationMessage, StickerMessage, VoiceMessage, StarVideoMessage, MediaPreview, StickerPicker } from './ChatMediaComponents';
 import { ChatSettings } from './ChatSettings';
+import { VideoCallModal } from './VideoCallModal';
 
 interface ChatViewProps {
   authToken: string;
@@ -64,6 +65,44 @@ export const ChatView: React.FC<ChatViewProps> = ({
     iRequestedTheirs: false,
     theyRequestedMine: false
   });
+
+  // 1:1 Video Calling State
+  const [videoCallActive, setVideoCallActive] = useState(false);
+  const [incomingCallData, setIncomingCallData] = useState<any>(null);
+  const incomingWsRef = useRef<WebSocket | null>(null);
+
+  // Global incoming call listener
+  useEffect(() => {
+    if (!authToken || videoCallActive) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/webrtc`;
+    let ws: WebSocket;
+
+    try {
+      ws = new WebSocket(wsUrl);
+      incomingWsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'AUTH', token: authToken }));
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data.type === 'CALL_REQUEST') {
+            setIncomingCallData(data);
+            setVideoCallActive(true);
+          }
+        } catch {}
+      };
+    } catch {}
+
+    return () => {
+      if (incomingWsRef.current && incomingWsRef.current.readyState === WebSocket.OPEN) {
+        incomingWsRef.current.close();
+      }
+    };
+  }, [authToken, videoCallActive]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
@@ -763,6 +802,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5">
+              {/* 1:1 Video Call Button */}
+              <button
+                type="button"
+                onClick={() => setVideoCallActive(true)}
+                className="p-2 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 hover:text-white border border-purple-500/30 hover:border-purple-500/50 transition active:scale-95 shadow-sm"
+                title="Rozpocznij wideorozmowę 1:1"
+              >
+                <Video className="w-4 h-4 text-fuchsia-400" />
+              </button>
+
               {/* Privacy, Expiration & Vault Settings Button */}
               <button
                 onClick={() => {
@@ -1282,6 +1331,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
         </div>
+      )}
+
+      {/* 1:1 Video Call Modal */}
+      {videoCallActive && (activeConv?.otherParticipant || incomingCallData) && (
+        <VideoCallModal
+          isOpen={videoCallActive}
+          isIncoming={!!incomingCallData}
+          currentUserId={currentUserId}
+          targetUser={{
+            id: incomingCallData?.senderId || activeConv?.otherParticipant?.id || '',
+            displayName: incomingCallData?.senderName || activeConv?.otherParticipant?.displayName || 'Użytkownik AURA',
+            photoUrl: activeConv?.otherParticipant?.photos[0]?.url,
+            role: activeConv?.otherParticipant?.identityRole
+          }}
+          authToken={authToken}
+          incomingSignalData={incomingCallData}
+          onClose={() => {
+            setVideoCallActive(false);
+            setIncomingCallData(null);
+          }}
+        />
       )}
     </div>
   );

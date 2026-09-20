@@ -40,17 +40,39 @@ export function getPostgresPool(): Pool | null {
 
   let poolConfig: PoolConfig | null = null;
 
+  // 1. Unix Domain Socket (/cloudsql/...)
+  const isUnixSocket = !!((sqlHost && sqlHost.startsWith('/')) || (databaseUrl && (databaseUrl.includes('/cloudsql') || databaseUrl.includes('host=%2Fcloudsql'))));
+  
+  // 2. Local Cloud SQL Auth Proxy (127.0.0.1 or localhost)
+  const isLocalProxy = !!((sqlHost && (sqlHost === 'localhost' || sqlHost === '127.0.0.1')) ||
+                         (databaseUrl && (databaseUrl.includes('@localhost') || databaseUrl.includes('@127.0.0.1'))));
+
   if (databaseUrl) {
+    // Enforce verified TLS for remote PostgreSQL connections without rejectUnauthorized: false.
+    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
+    if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
+      sslConfig = {
+        rejectUnauthorized: true,
+        ...(process.env.CA_CERT ? { ca: process.env.CA_CERT } : {})
+      };
+    }
+
     poolConfig = {
       connectionString: databaseUrl,
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
-      ssl: process.env.NODE_ENV === 'production' && !databaseUrl.includes('localhost') && !databaseUrl.includes('/cloudsql')
-        ? { rejectUnauthorized: false }
-        : false
+      ssl: sslConfig
     };
   } else if (sqlHost && sqlUser && sqlDbName) {
+    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
+    if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
+      sslConfig = {
+        rejectUnauthorized: true,
+        ...(process.env.CA_CERT ? { ca: process.env.CA_CERT } : {})
+      };
+    }
+
     poolConfig = {
       host: sqlHost,
       user: sqlUser,
@@ -59,7 +81,8 @@ export function getPostgresPool(): Pool | null {
       port: sqlHost.startsWith('/') ? undefined : sqlPort,
       max: 10,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000
+      connectionTimeoutMillis: 10000,
+      ssl: sslConfig
     };
   }
 
@@ -354,7 +377,7 @@ export async function initPostgresSchema(): Promise<boolean> {
     console.log('[PostgreSQL] Database schema initialized successfully.');
     return true;
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[PostgreSQL] Schema initialization error:', err.message);
     return false;
   } finally {
@@ -575,9 +598,14 @@ export class PostgresStoreAdapter {
   public async createSession(token: string, userId: string, expiresAt: Date): Promise<void> {
     await this.pool.query(
       `INSERT INTO sessions (token, user_id, expires_at, created_at, last_used_at)
-       VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT (token) DO UPDATE SET expires_at = EXCLUDED.expires_at, last_used_at = CURRENT_TIMESTAMP`,
       [token, userId, expiresAt]
     );
+  }
+
+  public async saveSession(token: string, userId: string, expiresAt: Date): Promise<void> {
+    return this.createSession(token, userId, expiresAt);
   }
 
   public async deleteSession(token: string): Promise<void> {

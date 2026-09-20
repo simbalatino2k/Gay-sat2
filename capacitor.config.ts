@@ -3,7 +3,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 const config: CapacitorConfig = {
   appId: 'app.aura.gay18',
   appName: 'AURA GAY 18+',
-  webDir: 'dist',
+  webDir: 'dist/web',
   server: {
     androidScheme: 'https',
     cleartext: false

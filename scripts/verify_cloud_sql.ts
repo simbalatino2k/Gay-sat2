@@ -35,7 +35,7 @@ function getTestPool(): Pool | null {
       max: 5,
       connectionTimeoutMillis: 5000,
       ssl: process.env.NODE_ENV === 'production' && !databaseUrl.includes('localhost') && !databaseUrl.includes('/cloudsql')
-        ? { rejectUnauthorized: false }
+        ? { rejectUnauthorized: true, ...(process.env.CA_CERT ? { ca: process.env.CA_CERT } : {}) }
         : false
     };
   } else if (sqlHost && sqlUser && sqlDbName) {

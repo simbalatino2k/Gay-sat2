@@ -298,7 +298,7 @@ export default function App() {
         </aside>
 
         {/* Central App Card Frame */}
-        <div className="lg:col-span-6 xl:col-span-6 min-h-screen lg:min-h-0 flex flex-col w-full sm:max-w-2xl md:max-w-4xl mx-auto lg:max-w-none relative shadow-2xl overflow-hidden border-x lg:border border-white/10 lg:rounded-[32px] bg-[#0b0d14]/90 backdrop-blur-xl">
+        <div className="lg:col-span-6 xl:col-span-6 min-h-screen lg:min-h-0 flex flex-col w-full sm:max-w-2xl md:max-w-4xl mx-auto lg:max-w-none relative shadow-2xl border-x lg:border border-white/10 lg:rounded-[32px] bg-[#0b0d14]">
           
           {/* App Header */}
           <header className="sticky top-0 z-30 bg-[#07080d]/90 backdrop-blur-md border-b border-white/10 px-4 py-3 flex items-center justify-between">
@@ -402,6 +402,7 @@ export default function App() {
                 profile={currentUser.profile}
                 authToken={token}
                 onProfileUpdated={handleUpdateProfile}
+                onOpenSettings={() => setActiveTab('settings')}
               />
             )}
 
