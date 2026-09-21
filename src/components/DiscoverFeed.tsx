@@ -41,6 +41,7 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
 }) => {
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<UserProfile | null>(null);
   const [internalShowFilter, setInternalShowFilter] = useState(false);
   const [showAdConsentModal, setShowAdConsentModal] = useState(false);
@@ -138,6 +139,7 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
 
   const fetchProfiles = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const headers: Record<string, string> = {};
       if (authToken) {
@@ -154,8 +156,11 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
       const data = await res.json();
       if (data && Array.isArray(data.profiles)) {
         setProfiles(data.profiles);
+      } else {
+        throw new Error('Missing profiles in server response');
       }
     } catch (err) {
+      setLoadError(true);
       console.warn('Fetch profiles notice:', err);
     } finally {
       setLoading(false);
@@ -164,6 +169,9 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
 
   useEffect(() => {
     fetchProfiles();
+    const refresh = () => { void fetchProfiles(); };
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
   }, [authToken]);
 
   // Client-side filtering helper
@@ -292,6 +300,13 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
       {/* Feed Content: Swipe Card Deck OR Swipable Grid */}
       {loading ? (
         <Shimmer />
+      ) : loadError ? (
+        <div role="alert" className="p-8 text-center space-y-3">
+          <p>Nie udało się pobrać profili. Sprawdź połączenie i spróbuj ponownie.</p>
+          <button onClick={() => void fetchProfiles()} className="rounded-xl bg-purple-600 px-5 py-3">
+            Spróbuj ponownie
+          </button>
+        </div>
       ) : filteredProfiles.length === 0 ? (
         <div className="rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-8 text-center space-y-3 my-8 shadow-xl max-w-md mx-auto">
           <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600/20 to-fuchsia-600/20 border border-fuchsia-500/30 flex items-center justify-center mx-auto">

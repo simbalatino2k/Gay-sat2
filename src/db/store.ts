@@ -1179,7 +1179,7 @@ export class DataStore {
 
   // --- Profile Methods ---
   public async updateProfile(userId: string, updates: Partial<UserProfile>): Promise<UserProfile> {
-    const user = this.users.get(userId);
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
     if (user.status !== 'ACTIVE') throw new Error(`User account is ${user.status.toLowerCase()}`);
 
@@ -1204,6 +1204,17 @@ export class DataStore {
     ];
 
     const safeProfileUpdates: Partial<UserProfile> = {};
+    if (updates.lat !== undefined || updates.lng !== undefined) {
+      if (typeof updates.lat !== 'number' || !Number.isFinite(updates.lat) || Math.abs(updates.lat) > 90 ||
+          typeof updates.lng !== 'number' || !Number.isFinite(updates.lng) || Math.abs(updates.lng) > 180) {
+        throw new Error('Valid latitude and longitude must be provided together');
+      }
+      safeProfileUpdates.lat = updates.lat;
+      safeProfileUpdates.lng = updates.lng;
+    }
+    if (updates.locationPrivacy !== undefined && !['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(updates.locationPrivacy)) {
+      throw new Error('Invalid location privacy');
+    }
     for (const key of allowedKeys) {
       if (updates[key] !== undefined) {
         if (typeof updates[key] === 'string') {
@@ -1857,10 +1868,14 @@ export class DataStore {
       if (b.blockedUserId === currentUserId) blockedUserIds.add(b.blockerUserId);
     });
 
-    let eligible = Array.from(this.users.values())
+    // Each instance must see newly registered users and current blocks immediately.
+    const candidates = this.pgAdapter
+      ? await this.pgAdapter.getDiscoverUsers(currentUserId)
+      : Array.from(this.users.values());
+    let eligible = candidates
       .filter(u => u.id !== currentUserId)
       .filter(u => u.status === 'ACTIVE')
-      .filter(u => !blockedUserIds.has(u.id))
+      .filter(u => this.pgAdapter || !blockedUserIds.has(u.id))
       .map(u => u.profile);
 
     const filtered = filters

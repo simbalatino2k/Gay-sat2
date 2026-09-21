@@ -64,7 +64,7 @@ export const MapView: React.FC<MapViewProps> = ({
   const [isUpdatingPrivacy, setIsUpdatingPrivacy] = useState(false);
   const [notice, setNotice] = useState<{ message: string; type: 'info' | 'success' | 'warning' } | null>(null);
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(() => {
-    if (currentUser?.profile?.lat && currentUser?.profile?.lng) {
+    if (typeof currentUser?.profile?.lat === 'number' && typeof currentUser?.profile?.lng === 'number') {
       return { lat: currentUser.profile.lat, lng: currentUser.profile.lng };
     }
     return null;
@@ -312,10 +312,8 @@ export const MapView: React.FC<MapViewProps> = ({
     // Filter profiles that have valid coordinates (server already strips coordinates if HIDDEN or fuzzes if APPROXIMATE)
     const mappableProfiles = profiles.filter(
       p =>
-        p.lat !== undefined &&
-        p.lng !== undefined &&
-        !isNaN(p.lat) &&
-        !isNaN(p.lng) &&
+        typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90 &&
+        typeof p.lng === 'number' && Number.isFinite(p.lng) && Math.abs(p.lng) <= 180 &&
         p.locationPrivacy !== 'HIDDEN' &&
         p.id !== currentUser?.id &&
         p.userId !== currentUser?.id
@@ -410,10 +408,14 @@ export const MapView: React.FC<MapViewProps> = ({
             });
             if (res.ok) {
               const data = await res.json();
-              if (data.user) onUpdateUser(data.user);
+              if (data.profile && currentUser) onUpdateUser({ ...currentUser, profile: data.profile });
+            } else {
+              throw new Error('Location update failed');
             }
           } catch (err) {
             console.warn('Błąd aktualizacji lokalizacji na serwerze:', err);
+            showNotice('GPS działa, ale nie udało się zapisać lokalizacji. Spróbuj ponownie.', 'warning');
+            return;
           }
         }
 
@@ -447,10 +449,12 @@ export const MapView: React.FC<MapViewProps> = ({
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.user) {
-          onUpdateUser(data.user);
+        if (data.profile && currentUser) {
+          onUpdateUser({ ...currentUser, profile: data.profile });
         }
         showNotice(`Zmieniono tryb prywatności na: ${mode}`, 'success');
+      } else {
+        throw new Error('Profile update failed');
       }
     } catch (e) {
       console.error('Błąd aktualizacji prywatności:', e);

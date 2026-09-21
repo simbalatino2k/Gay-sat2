@@ -392,6 +392,28 @@ export class PostgresStoreAdapter {
     this.pool = pool;
   }
 
+  public async getDiscoverUsers(viewerId: string): Promise<UserAccount[]> {
+    const result = await this.pool.query(
+      `SELECT u.* FROM users u
+       WHERE u.id <> $1 AND u.status = 'ACTIVE'
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks b
+           WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = u.id)
+              OR (b.blocked_user_id = $1 AND b.blocker_user_id = u.id)
+         )`,
+      [viewerId]
+    );
+    return result.rows.map(row => this.mapUserRow(row));
+  }
+
+  private serializeLocation(profile: UserProfile): string {
+    return JSON.stringify({
+      city: profile.location || '',
+      lat: profile.lat,
+      lng: profile.lng
+    });
+  }
+
   public async getUserById(userId: string): Promise<UserAccount | null> {
     const res = await this.pool.query('SELECT * FROM users WHERE id = $1', [userId]);
     if (res.rows.length === 0) return null;
@@ -467,12 +489,12 @@ export class PostgresStoreAdapter {
           p.lookingFor ? JSON.stringify(p.lookingFor) : null,
           (p as any).vibe || null,
           p.interests ? JSON.stringify(p.interests) : null,
-          p.location || null,
+          this.serializeLocation(p),
           p.photos ? JSON.stringify(p.photos) : null,
           p.verified || false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || 'none',
-          JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          JSON.stringify({ ...(p as any).privacy, locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
           p.userMode || 'ONLINE',
           user.createdAt
         ]
@@ -548,16 +570,16 @@ export class PostgresStoreAdapter {
           user.status,
           p.bio || null,
           p.identityRole || (p as any).sexualRole || 'Versatile',
-          (p.tribes && p.tribes.length > 0 ? p.tribes[0] : (p as any).tribe) || 'Queer',
-          (Array.isArray(p.lookingFor) ? p.lookingFor.join(',') : (p as any).lookingFor) || 'Dating',
+          JSON.stringify(p.tribes || []),
+          JSON.stringify(p.lookingFor || []),
           (p as any).vibe || null,
           JSON.stringify(p.interests || []),
-          JSON.stringify(typeof p.location === 'object' ? p.location : { city: p.location || 'Warsaw' }),
+          this.serializeLocation(p),
           JSON.stringify(p.photos || []),
           p.verified ?? (p as any).isVerified ?? false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || null,
-          JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          JSON.stringify({ ...(p as any).privacy, locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
           p.userMode || 'ONLINE',
           user.createdAt || new Date().toISOString()
         ]
@@ -884,10 +906,19 @@ export class PostgresStoreAdapter {
   }
 
   private mapUserRow(row: any): UserAccount {
-    const lookingForArr = row.looking_for
-      ? (typeof row.looking_for === 'string' ? row.looking_for.split(',') : row.looking_for)
-      : ['Dating', 'Friends'];
-    const tribesArr = row.tribe ? [row.tribe] : ['Queer'];
+    const parseList = (value: any, fallback: string[]) => {
+      if (Array.isArray(value)) return value;
+      if (!value) return fallback;
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* Older records use comma-separated text. */ }
+      return String(value).split(',').map(item => item.trim()).filter(Boolean);
+    };
+    const lookingForArr = parseList(row.looking_for, ['Dating', 'Friends']);
+    const tribesArr = parseList(row.tribe, ['Queer']);
+    const location = row.location && typeof row.location === 'object' ? row.location : {};
+    const privacy = row.privacy && typeof row.privacy === 'object' ? row.privacy : {};
 
     return {
       id: row.id,
@@ -908,7 +939,10 @@ export class PostgresStoreAdapter {
         tribes: tribesArr,
         lookingFor: lookingForArr,
         interests: typeof row.interests === 'string' ? JSON.parse(row.interests) : row.interests || [],
-        location: typeof row.location === 'object' ? (row.location.city || 'Warsaw') : (row.location || 'Warsaw'),
+        location: location.city || (typeof row.location === 'string' ? row.location : ''),
+        lat: typeof location.lat === 'number' && Number.isFinite(location.lat) && Math.abs(location.lat) <= 90 ? location.lat : undefined,
+        lng: typeof location.lng === 'number' && Number.isFinite(location.lng) && Math.abs(location.lng) <= 180 ? location.lng : undefined,
+        locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(privacy.locationPrivacy) ? privacy.locationPrivacy : 'APPROXIMATE',
         distanceKm: 0,
         photos: typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos || [],
         verified: !!row.is_verified,
