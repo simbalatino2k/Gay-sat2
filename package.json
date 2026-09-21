@@ -23,7 +23,7 @@
     "@types/multer": "^2.2.0",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.1",
-    "express": "^4.21.2",
+    "express": "^4.22.3",
     "firebase": "^12.18.0",
     "googleapis": "^180.0.0",
     "lucide-react": "^0.475.0",
