@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const suites = ['test_consent_preferences.ts', 'test_device_permissions.ts', 'test_ad_consent.ts', 'test_auth_security.ts', 'test_billing_security.ts'];
+const suites = ['test_stripe_checkout.ts', 'test_stripe_persistence.ts', 'test_consent_preferences.ts', 'test_device_permissions.ts', 'test_ad_consent.ts', 'test_auth_security.ts', 'test_billing_security.ts'];
 let failed = false;
 for (const suite of suites) {
   const isolated = mkdtempSync(path.join(tmpdir(), 'aura-security-test-'));
@@ -31,5 +31,6 @@ for (const suite of suites) {
   }
 }
 process.exitCode = failed ? 1 : 0;
+
 
 

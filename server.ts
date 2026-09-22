@@ -1,3 +1,4 @@
+import { buildStripeCheckout } from './src/lib/stripeCheckout';
 import { moderateText } from './src/lib/moderation.js';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
@@ -1928,23 +1929,6 @@ Rules:
 app.post('/api/ai/icebreaker', authenticateToken, handleAIIcebreaker);
 app.post('/api/ai/propositions', authenticateToken, handleAIIcebreaker);
 
-// Helper to resolve canonical application URL (no hardcoded localhost)
-const getCanonicalBaseUrl = (req: Request): string => {
-  if (process.env.APP_BASE_URL) {
-    return process.env.APP_BASE_URL.replace(/\/+$/, '');
-  }
-  const origin = req.headers.origin;
-  if (origin && typeof origin === 'string' && !origin.includes('localhost:3000')) {
-    return origin.replace(/\/+$/, '');
-  }
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  if (host) {
-    return `${proto}://${host}`.replace(/\/+$/, '');
-  }
-  return 'https://aura18.app';
-};
-
 // Payments / Subscription Checkout (Supports both create-checkout-session and checkout-session)
 const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -1966,36 +1950,9 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
     const Stripe = (await import('stripe')).default;
     const stripe = new Stripe(stripeKey);
 
-    const isAnnual = planId === 'aura_vip_annual';
-    const baseUrl = getCanonicalBaseUrl(req);
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      client_reference_id: req.user!.id,
-      metadata: {
-        userId: req.user!.id,
-        planId
-      },
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: isAnnual ? 'AURA VIP Pass (Annual)' : 'AURA VIP Pass (Monthly)',
-              description: 'Unlimited likes, see who liked you, stealth mode, and AI icebreaker priority.'
-            },
-            unit_amount: isAnnual ? 9999 : 1499,
-            recurring: {
-              interval: isAnnual ? 'year' : 'month'
-            }
-          },
-          quantity: 1
-        }
-      ],
-      mode: 'subscription',
-      success_url: `${baseUrl}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/?payment=cancelled`
-    });
+    const session = await stripe.checkout.sessions.create(
+      buildStripeCheckout(req.user!.id, planId, process.env)
+    );
 
     res.json({ url: session.url, checkoutUrl: session.url });
   } catch (err: any) {
@@ -2040,13 +1997,14 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     return res.json({ received: true, message: 'Event already processed' });
   }
 
-  await store.recordStripeEvent(event.id, event.type);
   console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
 
   try {
     switch (event.type) {
+      case 'checkout.session.async_payment_succeeded':
       case 'checkout.session.completed': {
         const session = event.data.object;
+        if (session.mode !== 'subscription' || session.payment_status !== 'paid') break;
         const customerId = session.customer as string;
         const subscriptionId = session.subscription as string;
         const userId = session.client_reference_id || session.metadata?.userId;
@@ -2108,6 +2066,7 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         console.log(`[Stripe Webhook] Unhandled event type ${event.type}`);
     }
 
+    await store.recordStripeEvent(event.id, event.type);
     res.json({ received: true });
   } catch (err: any) {
     console.error('[Stripe Webhook] Error executing webhook handler:', err);

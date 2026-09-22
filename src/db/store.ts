@@ -921,16 +921,14 @@ export class DataStore {
 
   // --- Stripe Subscription & Webhook Processing ---
   public async isStripeEventProcessed(eventId: string): Promise<boolean> {
+    if (this.pgAdapter) return this.pgAdapter.isEventProcessed(eventId);
     return this.stripeEvents.has(eventId);
   }
 
   public async recordStripeEvent(eventId: string, eventType: string): Promise<void> {
+    if (this.pgAdapter) await this.pgAdapter.recordProcessedEvent(eventId, eventType);
     this.stripeEvents.add(eventId);
-    if (this.pgAdapter) {
-      this.pgAdapter.recordProcessedEvent(eventId, eventType).catch(err => {
-        console.error('[Postgres] Stripe event sync error:', err.message);
-      });
-    }
+    this.saveToDisk();
   }
 
   public async recordStripeSubscription(
@@ -941,7 +939,7 @@ export class DataStore {
     status: string,
     periodEnd?: Date
   ): Promise<UserAccount | null> {
-    const user = this.users.get(userId);
+    const user = await this.getUserById(userId);
     if (!user) return null;
 
     const isActive = status === 'active' || status === 'trialing';
@@ -981,9 +979,8 @@ export class DataStore {
     });
 
     if (this.pgAdapter) {
-      this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd).catch(err => {
-        console.error('[Postgres] Subscription sync error:', err.message);
-      });
+      await this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd);
+      await this.pgAdapter.upsertStoreSubscription(this.localStoreSubscriptions.get(userId)!);
     }
 
     this.saveToDisk();
