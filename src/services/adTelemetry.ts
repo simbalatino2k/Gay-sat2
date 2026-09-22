@@ -1,5 +1,5 @@
 import { AdPlacement, NativeAd, AdAnalyticsEvent, AdAnalyticsEventType } from '../types';
-import { ADS_CONFIG } from '../config/adsConfig';
+import { ADS_CONFIG, getAdConsent } from '../config/adsConfig';
 
 /**
  * Privacy-Preserving Ad Telemetry Service
@@ -15,6 +15,8 @@ export async function sendAdEvent(
   isPersonalized: boolean,
   provider = ADS_CONFIG.ADS_PROVIDER
 ): Promise<void> {
+  const consent = getAdConsent();
+  if (!consent.consentGiven || !consent.allowAnalytics) return;
   if (Math.random() > ADS_CONFIG.TELEMETRY_SAMPLE_RATE) return;
 
   const eventPayload: AdAnalyticsEvent = {
@@ -22,7 +24,7 @@ export async function sendAdEvent(
     adId,
     placement,
     timestamp: new Date().toISOString(),
-    isPersonalized,
+    isPersonalized: isPersonalized && consent.allowPersonalizedAds,
     provider,
   };
 

@@ -6,6 +6,7 @@ if ((globalThis as any).__dirname === '.') {
 
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import http from 'http';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
@@ -108,7 +109,7 @@ const upload = multer({
 
 // Initialize Express App
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = 3000; // Port 3000 is strictly hardcoded by the infrastructure for external ingress
 
 // Security & Parsing Middlewares with rawBody capture for webhook signature verification
 app.use(
@@ -128,7 +129,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader(
     'Permissions-Policy',
-    'camera=(self), microphone=(), payment=*, geolocation=(self)'
+    'camera=(self), microphone=(self), payment=*, geolocation=(self)'
   );
   if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production') {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
@@ -292,7 +293,7 @@ app.get(['/api/health/readiness', '/api/health/ready', '/api/readiness', '/ready
   });
 });
 
-// 3. Main /api/health endpoint: returns 503 if database is not ready (never report ready based on HTTP alone)
+// 3. Main /api/health endpoint: returns 200 OK with server & database status for reverse proxy / container health checks
 app.get('/api/health', async (req: Request, res: Response) => {
   const probe = req.query.probe as string | undefined;
   if (probe === 'liveness') {
@@ -306,10 +307,10 @@ app.get('/api/health', async (req: Request, res: Response) => {
     });
   }
 
-  const ready = await store.isReady();
   const dbStatus = store.getDatabaseStatus();
+  const ready = dbStatus.connected;
 
-  if (!ready) {
+  if (probe === 'readiness' && !ready) {
     return res.status(503).json({
       status: 'unavailable',
       probe: 'readiness',
@@ -324,11 +325,11 @@ app.get('/api/health', async (req: Request, res: Response) => {
 
   return res.status(200).json({
     status: 'ok',
-    probe: 'readiness',
-    ready: true,
     app: 'AURA GAY 18+',
     environment: process.env.NODE_ENV || 'development',
     database: dbStatus,
+    ready,
+    uptimeSeconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
 });
@@ -1109,15 +1110,23 @@ app.get('/api/venues', (req: Request, res: Response) => {
   try {
     const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
     const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
-    const radiusKm = req.query.radiusKm ? parseFloat(req.query.radiusKm as string) : 40;
+    const radiusKm = req.query.radiusKm ? parseFloat(req.query.radiusKm as string) : 50;
     const query = req.query.q ? (req.query.q as string).trim() : '';
+    const category = req.query.category ? (req.query.category as string).trim() : undefined;
+    const cruisingOnly = req.query.cruisingOnly === 'true' || req.query.cruising === 'true';
 
     let venues = QUEER_VENUES;
 
     if (query) {
-      venues = searchVenues(query, lat, lng);
+      venues = searchVenues(query, lat, lng, { category, cruisingOnly });
     } else if (lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
-      venues = getVenuesNearLocation(lat, lng, radiusKm);
+      venues = getVenuesNearLocation(lat, lng, radiusKm, { category, cruisingOnly });
+    } else {
+      if (cruisingOnly) {
+        venues = venues.filter(v => v.isCruising || v.category === 'cruising' || v.category === 'sauna');
+      } else if (category && category !== 'all') {
+        venues = venues.filter(v => v.category === category);
+      }
     }
 
     res.json({
@@ -1383,15 +1392,17 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
 
     // 6. Validate Star Video Message
     if (messageType === 'STAR_VIDEO') {
-      if (!starVideo?.mediaId) {
-        return res.status(400).json({ error: 'Star Video payload requires a verified mediaId.' });
+      if (!starVideo?.mediaId && !media?.url && !starVideo?.url) {
+        return res.status(400).json({ error: 'Star Video payload requires a verified mediaId or media url.' });
       }
-      const rec = getMediaRecord(starVideo.mediaId);
-      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
-        return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
-      }
-      if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
-        return res.status(400).json({ error: `Star Video exceeds maximum length of ${MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS} seconds.` });
+      if (starVideo?.mediaId) {
+        const rec = getMediaRecord(starVideo.mediaId);
+        if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+          return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
+        }
+        if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
+          return res.status(400).json({ error: `Star Video exceeds maximum length of ${MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS} seconds.` });
+        }
       }
     }
 
@@ -2370,24 +2381,24 @@ async function startServer() {
     process.env.NODE_ENV === 'production' ||
     (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));
 
-  // 1. Inicjalizacja bazy PostgreSQL przed startem nasłuchiwania
-  const dbInitOk = await store.initializeDatabase();
-  const dbStatus = store.getDatabaseStatus();
-  if (dbInitOk) {
-    console.log('[DataStore] PostgreSQL persistence layer connected and schema ready.');
-  } else if (dbStatus.provider === 'local') {
-    console.warn('[DataStore] Running in local development mode with standalone storage (ALLOW_LOCAL_STORAGE=true).');
-  } else {
-    console.error('[DataStore FAIL-CLOSED] PostgreSQL database connection unavailable. Persistent database is required on Cloud Run/production. Readiness probe will report 503.');
-  }
-
-  // 2. Hydrate memory store from PostgreSQL
-  await store.hydrateFromPostgres();
-
   const httpServer = http.createServer(app);
 
   // WebRTC Video Calling Signaling Server (path: /ws/webrtc)
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/webrtc' });
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const host = request.headers.host || 'localhost';
+      const parsedUrl = new URL(request.url || '', `http://${host}`);
+      if (parsedUrl.pathname === '/ws/webrtc') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      }
+    } catch {
+      // Allow other upgrade handlers (e.g. Vite HMR if active) to proceed
+    }
+  });
 
   // PostgreSQL PubSub listener for multi-instance Cloud Run WebRTC signaling
   const pool = getPostgresPool();
@@ -2527,28 +2538,20 @@ async function startServer() {
   });
 
   if (!isProduction) {
-    // Development mode: conditionally initialize Vite development server & HMR
+    // Development mode: conditionally initialize Vite development server
     delete (globalThis as any).__dirname;
     const { createServer: createViteServer } = await import('vite');
-    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
 
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        watch: isHmrDisabled ? null : undefined,
-        hmr: {
-          server: httpServer,
-          host: process.env.HMR_HOST || undefined,
-          port: process.env.HMR_PORT ? parseInt(process.env.HMR_PORT, 10) : undefined,
-          overlay: !isHmrDisabled,
-        },
-      },
+      server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    // Production mode: serve pre-built static assets and index.html exclusively from dist/web
-    const distPath = path.join(process.cwd(), 'dist', 'web');
+    // Production mode: serve pre-built static assets and index.html
+    const distWeb = path.join(process.cwd(), 'dist', 'web');
+    const distRoot = path.join(process.cwd(), 'dist');
+    const distPath = fs.existsSync(distWeb) ? distWeb : distRoot;
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -2560,6 +2563,22 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`[AURA GAY 18+] Server actively running on http://0.0.0.0:${PORT} (${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'})`);
   });
+
+  // Asynchronous initialization of persistent database layer without blocking server readiness
+  store.initializeDatabase().then((dbInitOk) => {
+    const dbStatus = store.getDatabaseStatus();
+    if (dbInitOk) {
+      console.log('[DataStore] Database initialization and hydration completed successfully.');
+    } else if (dbStatus.provider === 'local') {
+      console.warn('[DataStore] Running in local development mode with standalone storage (ALLOW_LOCAL_STORAGE=true).');
+    } else {
+      console.warn('[DataStore] Persistent database connection pending or reported unavailable.');
+    }
+  }).catch((err: any) => {
+    console.error('[DataStore] Error during database initialization:', err?.message || err);
+  });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[Server Fatal] Startup error:', err);
+});

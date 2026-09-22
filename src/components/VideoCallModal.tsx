@@ -16,6 +16,7 @@ import {
   Info
 } from 'lucide-react';
 import { videoEffectsService, APPROVED_EFFECTS, VideoEffect } from '../services/videoEffectsService';
+import { MediaPermissionModal } from './MediaPermissionModal';
 
 export type CallState = 
   | 'IDLE'
@@ -63,6 +64,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const [activeEffect, setActiveEffect] = useState('none');
   const [turnNotice, setTurnNotice] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showPermissionModal, setShowPermissionModal] = useState<boolean>(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -226,6 +228,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       console.error('[WebRTC] Brak uprawnień do kamery/mikrofonu:', err);
       setCallState('PERMISSION_DENIED');
       setErrorMessage('Aplikacja nie uzyskała dostępu do kamery lub mikrofonu.');
+      setShowPermissionModal(true);
       throw err;
     }
   };
@@ -554,6 +557,17 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                  callState === 'PERMISSION_DENIED' ? errorMessage || 'Wymagane uprawnienia do kamery i mikrofonu.' :
                  'Łączenie...'}
               </p>
+
+              {callState === 'PERMISSION_DENIED' && (
+                <button
+                  id="btn-videocall-fix-permissions"
+                  type="button"
+                  onClick={() => setShowPermissionModal(true)}
+                  className="mt-3 px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white shadow-lg shadow-purple-900/50 transition active:scale-95"
+                >
+                  Zezwól na dostęp / Sprawdź uprawnienia
+                </button>
+              )}
             </div>
 
             {turnNotice && (
@@ -725,6 +739,29 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           </>
         )}
       </div>
+
+      {/* Permissions missing or denied modal */}
+      <MediaPermissionModal
+        isOpen={showPermissionModal}
+        onClose={() => {
+          setShowPermissionModal(false);
+          if (callState === 'PERMISSION_DENIED') {
+            handleEndCall('ENDED');
+          }
+        }}
+        onGranted={async () => {
+          setShowPermissionModal(false);
+          setErrorMessage(null);
+          setCallState(isIncoming ? 'CONNECTING' : 'OUTGOING_RINGING');
+          try {
+            await startLocalMedia();
+            await initializePeerConnection(!isIncoming);
+          } catch (e) {
+            console.error('[WebRTC] Błąd ponownej inicjalizacji mediów:', e);
+          }
+        }}
+        callTargetName={targetUser.displayName}
+      />
 
     </div>
   );

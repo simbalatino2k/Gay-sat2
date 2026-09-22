@@ -77,19 +77,24 @@ export interface UserProfile {
   premiumTier?: string;
 }
 
+export type VenueCategory = 'cruising' | 'sauna' | 'bar' | 'club' | 'cafe' | 'wellness' | 'community';
+
 export interface QueerVenue {
   id: string;
   name: string;
-  category: 'bar' | 'club' | 'cafe' | 'wellness' | 'community';
+  category: VenueCategory;
   lat: number;
   lng: number;
   address: string;
   neighborhood: string;
+  city?: string;
   description: string;
   distanceKm: number;
   tags: string[];
   imageUrl?: string;
   isVerified?: boolean;
+  isCruising?: boolean;
+  openingHours?: string;
 }
 
 export interface UserAccount {

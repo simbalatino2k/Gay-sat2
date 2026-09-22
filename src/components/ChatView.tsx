@@ -3,14 +3,19 @@ import { Conversation, Message, UserProfile, TapType } from '../types';
 import {
   Send, Image as ImageIcon, ArrowLeft, Check, CheckCheck, Sparkles, User, ShieldCheck,
   RefreshCw, ChevronDown, ChevronUp, Plus, Clock, Timer, Pin, Shield, ShieldOff,
-  Lock, Unlock, Zap, Flame, Hand, Bookmark, AlertCircle, HardDrive, CloudOff, Video
+  Lock, Unlock, Zap, Flame, Hand, Bookmark, AlertCircle, HardDrive, CloudOff, Video,
+  MoreVertical, Settings, RotateCw
 } from 'lucide-react';
 import { formatDistance } from '../utils/formatDistance';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { AuraChatOrbGraphic } from './AuraGraphics';
 import { ChatMediaMenu, PhotoMessage, LinkMessage, LocationMessage, StickerMessage, VoiceMessage, StarVideoMessage, MediaPreview, StickerPicker } from './ChatMediaComponents';
 import { ChatSettings } from './ChatSettings';
+import { GlobalChatSettingsModal } from './GlobalChatSettingsModal';
+import { StarVideoRecorderModal } from './StarVideoRecorderModal';
 import { VideoCallModal } from './VideoCallModal';
+import { useMediaPermissions } from '../hooks/useMediaPermissions';
+import { MediaPermissionModal } from './MediaPermissionModal';
 
 interface ChatViewProps {
   authToken: string;
@@ -39,9 +44,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [sending, setSending] = useState(false);
   const [isOpeningChat, setIsOpeningChat] = useState(false);
 
-  // AI Proposition / Icebreaker State
-  const [showAIPanel, setShowAIPanel] = useState(false);
-  const [aiPropositions, setAiPropositions] = useState<string[]>([]);
+  // Short AI Proposition State (2-3 short options directly above the keyboard)
+  const SHORT_PROPOSAL_SETS = [
+    ['Hej, co słychać? 👋', 'Świetny profil! ✨', 'Masz ochotę na kawę? ☕'],
+    ['Cześć! Skąd jesteś? 📍', 'Fajne fotki! 🔥', 'Jak mija Twój dzień? 😊'],
+    ['Cześć przystojniaku! 😉', 'Plany na weekend? 🍸', 'Pogadamy chwilę? 💬']
+  ];
+  const [proposalSetIndex, setProposalSetIndex] = useState(0);
+  const [shortProposals, setShortProposals] = useState<string[]>(SHORT_PROPOSAL_SETS[0]);
   const [aiLoading, setAiLoading] = useState(false);
   const [selectedVibe, setSelectedVibe] = useState<PropositionVibe>('Casual & Chill');
 
@@ -51,8 +61,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [mediaPreview, setMediaPreview] = useState<{type: string, data: any} | null>(null);
   const [uploadingChatPhoto, setUploadingChatPhoto] = useState(false);
 
-  // Privacy, Message Retention & Vault State
-  const [showPrivacyDrawer, setShowPrivacyDrawer] = useState(false);
+  // Settings & Privacy Modals
+  const [showGlobalPrivacyModal, setShowGlobalPrivacyModal] = useState(false);
+  const [showChatSettingsModal, setShowChatSettingsModal] = useState(false);
+  const [showStarVideoModal, setShowStarVideoModal] = useState(false);
   const [updatingSettings, setUpdatingSettings] = useState(false);
   const [vaultStatus, setVaultStatus] = useState<{
     iHaveAccessToTheirs: boolean;
@@ -69,7 +81,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // 1:1 Video Calling State
   const [videoCallActive, setVideoCallActive] = useState(false);
   const [incomingCallData, setIncomingCallData] = useState<any>(null);
+  const [showCallPermissionModal, setShowCallPermissionModal] = useState(false);
+  const { checkPermissions, hasAllPermissions } = useMediaPermissions();
   const incomingWsRef = useRef<WebSocket | null>(null);
+
+  const handleInitiateVideoCall = async () => {
+    // If both camera and microphone are already verified, open call modal directly
+    if (hasAllPermissions) {
+      setVideoCallActive(true);
+      return;
+    }
+
+    // Otherwise check permissions dynamically
+    const perms = await checkPermissions();
+    if (perms.camera !== 'granted' || perms.microphone !== 'granted') {
+      setShowCallPermissionModal(true);
+      return;
+    }
+
+    setVideoCallActive(true);
+  };
 
   // Global incoming call listener
   useEffect(() => {
@@ -434,8 +465,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const handleBlockUser = async () => {
     if (!activeConv?.otherParticipant?.userId) return;
-    const confirmed = window.confirm(`Czy na pewno chcesz zablokować użytkownika ${activeConv.otherParticipant.displayName}?`);
-    if (!confirmed) return;
     
     setUpdatingSettings(true);
     try {
@@ -450,7 +479,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       if (res.ok) {
         setActiveConv(null);
         setConversations(prev => prev.filter(c => c.id !== activeConv.id));
-        setShowPrivacyDrawer(false);
+        setShowChatSettingsModal(false);
       } else {
          console.error('Failed to block user');
       }
@@ -481,7 +510,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       });
       if (res.ok) {
         window.alert('Użytkownik został zgłoszony.');
-        setShowPrivacyDrawer(false);
+        setShowChatSettingsModal(false);
       } else {
         console.error('Failed to report user');
       }
@@ -492,7 +521,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
   };
 
-  // Load AI Proposition messages tailored to the other participant
+  const handleRefreshPropositions = () => {
+    setProposalSetIndex(prev => {
+      const next = (prev + 1) % SHORT_PROPOSAL_SETS.length;
+      setShortProposals(SHORT_PROPOSAL_SETS[next]);
+      return next;
+    });
+  };
+
+  const handleSendStarVideo = (mediaData: { url: string; durationSeconds: number; mediaId?: string }) => {
+    handleSendMediaPayload({
+      type: 'STAR_VIDEO',
+      media: { url: mediaData.url, durationSeconds: mediaData.durationSeconds },
+      starVideo: {
+        url: mediaData.url,
+        duration: mediaData.durationSeconds,
+        mediaId: mediaData.mediaId
+      }
+    });
+  };
   const loadPropositions = async (otherParticipant: UserProfile | undefined, vibe: PropositionVibe = selectedVibe) => {
     if (!otherParticipant) return;
     setAiLoading(true);
@@ -515,40 +562,36 @@ export const ChatView: React.FC<ChatViewProps> = ({
       });
       const data = await res.json();
       if (data.propositions && Array.isArray(data.propositions) && data.propositions.length > 0) {
-        setAiPropositions(data.propositions);
+        setShortProposals(data.propositions.slice(0, 3));
       } else {
         throw new Error('Empty response from AI endpoint');
       }
     } catch (err) {
       console.warn('Using client tailored fallback propositions:', err);
-      // Fallbacks conditioned by vibe
+      // Short fallbacks (2-3 options)
       if (vibe === 'Casual & Chill') {
-        setAiPropositions([
-          `Hey ${displayName}! Loved your photos. How has your week been going?`,
-          `Hi ${displayName}! Up for grabbing a casual coffee or drink nearby sometime?`,
-          `Hey there! How is your day treating you so far?`,
-          `Hey ${displayName}! Just noticed your profile and wanted to say hello.`
+        setShortProposals([
+          `Hej ${displayName}! Co tam? 👋`,
+          `Masz ochotę na kawę? ☕`,
+          `Jak mija Twój dzień? 😊`
         ]);
       } else if (vibe === 'Playful & Witty') {
-        setAiPropositions([
-          `Hey ${displayName}! Your vibe definitely stands out here. What's the story behind your favorite photo?`,
-          `Hi ${displayName}! If we went for a drink, what's your go-to spot?`,
-          `Hey handsome! Couldn't pass by without seeing what you're up to today.`,
-          `Hey ${displayName}! On a scale of 1-10, how adventurous is your weekend looking?`
+        setShortProposals([
+          `Świetne fotki! 🔥`,
+          `Jakie masz plany na weekend? 🍸`,
+          `Co słychać ciekawego? 😉`
         ]);
       } else if (vibe === 'Shared Passions') {
-        setAiPropositions([
-          `Hey ${displayName}! Saw you're into ${primaryInterest} — what got you passionate about that?`,
-          `Hi ${displayName}! Great taste in ${secondaryInterest}. Any favorite recommendations?`,
-          `Hey there! Always great to connect with someone who appreciates ${primaryInterest}.`,
-          `Hey ${displayName}! Loved your bio about ${otherParticipant.bio ? 'your vibe' : 'connecting'}. What are you into lately?`
+        setShortProposals([
+          `Też lubię ${primaryInterest}! ✨`,
+          `Co polecisz w temacie ${secondaryInterest}? 🎧`,
+          `Fajny profil! Pogadamy? 💬`
         ]);
       } else {
-        setAiPropositions([
-          `Hey handsome, couldn't scroll past your profile without saying hi! What brings you on Aura?`,
-          `Hi ${displayName}! You look fantastic in your photos. Up for getting to know each other?`,
-          `Hey there! Love your confidence and vibe. What are your plans for tonight?`,
-          `Hey ${displayName}! You caught my eye immediately. Let's chat!`
+        setShortProposals([
+          `Cześć przystojniaku! 😉`,
+          `Masz wolną chwilę? 💬`,
+          `Świetna energia w profilu! ✨`
         ]);
       }
     } finally {
@@ -691,7 +734,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } else if (action === 'VOICE') {
       previewData = { url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', durationSeconds: 15 };
     } else if (action === 'STAR_VIDEO') {
-      previewData = { url: 'https://placeholdervideo.dev/640x360' };
+      setShowStarVideoModal(true);
+      return;
     }
 
     setMediaPreview({ type: action, data: previewData });
@@ -724,10 +768,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const handleSelectProposition = (prop: string, sendImmediately = false) => {
     if (sendImmediately) {
       handleSendMessage(undefined, prop);
-      setShowAIPanel(false);
     } else {
       setInputText(prop);
-      setShowAIPanel(false);
     }
   };
 
@@ -804,73 +846,37 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <div className="flex items-center gap-1.5">
               {/* 1:1 Video Call Button */}
               <button
+                id="btn-initiate-video-call"
                 type="button"
-                onClick={() => setVideoCallActive(true)}
+                onClick={handleInitiateVideoCall}
                 className="p-2 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 hover:text-white border border-purple-500/30 hover:border-purple-500/50 transition active:scale-95 shadow-sm"
                 title="Rozpocznij wideorozmowę 1:1"
               >
                 <Video className="w-4 h-4 text-fuchsia-400" />
               </button>
 
-              {/* Privacy, Expiration & Vault Settings Button */}
+              {/* 3 Dots Menu Button for individual chat settings */}
               <button
-                onClick={() => {
-                  setShowPrivacyDrawer(!showPrivacyDrawer);
-                  if (showAIPanel) setShowAIPanel(false);
-                }}
-                className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1.5 transition-all duration-200 active:scale-95 ${
-                  showPrivacyDrawer
-                    ? 'bg-amber-500/25 text-amber-200 border border-amber-500/50 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
-                    : activeConv.settings?.messageTtlSeconds || activeConv.settings?.excludeFromBackup || activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup
-                    ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                    : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 border border-white/[0.1]'
+                id="btn-chat-options-3dots"
+                type="button"
+                onClick={() => setShowChatSettingsModal(true)}
+                className={`p-2 rounded-xl border transition-all duration-200 active:scale-95 ${
+                  showChatSettingsModal
+                    ? 'bg-purple-500/25 text-purple-200 border-purple-500/50 shadow-[0_0_12px_rgba(168,85,247,0.3)]'
+                    : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 hover:text-white border-white/[0.1]'
                 }`}
-                title="Message expiration, backup & private vault settings"
+                title="Ustawienia i prywatność czatu"
               >
-                <Timer className="w-3.5 h-3.5 text-amber-400" />
-                <span>Prywatność</span>
-                {activeConv.settings?.messageTtlSeconds ? (
-                  <span className="px-1 py-0.2 rounded bg-amber-400/20 text-amber-300 text-[9px]">
-                    {formatTtlRemaining(new Date(Date.now() + activeConv.settings.messageTtlSeconds * 1000).toISOString())}
-                  </span>
-                ) : null}
-                {(activeConv.settings?.disableAutoBackup || activeConv.disableAutoBackup) ? (
-                  <span title="Disable Auto-Backup aktywny (tylko lokalnie)">
-                    <CloudOff className="w-3 h-3 text-cyan-400" />
-                  </span>
-                ) : activeConv.settings?.excludeFromBackup ? (
-                  <ShieldOff className="w-3 h-3 text-cyan-400" />
-                ) : null}
-              </button>
-
-              {/* Quick AI Proposition Toggle Button in Header */}
-              <button
-                onClick={() => {
-                  setShowAIPanel(!showAIPanel);
-                  if (showPrivacyDrawer) setShowPrivacyDrawer(false);
-                  if (!showAIPanel && aiPropositions.length === 0) {
-                    loadPropositions(activeConv.otherParticipant, selectedVibe);
-                  }
-                }}
-                className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1.5 transition-all duration-200 active:scale-95 ${
-                  showAIPanel
-                    ? 'bg-fuchsia-500/25 text-fuchsia-200 border border-fuchsia-500/40 shadow-[0_0_12px_rgba(217,70,239,0.3)]'
-                    : 'bg-white/[0.05] hover:bg-white/[0.1] text-slate-300 border border-white/[0.1]'
-                }`}
-                title="Toggle AI Proposition Messages"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-fuchsia-400 animate-pulse" />
-                <span>AI</span>
-                {showAIPanel ? <ChevronUp className="w-3 h-3 ml-0.5" /> : <ChevronDown className="w-3 h-3 ml-0.5" />}
+                <MoreVertical className="w-4 h-4" />
               </button>
             </div>
           </div>
 
-          {/* Privacy, Retention & Vault Drawer */}
+          {/* Individual Chat Settings Modal (under 3 dots) */}
           {activeConv && (
             <ChatSettings
-              isOpen={showPrivacyDrawer}
-              onClose={() => setShowPrivacyDrawer(false)}
+              isOpen={showChatSettingsModal}
+              onClose={() => setShowChatSettingsModal(false)}
               conversation={activeConv}
               updatingSettings={updatingSettings}
               onSetMessageTtl={handleSetMessageTtl}
@@ -881,93 +887,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
               onBlockUser={handleBlockUser}
               onReportUser={handleReportUser}
             />
-          )}
-
-          {/* Collapsible AI Propositions Panel */}
-          {showAIPanel && (
-            <div className="border-b border-white/[0.08] bg-gradient-to-b from-[#120f22] to-[#0a0c16] p-3.5 space-y-3 shrink-0 animate-in slide-in-from-top-2 duration-200">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-purple-500 to-fuchsia-500 flex items-center justify-center">
-                    <Sparkles className="w-3.5 h-3.5 text-white" />
-                  </div>
-                  <div>
-                    <h4 className="text-[11px] font-bold text-white flex items-center gap-1.5">
-                      <span>Propositions IA pour {activeConv.otherParticipant?.displayName}</span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-fuchsia-500/30 text-fuchsia-300 font-extrabold border border-fuchsia-500/40">IA</span>
-                    </h4>
-                    <p className="text-[10px] text-slate-400">Click to insert into message or send directly</p>
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => loadPropositions(activeConv.otherParticipant, selectedVibe)}
-                  disabled={aiLoading}
-                  className="px-2 py-1 rounded-lg bg-white/[0.06] hover:bg-white/[0.12] text-fuchsia-300 border border-white/10 text-[10px] font-semibold flex items-center gap-1 transition"
-                  title="Generate new propositions"
-                >
-                  <RefreshCw className={`w-3 h-3 ${aiLoading ? 'animate-spin' : ''}`} />
-                  <span>{aiLoading ? 'Generating...' : 'Refresh'}</span>
-                </button>
-              </div>
-
-              {/* Vibe Selection Tabs */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 custom-scrollbar">
-                {(['Casual & Chill', 'Playful & Witty', 'Shared Passions', 'Bold & Flirty'] as PropositionVibe[]).map(v => (
-                  <button
-                    key={v}
-                    onClick={() => {
-                      setSelectedVibe(v);
-                      loadPropositions(activeConv.otherParticipant, v);
-                    }}
-                    className={`text-[10px] px-2.5 py-1 rounded-xl font-semibold whitespace-nowrap transition-all duration-200 ${
-                      selectedVibe === v
-                        ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-sm border border-fuchsia-400/50'
-                        : 'bg-white/[0.04] text-slate-400 hover:text-white border border-white/[0.06]'
-                    }`}
-                  >
-                    {v}
-                  </button>
-                ))}
-              </div>
-
-              {/* Propositions Cards */}
-              <div className="space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar pr-0.5">
-                {aiLoading ? (
-                  <div className="space-y-1.5 py-1">
-                    {[1, 2].map(i => (
-                      <div key={i} className="h-11 rounded-xl bg-white/[0.04] border border-white/[0.06] animate-pulse" />
-                    ))}
-                  </div>
-                ) : aiPropositions.map((prop, idx) => (
-                  <div
-                    key={idx}
-                    className="p-2.5 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.07] hover:border-fuchsia-500/40 transition-all flex items-center justify-between gap-2 text-left group"
-                  >
-                    <p className="text-[11px] text-slate-200 leading-snug flex-1 italic">
-                      "{prop}"
-                    </p>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => handleSelectProposition(prop, false)}
-                        className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-[10px] font-bold text-white transition active:scale-95"
-                        title="Use in text field"
-                      >
-                        Use
-                      </button>
-                      <button
-                        onClick={() => handleSelectProposition(prop, true)}
-                        className="px-2 py-1 rounded-lg aura-btn-primary text-[10px] font-bold text-white flex items-center gap-1 shadow-sm active:scale-95"
-                        title="Send proposition immediately"
-                      >
-                        <span>Send</span>
-                        <Send className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
           )}
 
           {/* Messages Stream */}
@@ -991,50 +910,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
 
             {messages.length === 0 ? (
-              /* Empty Conversation State: Features Aura AI Proposition Starters directly */
-              <div className="h-full flex flex-col items-center justify-center text-center p-2 space-y-4">
+              /* Clean, minimal empty conversation state */
+              <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
                 <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600/20 via-fuchsia-600/20 to-pink-600/10 border border-fuchsia-500/30 flex items-center justify-center shadow-lg shadow-purple-950/40">
-                  <Sparkles className="w-6 h-6 text-fuchsia-400 animate-pulse" />
+                  <Sparkles className="w-6 h-6 text-fuchsia-400" />
                 </div>
-                
                 <div className="space-y-1">
-                  <p className="text-xs font-bold text-slate-200">Start the conversation with {activeConv.otherParticipant?.displayName}</p>
+                  <p className="text-xs font-bold text-slate-200">Rozpocznij rozmowę z {activeConv.otherParticipant?.displayName}</p>
                   <p className="text-[11px] text-slate-400 max-w-xs leading-relaxed">
-                    Choose an AI proposition below or type your own custom message.
+                    Wybierz jedną z krótkich propozycji nad klawiaturą lub wpisz wiadomość.
                   </p>
-                </div>
-
-                {/* Inline AI Proposition Quick-Starters */}
-                <div className="w-full max-w-sm rounded-2xl border border-white/[0.08] bg-white/[0.02] p-3 space-y-2 text-left">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wider flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" />
-                      AI Proposition Openers
-                    </span>
-                    <button
-                      onClick={() => loadPropositions(activeConv.otherParticipant, selectedVibe)}
-                      disabled={aiLoading}
-                      className="text-[10px] text-slate-400 hover:text-white flex items-center gap-1"
-                    >
-                      <RefreshCw className={`w-2.5 h-2.5 ${aiLoading ? 'animate-spin' : ''}`} />
-                      <span>{aiLoading ? '...' : 'Refresh'}</span>
-                    </button>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    {aiPropositions.slice(0, 3).map((prop, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleSelectProposition(prop, false)}
-                        className="w-full text-left p-2.5 rounded-xl bg-black/40 hover:bg-white/[0.06] border border-white/[0.08] hover:border-fuchsia-500/40 transition-all text-[11px] text-slate-200 leading-snug group flex items-center justify-between gap-2"
-                      >
-                        <span className="truncate flex-1 italic">"{prop}"</span>
-                        <span className="text-[9.5px] font-bold text-fuchsia-300 group-hover:underline shrink-0">
-                          Select →
-                        </span>
-                      </button>
-                    ))}
-                  </div>
                 </div>
               </div>
             ) : (
@@ -1169,7 +1054,38 @@ export const ChatView: React.FC<ChatViewProps> = ({
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Premium Input Bar */}
+          {/* Short Message Proposals: 2-3 options directly above the keyboard, no separate tab */}
+          {shortProposals && shortProposals.length > 0 && (
+            <div className="px-3 pt-2 pb-1.5 flex items-center gap-1.5 overflow-x-auto no-scrollbar border-t border-white/[0.06] bg-[#0c0d17]/80 shrink-0">
+              <button
+                id="btn-cycle-propositions"
+                type="button"
+                onClick={handleRefreshPropositions}
+                disabled={aiLoading}
+                className="p-1.5 rounded-xl bg-white/[0.04] hover:bg-white/10 text-fuchsia-400 hover:text-fuchsia-300 border border-white/10 transition shrink-0 active:scale-90"
+                title="Odśwież propozycje (2-3 opcje)"
+              >
+                <RotateCw className={`w-3 h-3 ${aiLoading ? 'animate-spin' : ''}`} />
+              </button>
+              <div className="flex items-center gap-1.5 flex-nowrap min-w-0">
+                {shortProposals.slice(0, 3).map((prop, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => {
+                      setInputText(prop);
+                    }}
+                    className="px-3 py-1 rounded-full bg-fuchsia-500/10 hover:bg-fuchsia-500/20 border border-fuchsia-500/25 hover:border-fuchsia-500/40 text-fuchsia-200 hover:text-white text-[11px] font-medium transition active:scale-95 whitespace-nowrap shadow-sm"
+                    title="Wstaw propozycję"
+                  >
+                    {prop}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Chat Input Bar */}
           <form onSubmit={handleSendMessage} className="p-3 border-t border-white/[0.08] bg-[#090b14]/95 backdrop-blur-2xl flex items-center gap-2 shrink-0 relative overflow-visible">
             
             <ChatMediaMenu 
@@ -1188,41 +1104,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
               type="button"
               onClick={() => {
                 setShowMediaMenu(!showMediaMenu);
-                setShowAIPanel(false);
               }}
               className={`p-2.5 rounded-xl border transition-all active:scale-95 duration-200 ${
                 showMediaMenu
                   ? 'bg-indigo-500/30 text-indigo-300 border-indigo-500/50 shadow-[0_0_10px_rgba(99,102,241,0.3)]'
                   : 'text-slate-400 hover:text-indigo-300 hover:bg-white/[0.06] border-white/10'
               }`}
-              title="Add Media"
+              title="Dodaj multimedia (Zdjęcie, Star Video...)"
             >
               <Plus className={`w-4 h-4 transition-transform duration-300 ${showMediaMenu ? 'rotate-45' : ''}`} />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setShowAIPanel(!showAIPanel);
-                setShowMediaMenu(false);
-              }}
-              className={`p-2.5 rounded-xl border transition-all active:scale-95 duration-200 ${
-                showAIPanel
-                  ? 'bg-fuchsia-500/30 text-fuchsia-300 border-fuchsia-500/50 shadow-[0_0_10px_rgba(217,70,239,0.3)]'
-                  : 'text-slate-400 hover:text-fuchsia-300 hover:bg-white/[0.06] border-white/10'
-              }`}
-              title="Open AI Propositions"
-            >
-              <Sparkles className="w-4 h-4 text-fuchsia-400" />
             </button>
 
             <div className="flex-1 relative">
               <input
                 type="text"
-                placeholder="Type a message..."
+                placeholder="Wpisz wiadomość..."
                 value={inputText}
                 onChange={e => setInputText(e.target.value)}
-                onFocus={() => { setShowAIPanel(false); setShowMediaMenu(false); }}
+                onFocus={() => { setShowMediaMenu(false); }}
                 className="w-full aura-glass-input rounded-2xl px-4 py-2.5 text-xs text-white placeholder:text-slate-500 outline-none focus:border-fuchsia-500/60 focus:shadow-[0_0_20px_rgba(217,70,239,0.2)]"
               />
             </div>
@@ -1231,7 +1130,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               type="submit"
               disabled={!inputText.trim() || sending}
               className="aura-btn-primary p-2.5 rounded-2xl flex items-center justify-center transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Send message"
+              title="Wyślij wiadomość"
             >
               <Send className="w-4 h-4" />
             </button>
@@ -1258,8 +1157,20 @@ export const ChatView: React.FC<ChatViewProps> = ({
         /* Conversation List */
         <div className="space-y-3">
           <div className="flex items-center justify-between px-1">
-            <h2 className="text-base font-extrabold text-white tracking-wide">Direct Messages</h2>
-            <span className="text-[10px] text-slate-400 font-medium">{conversations.length} chats</span>
+            <div>
+              <h2 className="text-base font-extrabold text-white tracking-wide">Wiadomości & Czaty</h2>
+              <span className="text-[10px] text-slate-400 font-medium">{conversations.length} rozmów</span>
+            </div>
+            {/* Gear icon for global chat privacy on chat list page */}
+            <button
+              id="btn-global-chat-settings-gear"
+              type="button"
+              onClick={() => setShowGlobalPrivacyModal(true)}
+              className="p-2.5 rounded-2xl bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 hover:text-white border border-white/10 transition active:scale-95 shadow-sm flex items-center justify-center"
+              title="Prywatność i ustawienia czatów"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
           </div>
 
           {loading ? (
@@ -1351,6 +1262,35 @@ export const ChatView: React.FC<ChatViewProps> = ({
             setVideoCallActive(false);
             setIncomingCallData(null);
           }}
+        />
+      )}
+
+      {/* Media Permissions Modal on WebRTC Call Initiation */}
+      <MediaPermissionModal
+        isOpen={showCallPermissionModal}
+        onClose={() => setShowCallPermissionModal(false)}
+        onGranted={() => {
+          setShowCallPermissionModal(false);
+          setVideoCallActive(true);
+        }}
+        callTargetName={activeConv?.otherParticipant?.displayName || 'Użytkownik AURA'}
+      />
+
+      {/* Global Chat Privacy Settings Modal (opened via Gear icon on chat list) */}
+      <GlobalChatSettingsModal
+        isOpen={showGlobalPrivacyModal}
+        onClose={() => setShowGlobalPrivacyModal(false)}
+        authToken={authToken}
+      />
+
+      {/* Star Video Short Camera Recorder Modal */}
+      {showStarVideoModal && (
+        <StarVideoRecorderModal
+          isOpen={showStarVideoModal}
+          onClose={() => setShowStarVideoModal(false)}
+          onSend={handleSendStarVideo}
+          authToken={authToken}
+          targetUserName={activeConv?.otherParticipant?.displayName || 'rozmówcy'}
         />
       )}
     </div>

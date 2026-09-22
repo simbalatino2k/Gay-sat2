@@ -1,5 +1,7 @@
 import { Pool, PoolConfig } from 'pg';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import {
   UserAccount,
   UserProfile,
@@ -26,29 +28,116 @@ let pgPool: Pool | null = null;
 let isInitialized = false;
 
 /**
+ * Checks whether a Unix domain socket path exists on the local filesystem.
+ */
+export function isUnixSocketAccessible(sockPath?: string): boolean {
+  if (!sockPath) return false;
+  try {
+    if (fs.existsSync(sockPath)) return true;
+    if (fs.existsSync(path.join(sockPath, '.s.PGSQL.5432'))) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Extracts unix socket host parameter from database URL if present.
+ */
+export function extractSocketFromUrl(urlStr?: string): string | null {
+  if (!urlStr) return null;
+  try {
+    const match = urlStr.match(/[?&]host=([^&]+)/);
+    if (match) {
+      const decoded = decodeURIComponent(match[1]);
+      if (decoded.startsWith('/')) return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Resolves accessible socket host between /cloudsql and /app/cloudsql.
+ */
+export function resolveAccessibleSocketHost(host?: string): string | undefined {
+  if (!host) return undefined;
+  if (!host.startsWith('/')) return host;
+  if (isUnixSocketAccessible(host)) return host;
+
+  if (host.startsWith('/cloudsql/')) {
+    const alt = `/app${host}`;
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+  if (host.startsWith('/app/cloudsql/')) {
+    const alt = host.replace('/app/cloudsql/', '/cloudsql/');
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+
+  return host;
+}
+
+/**
  * Validates configuration and returns connection pool suitable for Cloud Run and PostgreSQL.
  */
 export function getPostgresPool(): Pool | null {
   if (pgPool) return pgPool;
 
-  const databaseUrl = process.env.DATABASE_URL;
-  const sqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  let databaseUrl = process.env.DATABASE_URL;
+  const rawSqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  const sqlHost = resolveAccessibleSocketHost(rawSqlHost);
   const sqlUser = process.env.SQL_USER || process.env.PGUSER;
   const sqlPassword = process.env.SQL_PASSWORD || process.env.PGPASSWORD;
   const sqlDbName = process.env.SQL_DB_NAME || process.env.PGDATABASE;
   const sqlPort = process.env.SQL_PORT || process.env.PGPORT ? parseInt(process.env.SQL_PORT || process.env.PGPORT!, 10) : 5432;
 
+  // Validate databaseUrl: If it references a Unix domain socket, ensure that socket path actually exists.
+  if (databaseUrl) {
+    const socketInUrl = extractSocketFromUrl(databaseUrl);
+    if (socketInUrl) {
+      const resolvedSocket = resolveAccessibleSocketHost(socketInUrl);
+      if (resolvedSocket && isUnixSocketAccessible(resolvedSocket)) {
+        if (resolvedSocket !== socketInUrl) {
+          databaseUrl = databaseUrl.replace(encodeURIComponent(socketInUrl), encodeURIComponent(resolvedSocket)).replace(socketInUrl, resolvedSocket);
+        }
+      } else {
+        console.warn(`[PostgreSQL Pool] Bypassing DATABASE_URL pointing to non-existent Unix socket: ${socketInUrl}`);
+        databaseUrl = undefined;
+      }
+    }
+  }
+
   let poolConfig: PoolConfig | null = null;
 
-  // 1. Unix Domain Socket (/cloudsql/...)
-  const isUnixSocket = !!((sqlHost && sqlHost.startsWith('/')) || (databaseUrl && (databaseUrl.includes('/cloudsql') || databaseUrl.includes('host=%2Fcloudsql'))));
-  
-  // 2. Local Cloud SQL Auth Proxy (127.0.0.1 or localhost)
-  const isLocalProxy = !!((sqlHost && (sqlHost === 'localhost' || sqlHost === '127.0.0.1')) ||
-                         (databaseUrl && (databaseUrl.includes('@localhost') || databaseUrl.includes('@127.0.0.1'))));
+  // Prefer explicit Cloud SQL parameters (sqlHost + sqlUser + sqlDbName) if sqlHost is accessible or if databaseUrl was absent/invalid
+  const hasDirectCloudSql = Boolean(sqlHost && sqlUser && sqlDbName && (!sqlHost.startsWith('/') || isUnixSocketAccessible(sqlHost)));
 
-  if (databaseUrl) {
-    // Enforce verified TLS for remote PostgreSQL connections without rejectUnauthorized: false.
+  if (hasDirectCloudSql) {
+    const isUnixSocket = !!sqlHost?.startsWith('/');
+    const isLocalProxy = !!(sqlHost === 'localhost' || sqlHost === '127.0.0.1');
+
+    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
+    if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
+      sslConfig = {
+        rejectUnauthorized: true,
+        ...(process.env.CA_CERT ? { ca: process.env.CA_CERT } : {})
+      };
+    }
+
+    poolConfig = {
+      host: sqlHost,
+      user: sqlUser,
+      password: sqlPassword || '',
+      database: sqlDbName,
+      port: sqlHost?.startsWith('/') ? undefined : sqlPort,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+      ssl: sslConfig
+    };
+  } else if (databaseUrl) {
+    const isUnixSocket = databaseUrl.includes('/cloudsql') || databaseUrl.includes('host=%2Fcloudsql');
+    const isLocalProxy = databaseUrl.includes('@localhost') || databaseUrl.includes('@127.0.0.1');
+
     let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
     if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
       sslConfig = {
@@ -65,6 +154,9 @@ export function getPostgresPool(): Pool | null {
       ssl: sslConfig
     };
   } else if (sqlHost && sqlUser && sqlDbName) {
+    const isUnixSocket = !!sqlHost.startsWith('/');
+    const isLocalProxy = !!(sqlHost === 'localhost' || sqlHost === '127.0.0.1');
+
     let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
     if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
       sslConfig = {
@@ -102,11 +194,48 @@ export function getPostgresPool(): Pool | null {
   }
 }
 
+let adminPgPool: Pool | null = null;
+
+export function getAdminPostgresPool(): Pool | null {
+  if (adminPgPool) return adminPgPool;
+
+  const rawSqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  const sqlHost = resolveAccessibleSocketHost(rawSqlHost);
+  const sqlAdminUser = process.env.SQL_ADMIN_USER;
+  const sqlAdminPassword = process.env.SQL_ADMIN_PASSWORD;
+  const sqlDbName = process.env.SQL_DB_NAME || process.env.PGDATABASE;
+  const sqlPort = process.env.SQL_PORT || process.env.PGPORT ? parseInt(process.env.SQL_PORT || process.env.PGPORT!, 10) : 5432;
+
+  if (sqlAdminUser && sqlAdminPassword && sqlHost && sqlDbName) {
+    const isUnixSocket = !!(sqlHost.startsWith('/'));
+    try {
+      adminPgPool = new Pool({
+        host: sqlHost,
+        user: sqlAdminUser,
+        password: sqlAdminPassword,
+        database: sqlDbName,
+        port: isUnixSocket ? undefined : sqlPort,
+        max: 3,
+        connectionTimeoutMillis: 10000,
+        ssl: false
+      });
+      adminPgPool.on('error', (err) => {
+        console.error('[PostgreSQL Admin Pool] Unexpected error on idle client:', err.message);
+      });
+      return adminPgPool;
+    } catch (err: any) {
+      console.error('[PostgreSQL Admin Pool] Initialization error:', err.message);
+    }
+  }
+
+  return getPostgresPool();
+}
+
 /**
  * Auto-creates tables and migrations safely.
  */
 export async function initPostgresSchema(): Promise<boolean> {
-  const pool = getPostgresPool();
+  const pool = getAdminPostgresPool() || getPostgresPool();
   if (!pool) return false;
 
   const client = await pool.connect();
@@ -339,6 +468,9 @@ export async function initPostgresSchema(): Promise<boolean> {
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id VARCHAR(128);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS mode_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+      ALTER TABLE sessions ALTER COLUMN token TYPE TEXT;
+      ALTER TABLE users ALTER COLUMN tribe TYPE VARCHAR(128);
+      ALTER TABLE users ALTER COLUMN looking_for TYPE VARCHAR(255);
 
       CREATE TABLE IF NOT EXISTS vault_grants (
         owner_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -371,6 +503,17 @@ export async function initPostgresSchema(): Promise<boolean> {
       CREATE INDEX IF NOT EXISTS idx_store_sub_orig_tx ON store_subscriptions(original_transaction_id);
       CREATE INDEX IF NOT EXISTS idx_store_events_ext ON store_billing_events(provider, external_event_id);
     `);
+
+    // Ensure the application user has full DML permissions on all tables and sequences
+    const appUser = process.env.SQL_USER || process.env.PGUSER;
+    if (appUser && process.env.SQL_ADMIN_USER && appUser !== process.env.SQL_ADMIN_USER) {
+      await client.query(`
+        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${appUser}";
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${appUser}";
+      `);
+    }
 
     await client.query('COMMIT');
     isInitialized = true;
@@ -483,10 +626,16 @@ export class PostgresStoreAdapter {
           mode_updated_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP`,
         [
-          user.id, user.email, user.profile.displayName, user.profile.age, user.role, user.status, p.bio || null,
-          (p as any).identityRole || (p as any).sexualRole || null,
-          p.tribes ? JSON.stringify(p.tribes) : ((p as any).tribe || null),
-          p.lookingFor ? JSON.stringify(p.lookingFor) : null,
+          user.id,
+          user.email,
+          p.displayName,
+          p.age,
+          user.role,
+          user.status,
+          p.bio || null,
+          p.identityRole || (p as any).sexualRole || 'Versatile',
+          JSON.stringify(p.tribes || []),
+          JSON.stringify(p.lookingFor || []),
           (p as any).vibe || null,
           p.interests ? JSON.stringify(p.interests) : null,
           this.serializeLocation(p),
@@ -496,7 +645,7 @@ export class PostgresStoreAdapter {
           p.premiumTier || 'none',
           JSON.stringify({ ...(p as any).privacy, locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
           p.userMode || 'ONLINE',
-          user.createdAt
+          user.createdAt || new Date().toISOString()
         ]
       );
 
@@ -917,8 +1066,43 @@ export class PostgresStoreAdapter {
     };
     const lookingForArr = parseList(row.looking_for, ['Dating', 'Friends']);
     const tribesArr = parseList(row.tribe, ['Queer']);
-    const location = row.location && typeof row.location === 'object' ? row.location : {};
     const privacy = row.privacy && typeof row.privacy === 'object' ? row.privacy : {};
+
+    let interests: string[] = [];
+    if (typeof row.interests === 'string') {
+      try { interests = JSON.parse(row.interests); } catch { interests = []; }
+    } else if (Array.isArray(row.interests)) {
+      interests = row.interests;
+    }
+
+    let photos: any[] = [];
+    if (typeof row.photos === 'string') {
+      try { photos = JSON.parse(row.photos); } catch { photos = []; }
+    } else if (Array.isArray(row.photos)) {
+      photos = row.photos;
+    }
+
+    let locationStr = 'Warsaw';
+    let lat: number | undefined = undefined;
+    let lng: number | undefined = undefined;
+    if (typeof row.location === 'object' && row.location !== null) {
+      locationStr = row.location.city || row.location.address || row.location.name || 'Warsaw';
+      lat = typeof row.location.lat === 'number' ? row.location.lat : undefined;
+      lng = typeof row.location.lng === 'number' ? row.location.lng : undefined;
+    } else if (typeof row.location === 'string') {
+      try {
+        const parsedLoc = JSON.parse(row.location);
+        if (typeof parsedLoc === 'object' && parsedLoc !== null) {
+          locationStr = parsedLoc.city || parsedLoc.address || parsedLoc.name || row.location;
+          lat = typeof parsedLoc.lat === 'number' ? parsedLoc.lat : undefined;
+          lng = typeof parsedLoc.lng === 'number' ? parsedLoc.lng : undefined;
+        } else {
+          locationStr = row.location;
+        }
+      } catch {
+        locationStr = row.location;
+      }
+    }
 
     return {
       id: row.id,
@@ -938,13 +1122,13 @@ export class PostgresStoreAdapter {
         identityRole: row.sexual_role || 'Versatile',
         tribes: tribesArr,
         lookingFor: lookingForArr,
-        interests: typeof row.interests === 'string' ? JSON.parse(row.interests) : row.interests || [],
-        location: location.city || (typeof row.location === 'string' ? row.location : ''),
-        lat: typeof location.lat === 'number' && Number.isFinite(location.lat) && Math.abs(location.lat) <= 90 ? location.lat : undefined,
-        lng: typeof location.lng === 'number' && Number.isFinite(location.lng) && Math.abs(location.lng) <= 180 ? location.lng : undefined,
+        interests,
+        location: locationStr,
+        lat: typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 ? lat : undefined,
+        lng: typeof lng === 'number' && Number.isFinite(lng) && Math.abs(lng) <= 180 ? lng : undefined,
         locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(privacy.locationPrivacy) ? privacy.locationPrivacy : 'APPROXIMATE',
         distanceKm: 0,
-        photos: typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos || [],
+        photos,
         verified: !!row.is_verified,
         isOnline: true,
         lastActiveMinutesAgo: 0,

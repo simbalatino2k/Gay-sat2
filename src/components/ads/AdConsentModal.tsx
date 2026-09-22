@@ -20,14 +20,14 @@ export const AdConsentModal: React.FC<AdConsentModalProps> = ({
   if (!isOpen) return null;
 
   const handleTogglePersonalized = (enabled: boolean) => {
-    const updated = saveAdConsent({ allowPersonalizedAds: enabled });
+    const updated = saveAdConsent({ consentGiven: true, allowPersonalizedAds: enabled });
     setConsent(updated);
     setSavedNotice(true);
     setTimeout(() => setSavedNotice(false), 2000);
   };
 
   const handleToggleAnalytics = (enabled: boolean) => {
-    const updated = saveAdConsent({ allowAnalytics: enabled });
+    const updated = saveAdConsent({ consentGiven: true, allowAnalytics: enabled });
     setConsent(updated);
     setSavedNotice(true);
     setTimeout(() => setSavedNotice(false), 2000);

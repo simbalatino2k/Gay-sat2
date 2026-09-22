@@ -8,6 +8,8 @@
 
 import { Pool, PoolConfig } from 'pg';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 interface TestResult {
   suite: string;
@@ -19,17 +21,85 @@ interface TestResult {
 
 const results: TestResult[] = [];
 
+function isUnixSocketAccessible(sockPath?: string): boolean {
+  if (!sockPath) return false;
+  try {
+    if (fs.existsSync(sockPath)) return true;
+    if (fs.existsSync(path.join(sockPath, '.s.PGSQL.5432'))) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function extractSocketFromUrl(urlStr?: string): string | null {
+  if (!urlStr) return null;
+  try {
+    const match = urlStr.match(/[?&]host=([^&]+)/);
+    if (match) {
+      const decoded = decodeURIComponent(match[1]);
+      if (decoded.startsWith('/')) return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+function resolveAccessibleSocketHost(host?: string): string | undefined {
+  if (!host) return undefined;
+  if (!host.startsWith('/')) return host;
+  if (isUnixSocketAccessible(host)) return host;
+
+  if (host.startsWith('/cloudsql/')) {
+    const alt = `/app${host}`;
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+  if (host.startsWith('/app/cloudsql/')) {
+    const alt = host.replace('/app/cloudsql/', '/cloudsql/');
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+
+  return host;
+}
+
 function getTestPool(): Pool | null {
-  const databaseUrl = process.env.DATABASE_URL;
-  const sqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  let databaseUrl = process.env.DATABASE_URL;
+  const rawSqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  const sqlHost = resolveAccessibleSocketHost(rawSqlHost);
   const sqlUser = process.env.SQL_USER || process.env.PGUSER;
   const sqlPassword = process.env.SQL_PASSWORD || process.env.PGPASSWORD;
   const sqlDbName = process.env.SQL_DB_NAME || process.env.PGDATABASE;
   const sqlPort = process.env.SQL_PORT || process.env.PGPORT ? parseInt(process.env.SQL_PORT || process.env.PGPORT!, 10) : 5432;
 
+  // Validate databaseUrl: If it references a Unix domain socket, ensure that socket path actually exists.
+  if (databaseUrl) {
+    const socketInUrl = extractSocketFromUrl(databaseUrl);
+    if (socketInUrl) {
+      const resolvedSocket = resolveAccessibleSocketHost(socketInUrl);
+      if (resolvedSocket && isUnixSocketAccessible(resolvedSocket)) {
+        if (resolvedSocket !== socketInUrl) {
+          databaseUrl = databaseUrl.replace(encodeURIComponent(socketInUrl), encodeURIComponent(resolvedSocket)).replace(socketInUrl, resolvedSocket);
+        }
+      } else {
+        databaseUrl = undefined;
+      }
+    }
+  }
+
   let poolConfig: PoolConfig | null = null;
 
-  if (databaseUrl) {
+  const hasDirectCloudSql = Boolean(sqlHost && sqlUser && sqlDbName && (!sqlHost.startsWith('/') || isUnixSocketAccessible(sqlHost)));
+
+  if (hasDirectCloudSql) {
+    poolConfig = {
+      host: sqlHost,
+      user: sqlUser,
+      password: sqlPassword || '',
+      database: sqlDbName,
+      port: sqlHost?.startsWith('/') ? undefined : sqlPort,
+      max: 5,
+      connectionTimeoutMillis: 5000
+    };
+  } else if (databaseUrl) {
     poolConfig = {
       connectionString: databaseUrl,
       max: 5,

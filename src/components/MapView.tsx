@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { UserAccount, UserProfile, LocationPrivacyMode } from '../types';
+import { UserAccount, UserProfile, LocationPrivacyMode, QueerVenue } from '../types';
 import {
   LocateFixed,
   Shield,
@@ -17,7 +17,15 @@ import {
   AlertTriangle,
   Radio,
   ChevronRight,
-  Info
+  Info,
+  Flame,
+  Navigation,
+  Compass,
+  ExternalLink,
+  Clock,
+  MapPin,
+  Waves,
+  Search
 } from 'lucide-react';
 
 // MapLibre 6 requires an explicit bundled worker URL with Vite.
@@ -36,6 +44,26 @@ interface MapViewProps {
 const DEFAULT_CENTER: [number, number] = [21.0122, 52.2297];
 const DEFAULT_ZOOM = 12.5;
 
+export interface CityPreset {
+  id: string;
+  name: string;
+  flag: string;
+  lat: number;
+  lng: number;
+  zoom: number;
+}
+
+export const POPULAR_CITIES: CityPreset[] = [
+  { id: 'zurich', name: 'Zurych', flag: '🇨🇭', lat: 47.3734, lng: 8.5447, zoom: 13.8 },
+  { id: 'warsaw', name: 'Warszawa', flag: '🇵🇱', lat: 52.2297, lng: 21.0122, zoom: 12.5 },
+  { id: 'berlin', name: 'Berlin', flag: '🇩🇪', lat: 52.5200, lng: 13.4050, zoom: 12.5 },
+  { id: 'london', name: 'Londyn', flag: '🇬🇧', lat: 51.5074, lng: -0.1278, zoom: 12.5 },
+  { id: 'amsterdam', name: 'Amsterdam', flag: '🇳🇱', lat: 52.3676, lng: 4.9041, zoom: 12.5 },
+  { id: 'paris', name: 'Paryż', flag: '🇫🇷', lat: 48.8566, lng: 2.3522, zoom: 12.5 },
+  { id: 'barcelona', name: 'Barcelona', flag: '🇪🇸', lat: 41.3879, lng: 2.1699, zoom: 12.5 },
+  { id: 'krakow', name: 'Kraków', flag: '🇵🇱', lat: 50.0647, lng: 19.9450, zoom: 13.0 }
+];
+
 // Primary vector style from OpenFreeMap (Free for production use with OpenStreetMap attribution)
 // Optional override available via VITE_MAP_STYLE_URL for enterprise or self-hosted tile servers
 const PRIMARY_STYLE_URL =
@@ -52,10 +80,16 @@ export const MapView: React.FC<MapViewProps> = ({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const venueMarkersRef = useRef<maplibregl.Marker[]>([]);
   const userMarkerRef = useRef<maplibregl.Marker | null>(null);
 
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [venues, setVenues] = useState<QueerVenue[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<UserProfile | null>(null);
+  const [selectedVenue, setSelectedVenue] = useState<QueerVenue | null>(null);
+  const [venueFilter, setVenueFilter] = useState<'all' | 'cruising' | 'sauna' | 'club' | 'bar'>('all');
+  const [isAutoUpdating, setIsAutoUpdating] = useState(true);
+  const [lastAutoUpdate, setLastAutoUpdate] = useState<Date>(new Date());
   const [isLocating, setIsLocating] = useState(false);
   const [mapLoading, setMapLoading] = useState(true);
   const [mapGeneration, setMapGeneration] = useState(0);
@@ -63,10 +97,21 @@ export const MapView: React.FC<MapViewProps> = ({
   const [showPrivacyModal, setShowPrivacyModal] = useState(false);
   const [isUpdatingPrivacy, setIsUpdatingPrivacy] = useState(false);
   const [notice, setNotice] = useState<{ message: string; type: 'info' | 'success' | 'warning' } | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCity, setSelectedCity] = useState<string>('all');
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(() => {
     if (typeof currentUser?.profile?.lat === 'number' && typeof currentUser?.profile?.lng === 'number') {
       return { lat: currentUser.profile.lat, lng: currentUser.profile.lng };
     }
+    try {
+      const stored = localStorage.getItem('aura_last_known_coords');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed?.lat && parsed?.lng && !isNaN(parsed.lat) && !isNaN(parsed.lng)) {
+          return parsed;
+        }
+      }
+    } catch (e) {}
     return null;
   });
 
@@ -100,9 +145,92 @@ export const MapView: React.FC<MapViewProps> = ({
       setProfiles(list);
     } catch (err: any) {
       console.warn('[MapView] Nie udało się pobrać profili:', err.message || err);
-      showNotice('Nie można teraz pobrać profili. Możesz nadal przeglądać mapę.', 'warning');
     }
-  }, [authToken, showNotice]);
+  }, [authToken]);
+
+  // Fetch LGBTQ+ venues & cruising spots from backend
+  const fetchVenues = useCallback(async (customCoords?: { lat: number; lng: number }, queryOverride?: string) => {
+    try {
+      const coords = customCoords || userCoordsRef.current;
+      const params = new URLSearchParams();
+      const q = queryOverride !== undefined ? queryOverride : searchQuery;
+      if (q && q.trim()) {
+        params.append('q', q.trim());
+      }
+      if (coords) {
+        params.append('lat', coords.lat.toString());
+        params.append('lng', coords.lng.toString());
+        params.append('radiusKm', '65');
+      }
+      if (venueFilter === 'cruising') {
+        params.append('cruisingOnly', 'true');
+      } else if (venueFilter !== 'all') {
+        params.append('category', venueFilter);
+      }
+
+      const res = await fetch(`/api/venues?${params.toString()}`);
+      if (!res.ok) throw new Error('Błąd pobierania miejsc LGBT+');
+      const data = await res.json();
+      if (Array.isArray(data.venues)) {
+        setVenues(data.venues);
+        setLastAutoUpdate(new Date());
+      }
+    } catch (err: any) {
+      console.warn('[MapView] Błąd pobierania miejsc LGBT+ / cruisingu:', err);
+    }
+  }, [venueFilter, searchQuery]);
+
+  const handleSelectCity = (city: CityPreset) => {
+    setSelectedCity(city.id);
+    setSearchQuery('');
+    if (mapRef.current) {
+      mapRef.current.flyTo({
+        center: [city.lng, city.lat],
+        zoom: city.zoom,
+        essential: true,
+        duration: 1200
+      });
+    }
+    fetchVenues({ lat: city.lat, lng: city.lng }, '');
+    showNotice(`Przełączono mapę na: ${city.name} ${city.flag}`, 'info');
+  };
+
+  const handleSearchSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) {
+      fetchVenues(undefined, '');
+      return;
+    }
+
+    if (q === 'zurych' || q === 'zurich' || q === 'zrh' || q.includes('zurych') || q.includes('zurich')) {
+      handleSelectCity(POPULAR_CITIES[0]);
+      return;
+    }
+
+    const matchingCity = POPULAR_CITIES.find(c => c.name.toLowerCase().includes(q) || c.id.includes(q));
+    if (matchingCity) {
+      handleSelectCity(matchingCity);
+      return;
+    }
+
+    fetchVenues(undefined, q).then(() => {
+      showNotice(`Wyniki wyszukiwania dla: "${searchQuery}"`, 'info');
+    });
+  };
+
+  // Auto-update locations, cruising spots & profiles every 30 seconds
+  useEffect(() => {
+    fetchVenues();
+    if (!isAutoUpdating) return;
+
+    const interval = setInterval(() => {
+      fetchVenues();
+      fetchProfiles();
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, [fetchVenues, fetchProfiles, isAutoUpdating]);
 
   // Apply AURA custom colors: pure dark background, purple roads, high-contrast labels
   const applyAuraTheme = useCallback((map: maplibregl.Map) => {
@@ -366,6 +494,82 @@ export const MapView: React.FC<MapViewProps> = ({
     });
   }, [profiles, currentUser, mapGeneration]);
 
+  // Render LGBT+ venues & Cruising spots markers on the map
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    // Clear previous venue markers
+    venueMarkersRef.current.forEach(m => m.remove());
+    venueMarkersRef.current = [];
+
+    venues.forEach(venue => {
+      const isCruising = venue.isCruising || venue.category === 'cruising';
+      const isSauna = venue.category === 'sauna';
+
+      const el = document.createElement('div');
+      el.className =
+        'aura-venue-marker group relative cursor-pointer transform hover:scale-115 active:scale-95 transition-all duration-200 z-10';
+
+      let pinGradient = 'from-purple-600 to-indigo-600 border-purple-300';
+      let pinShadow = 'shadow-[0_0_12px_rgba(168,85,247,0.6)]';
+      let iconHtml = `📍`;
+      let typeBadge = 'LGBT+';
+
+      if (isCruising) {
+        pinGradient = 'from-amber-500 via-rose-600 to-red-600 border-amber-300';
+        pinShadow = 'shadow-[0_0_18px_rgba(244,63,94,0.95)]';
+        iconHtml = `🔥`;
+        typeBadge = 'CRUISING';
+      } else if (isSauna) {
+        pinGradient = 'from-cyan-500 via-blue-600 to-indigo-600 border-cyan-300';
+        pinShadow = 'shadow-[0_0_15px_rgba(6,182,212,0.85)]';
+        iconHtml = `♨️`;
+        typeBadge = 'SAUNA';
+      } else if (venue.category === 'club') {
+        pinGradient = 'from-fuchsia-600 to-purple-700 border-fuchsia-300';
+        pinShadow = 'shadow-[0_0_14px_rgba(217,70,239,0.7)]';
+        iconHtml = `🪩`;
+        typeBadge = 'KLUB';
+      } else if (venue.category === 'bar') {
+        pinGradient = 'from-violet-600 to-purple-800 border-violet-300';
+        iconHtml = `🍸`;
+        typeBadge = 'BAR';
+      }
+
+      el.innerHTML = `
+        <div class="relative flex flex-col items-center">
+          ${isCruising ? `<div class="absolute -inset-1 rounded-2xl bg-rose-500/40 animate-ping"></div>` : ''}
+          <div class="relative w-9 h-9 rounded-2xl bg-gradient-to-tr ${pinGradient} border-2 ${pinShadow} flex items-center justify-center text-sm">
+            <span>${iconHtml}</span>
+          </div>
+          <div class="mt-1 px-1.5 py-0.5 rounded-md bg-[#05060a]/95 border ${
+            isCruising ? 'border-amber-400/80 text-amber-300 font-black' : 'border-white/20 text-slate-200 font-bold'
+          } text-[8.5px] uppercase tracking-wider shadow-xl whitespace-nowrap">
+            ${typeBadge}
+          </div>
+        </div>
+      `;
+
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setSelectedProfile(null);
+        setSelectedVenue(venue);
+        map.flyTo({
+          center: [venue.lng, venue.lat],
+          zoom: Math.max(map.getZoom(), 14.5),
+          duration: 700
+        });
+      });
+
+      const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+        .setLngLat([venue.lng, venue.lat])
+        .addTo(map);
+
+      venueMarkersRef.current.push(marker);
+    });
+  }, [venues, mapGeneration]);
+
   // Handle "Moja lokalizacja" click
   // Critical requirement: ONLY ask for geolocation on explicit user click, refusal never blocks map!
   const handleLocateMe = () => {
@@ -420,7 +624,8 @@ export const MapView: React.FC<MapViewProps> = ({
         }
 
         fetchProfiles();
-        showNotice('Zlokalizowano pomyślnie!', 'success');
+        fetchVenues({ lat: latitude, lng: longitude });
+        showNotice('Zlokalizowano! Zaktualizowano miejsca cruisingu w okolicy.', 'success');
       },
       (err) => {
         setIsLocating(false);
@@ -474,40 +679,158 @@ export const MapView: React.FC<MapViewProps> = ({
   return (
     <div className="relative w-full h-[calc(100vh-8.5rem)] md:h-[calc(100vh-7rem)] rounded-3xl overflow-hidden border border-white/[0.08] shadow-2xl flex flex-col bg-[#05060a]">
       {/* Top Floating Control Bar */}
-      <div className="absolute top-3 inset-x-3 z-20 flex items-center justify-between gap-2 pointer-events-none">
-        {/* Radar Status Badge */}
-        <div className="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 shadow-lg">
-          <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
-            Radar AURA
-          </span>
-          <span className="text-[11px] text-purple-300 font-medium px-1.5 py-0.5 rounded-md bg-purple-500/15 border border-purple-500/20">
-            {profiles.length} osób
-          </span>
+      <div className="absolute top-3 inset-x-3 z-20 flex flex-col gap-2 pointer-events-none">
+        <div className="flex items-center justify-between gap-2">
+          {/* Radar Status Badge */}
+          <div className="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 shadow-lg">
+            <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+              Radar AURA
+            </span>
+            <span className="text-[11px] text-purple-300 font-medium px-1.5 py-0.5 rounded-md bg-purple-500/15 border border-purple-500/20">
+              {profiles.length} osób
+            </span>
+            <span className="text-[10px] text-amber-400 font-bold px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 flex items-center gap-1">
+              <Flame className="w-3 h-3" /> {venues.length} miejsc
+            </span>
+          </div>
+
+          {/* Privacy Selector Trigger */}
+          <button
+            onClick={() => setShowPrivacyModal(true)}
+            className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 hover:border-purple-500/40 text-slate-200 hover:text-white transition-all shadow-lg active:scale-95 text-xs font-medium"
+            title="Ustawienia prywatności lokalizacji"
+          >
+            {currentPrivacy === 'HIDDEN' ? (
+              <EyeOff className="w-3.5 h-3.5 text-rose-400" />
+            ) : currentPrivacy === 'EXACT' ? (
+              <Shield className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <Eye className="w-3.5 h-3.5 text-purple-400" />
+            )}
+            <span className="hidden sm:inline">Prywatność:</span>
+            <span className="font-bold text-purple-300">
+              {currentPrivacy === 'HIDDEN'
+                ? 'Ukryta'
+                : currentPrivacy === 'EXACT'
+                ? 'Dokładna'
+                : 'Przybliżona'}
+            </span>
+          </button>
         </div>
 
-        {/* Privacy Selector Trigger */}
-        <button
-          onClick={() => setShowPrivacyModal(true)}
-          className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 hover:border-purple-500/40 text-slate-200 hover:text-white transition-all shadow-lg active:scale-95 text-xs font-medium"
-          title="Ustawienia prywatności lokalizacji"
-        >
-          {currentPrivacy === 'HIDDEN' ? (
-            <EyeOff className="w-3.5 h-3.5 text-rose-400" />
-          ) : currentPrivacy === 'EXACT' ? (
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
-          ) : (
-            <Eye className="w-3.5 h-3.5 text-purple-400" />
-          )}
-          <span className="hidden sm:inline">Prywatność:</span>
-          <span className="font-bold text-purple-300">
-            {currentPrivacy === 'HIDDEN'
-              ? 'Ukryta'
-              : currentPrivacy === 'EXACT'
-              ? 'Dokładna'
-              : 'Przybliżona'}
-          </span>
-        </button>
+        {/* City Switcher & Search Bar */}
+        <div className="pointer-events-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 bg-[#070810]/92 backdrop-blur-2xl p-1.5 rounded-2xl border border-white/10 shadow-xl">
+          {/* Quick Search Input */}
+          <form onSubmit={handleSearchSubmit} className="relative flex-1 flex items-center">
+            <Search className="w-3.5 h-3.5 text-purple-400 absolute left-2.5 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Szukaj: Zurych, klub, sauna, cruising..."
+              className="w-full pl-8 pr-7 py-1.5 bg-black/40 border border-white/10 focus:border-purple-500 rounded-xl text-xs text-white placeholder-slate-400 outline-none transition-all"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  fetchVenues(undefined, '');
+                }}
+                className="absolute right-2 text-slate-400 hover:text-white p-0.5 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </form>
+
+          {/* Quick City Presets */}
+          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-full">
+            {POPULAR_CITIES.map((c) => {
+              const isActive = selectedCity === c.id;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => handleSelectCity(c)}
+                  className={`px-2.5 py-1 rounded-xl text-[11px] font-bold whitespace-nowrap flex items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                    isActive
+                      ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(168,85,247,0.6)] border border-purple-300'
+                      : 'bg-white/[0.04] text-slate-300 hover:text-white hover:bg-white/[0.08] border border-white/10'
+                  }`}
+                >
+                  <span>{c.flag}</span>
+                  <span>{c.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Quick Venue & Cruising Filters Bar */}
+        <div className="pointer-events-auto flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+          <button
+            onClick={() => setVenueFilter('cruising')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+              venueFilter === 'cruising'
+                ? 'bg-gradient-to-r from-amber-500 to-rose-600 text-white shadow-[0_0_15px_rgba(244,63,94,0.6)] border border-amber-300'
+                : 'bg-[#070810]/90 backdrop-blur-xl text-amber-300/90 border border-amber-500/30 hover:border-amber-400'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+            <span>Gay Cruising</span>
+          </button>
+
+          <button
+            onClick={() => setVenueFilter('sauna')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+              venueFilter === 'sauna'
+                ? 'bg-cyan-600 text-white shadow-[0_0_12px_rgba(6,182,212,0.6)] border border-cyan-300'
+                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-cyan-400/50'
+            }`}
+          >
+            <span>♨️ Sauny</span>
+          </button>
+
+          <button
+            onClick={() => setVenueFilter('club')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+              venueFilter === 'club'
+                ? 'bg-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.6)] border border-fuchsia-300'
+                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-fuchsia-400/50'
+            }`}
+          >
+            <span>🪩 Kluby</span>
+          </button>
+
+          <button
+            onClick={() => setVenueFilter('bar')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+              venueFilter === 'bar'
+                ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(139,92,246,0.6)] border border-violet-300'
+                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-violet-400/50'
+            }`}
+          >
+            <span>🍸 Bary</span>
+          </button>
+
+          <button
+            onClick={() => setVenueFilter('all')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+              venueFilter === 'all'
+                ? 'bg-purple-600 text-white shadow-[0_0_12px_rgba(168,85,247,0.6)] border border-purple-300'
+                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-purple-400/50'
+            }`}
+          >
+            <span>🌈 Wszystkie</span>
+          </button>
+
+          <div className="ml-auto hidden sm:flex items-center gap-1 text-[10px] text-purple-300/80 px-2 py-1 rounded-lg bg-[#070810]/80 border border-white/10">
+            <RefreshCw className="w-2.5 h-2.5 text-emerald-400 animate-spin" />
+            <span>Aktualizacja na żywo</span>
+          </div>
+        </div>
       </div>
 
       {/* Notice Toast */}
@@ -581,6 +904,131 @@ export const MapView: React.FC<MapViewProps> = ({
           <span>Moja lokalizacja</span>
         </button>
       </div>
+
+      {/* Selected LGBT / Gay Cruising Venue Preview Card */}
+      {selectedVenue && (
+        <div className="absolute bottom-3 inset-x-3 sm:left-auto sm:right-4 sm:w-96 z-20 animate-slide-up">
+          <div className="p-4 rounded-3xl bg-[#080a14]/95 backdrop-blur-2xl border border-white/15 shadow-[0_16px_45px_rgba(0,0,0,0.85)] flex flex-col gap-3.5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="relative w-12 h-12 rounded-2xl overflow-hidden border border-white/15 bg-gradient-to-br from-purple-950 to-indigo-950 shrink-0 flex items-center justify-center text-xl shadow-inner">
+                  {selectedVenue.imageUrl ? (
+                    <img
+                      src={selectedVenue.imageUrl}
+                      alt={selectedVenue.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : selectedVenue.isCruising || selectedVenue.category === 'cruising' ? (
+                    <span className="text-2xl animate-pulse">🔥</span>
+                  ) : selectedVenue.category === 'sauna' ? (
+                    <span className="text-2xl">♨️</span>
+                  ) : (
+                    <span className="text-2xl">📍</span>
+                  )}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="font-bold text-sm text-white truncate">
+                      {selectedVenue.name}
+                    </h4>
+                    {selectedVenue.isCruising ? (
+                      <span className="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/20 to-rose-500/20 border border-amber-500/40 text-amber-300 font-extrabold text-[9px] tracking-wide uppercase">
+                        Gay Cruising
+                      </span>
+                    ) : selectedVenue.category === 'sauna' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-bold text-[9px] tracking-wide uppercase">
+                        Sauna dla Mężczyzn
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-500/40 text-purple-300 font-bold text-[9px] tracking-wide uppercase">
+                        {selectedVenue.category}
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+                    <MapPin className="w-3 h-3 text-purple-400 shrink-0" />
+                    <span className="truncate">{selectedVenue.address}{selectedVenue.neighborhood ? `, ${selectedVenue.neighborhood}` : ''}</span>
+                    {typeof selectedVenue.distanceKm === 'number' && (
+                      <span className="text-emerald-400 font-bold ml-auto shrink-0">
+                        {selectedVenue.distanceKm.toFixed(1)} km
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setSelectedVenue(null)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                title="Zamknij"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Description */}
+            <p className="text-xs text-slate-300 line-clamp-3 leading-relaxed">
+              {selectedVenue.description}
+            </p>
+
+            {/* Opening Hours & Cruising Details */}
+            <div className="space-y-1.5">
+              {selectedVenue.openingHours && (
+                <div className="flex items-center gap-1.5 text-[11px] text-slate-300 bg-white/[0.03] px-2.5 py-1.5 rounded-xl border border-white/[0.08]">
+                  <Clock className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                  <span className="font-semibold text-slate-400">Godziny:</span>
+                  <span className="font-medium text-slate-200">{selectedVenue.openingHours}</span>
+                </div>
+              )}
+
+              {/* Tags / Amenities */}
+              {selectedVenue.tags && selectedVenue.tags.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {selectedVenue.tags.map((tag, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 text-[10px] text-slate-300 font-medium"
+                    >
+                      #{tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Action Buttons: Navigate & Check Nearby */}
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <a
+                href={`https://www.google.com/maps/dir/?api=1&destination=${selectedVenue.lat},${selectedVenue.lng}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:brightness-110 text-white text-xs font-bold shadow-md transition-all active:scale-95"
+              >
+                <Navigation className="w-3.5 h-3.5 text-amber-300" />
+                <span>Trasa (Google Maps)</span>
+              </a>
+
+              <button
+                onClick={() => {
+                  if (mapRef.current) {
+                    mapRef.current.flyTo({
+                      center: [selectedVenue.lng, selectedVenue.lat],
+                      zoom: 16,
+                      duration: 800
+                    });
+                  }
+                }}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 hover:text-white text-xs font-semibold border border-white/10 transition-all active:scale-95 cursor-pointer"
+              >
+                <Compass className="w-3.5 h-3.5 text-purple-400" />
+                <span>Przybliż na mapie</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Selected Profile Preview Card (Requirement 5 & 6) */}
       {selectedProfile && (

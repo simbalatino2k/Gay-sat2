@@ -12,7 +12,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { OnboardingFlow } from './components/OnboardingFlow';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { MapView } from './components/MapView';
-import { Shield, ShieldCheck, Sparkles, SlidersHorizontal, Compass, Heart, MessageSquare, User, Settings, Lock, Radio, MapPin } from 'lucide-react';
+import { Shield, ShieldCheck, Sparkles, SlidersHorizontal, Compass, Heart, MessageSquare, User, Settings, Lock, Radio, MapPin, Flame } from 'lucide-react';
 import { AuraLogo, AuraLogoIcon } from './components/AuraLogo';
 import { motion, AnimatePresence } from 'motion/react';
 import { onAuthStateChanged } from 'firebase/auth';
@@ -20,6 +20,8 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
 import { formatUserAccount, logoutFirebase } from './services/firebaseService';
 import { useBackgroundNotifications } from './hooks/useBackgroundNotifications';
+import { PermissionsPromptModal } from './components/PermissionsPromptModal';
+import { PermissionResults } from './services/permissionsService';
 
 export default function App() {
   const [isAgeVerified, setIsAgeVerified] = useState<boolean>(() => {
@@ -29,6 +31,8 @@ export default function App() {
   const [token, setToken] = useState<string | null>(() => {
     return localStorage.getItem('aura_auth_token');
   });
+
+  const [showPermissionsModal, setShowPermissionsModal] = useState<boolean>(false);
 
   // Background Push Notifications (Desktop / Hidden Tab)
   useBackgroundNotifications(token);
@@ -126,13 +130,37 @@ export default function App() {
   const handleAgeVerify = () => {
     localStorage.setItem('aura_18plus_verified', 'true');
     setIsAgeVerified(true);
+    // Pytaj przy 1. uruchomieniu o zgody systemowe
+    if (!localStorage.getItem('aura_permissions_prompted_once')) {
+      setShowPermissionsModal(true);
+    }
   };
+
+  // Automatyczne zapytanie o zgody systemowe przy 1. uruchomieniu aplikacji
+  useEffect(() => {
+    if (isAgeVerified && !localStorage.getItem('aura_permissions_prompted_once')) {
+      setShowPermissionsModal(true);
+    }
+  }, [isAgeVerified]);
 
   const handleLoginSuccess = (newToken: string, user: UserAccount) => {
     localStorage.setItem('aura_auth_token', newToken);
     setToken(newToken);
     setCurrentUser(user);
+
+    // Zgodnie z wymaganiem: przy logowaniu odpytaj o zgody jeśli nie były jeszcze przyznane
+    if (!localStorage.getItem('aura_permissions_prompted_once')) {
+      setShowPermissionsModal(true);
+    }
   };
+
+  // Display an explanation; browser requests require an explicit user action.
+  useEffect(() => {
+    if (currentUser && token && !sessionStorage.getItem('aura_permissions_prompted_session')) {
+      sessionStorage.setItem('aura_permissions_prompted_session', 'true');
+      if (!localStorage.getItem('aura_permissions_prompted_once')) setShowPermissionsModal(true);
+    }
+  }, [currentUser, token]);
 
   const handleLogout = () => {
     logoutFirebase().catch(() => {});
@@ -183,7 +211,23 @@ export default function App() {
 
   // Login / Registration flow if not authenticated
   if (!token || !currentUser) {
-    return <OnboardingFlow onComplete={({ token, user }) => handleLoginSuccess(token, user)} />;
+    return (
+      <>
+        <OnboardingFlow onComplete={({ token, user }) => handleLoginSuccess(token, user)} />
+        <PermissionsPromptModal
+          isOpen={showPermissionsModal}
+          authToken={token}
+          onClose={() => {
+            localStorage.setItem('aura_permissions_prompted_once', 'true');
+            setShowPermissionsModal(false);
+          }}
+          onCompleted={() => {
+            localStorage.setItem('aura_permissions_prompted_once', 'true');
+            setShowPermissionsModal(false);
+          }}
+        />
+      </>
+    );
   }
 
   const isAdmin = currentUser?.role === 'SUPERADMIN' || currentUser?.role === 'MODERATOR';
@@ -511,7 +555,25 @@ export default function App() {
           }}
         />
       )}
+
+      {/* System Permissions Request Modal */}
+      <PermissionsPromptModal
+        isOpen={showPermissionsModal}
+        authToken={token}
+        onClose={() => {
+          localStorage.setItem('aura_permissions_prompted_once', 'true');
+          setShowPermissionsModal(false);
+        }}
+        onCompleted={(results) => {
+          localStorage.setItem('aura_permissions_prompted_once', 'true');
+          setShowPermissionsModal(false);
+          if (results.coords && currentUser?.profile) {
+            currentUser.profile.lat = results.coords.lat;
+            currentUser.profile.lng = results.coords.lng;
+            setCurrentUser({ ...currentUser });
+          }
+        }}
+      />
     </div>
   );
 }
-

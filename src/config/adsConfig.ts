@@ -29,9 +29,9 @@ export const ADS_CONFIG: AdsConfiguration = {
 export const AD_CONSENT_STORAGE_KEY = 'aura_eprivacy_ad_consent';
 
 export const DEFAULT_AD_CONSENT: AdConsentState = {
-  consentGiven: true, // implicit basic consent for contextual ads under legitimate interest
+  consentGiven: false,
   allowPersonalizedAds: false, // strictly false until explicit GDPR opt-in
-  allowAnalytics: true,
+  allowAnalytics: false,
   updatedAt: new Date().toISOString(),
 };
 
