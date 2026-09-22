@@ -281,7 +281,13 @@ class UnifiedBillingClient {
    */
   private async purchaseWebStripe(productId: string, token: string): Promise<BillingActionResult> {
     try {
-      const planId = productId.includes('yearly') ? 'aura_vip_annual' : 'aura_vip_monthly';
+      const plans: Record<string, string> = {
+        [STORE_PRODUCT_IDS.MONTHLY]: 'aura_vip_monthly',
+        [STORE_PRODUCT_IDS.THREE_MONTH]: 'aura_vip_three_month',
+        [STORE_PRODUCT_IDS.YEARLY]: 'aura_vip_annual'
+      };
+      if (!Object.hasOwn(plans, productId)) throw new Error('Unknown subscription product');
+      const planId = plans[productId];
       const res = await fetch('/api/stripe/create-checkout-session', {
         method: 'POST',
         headers: {

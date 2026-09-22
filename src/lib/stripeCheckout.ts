@@ -3,6 +3,7 @@ import type Stripe from 'stripe';
 export function buildStripeCheckout(userId: string, planId: unknown, env: Record<string, string | undefined>): Stripe.Checkout.SessionCreateParams {
   const plans: Record<string, string | undefined> = {
     aura_vip_monthly: env.STRIPE_PRICE_MONTHLY,
+    aura_vip_three_month: env.STRIPE_PRICE_THREE_MONTH,
     aura_vip_annual: env.STRIPE_PRICE_ANNUAL
   };
   if (typeof planId !== 'string' || !Object.hasOwn(plans, planId)) throw new Error('Unknown subscription plan');
@@ -16,6 +17,7 @@ export function buildStripeCheckout(userId: string, planId: unknown, env: Record
   const metadata = { userId, planId };
   return {
     mode: 'subscription',
+    allow_promotion_codes: planId === 'aura_vip_annual',
     client_reference_id: userId,
     metadata,
     subscription_data: { metadata },

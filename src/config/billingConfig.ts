@@ -16,6 +16,7 @@ export const STORE_PRODUCT_IDS = {
 
 export const STRIPE_PLAN_IDS = {
   MONTHLY: 'aura_vip_monthly',
+  THREE_MONTH: 'aura_vip_three_month',
   YEARLY: 'aura_vip_annual'
 } as const;
 
@@ -34,6 +35,7 @@ export const BILLING_PLANS: Record<PlanTier, PlanConfig> = {
     id: STORE_PRODUCT_IDS.MONTHLY,
     tier: 'monthly',
     fallbackTitle: 'AURA Premium Monthly',
+    fallbackPrice: '€8.99',
     fallbackDescription: 'Full access to all VIP features, renewed monthly.',
     billingPeriod: 'P1M',
     durationMonths: 1
@@ -42,6 +44,7 @@ export const BILLING_PLANS: Record<PlanTier, PlanConfig> = {
     id: STORE_PRODUCT_IDS.THREE_MONTH,
     tier: 'three_month',
     fallbackTitle: 'AURA Premium 3 Months',
+    fallbackPrice: '€23.99',
     fallbackDescription: 'Popular option with seasonal savings, renewed every 3 months.',
     billingPeriod: 'P3M',
     durationMonths: 3
@@ -50,6 +53,7 @@ export const BILLING_PLANS: Record<PlanTier, PlanConfig> = {
     id: STORE_PRODUCT_IDS.YEARLY,
     tier: 'yearly',
     fallbackTitle: 'AURA Premium Yearly',
+    fallbackPrice: '€79.99',
     fallbackDescription: 'Best value VIP pass, billed annually.',
     billingPeriod: 'P1Y',
     durationMonths: 12
@@ -138,7 +142,7 @@ export function resolveTierFromProductId(productId: string): PlanTier {
   if (productId === STORE_PRODUCT_IDS.MONTHLY || productId === STRIPE_PLAN_IDS.MONTHLY) {
     return 'monthly';
   }
-  if (productId === STORE_PRODUCT_IDS.THREE_MONTH) {
+  if (productId === STORE_PRODUCT_IDS.THREE_MONTH || productId === STRIPE_PLAN_IDS.THREE_MONTH) {
     return 'three_month';
   }
   if (productId === STORE_PRODUCT_IDS.YEARLY || productId === STRIPE_PLAN_IDS.YEARLY) {

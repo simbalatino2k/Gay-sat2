@@ -968,7 +968,7 @@ export class DataStore {
       premium: isActive,
       provider: 'stripe',
       productId: planId,
-      planTier: planId === 'aura_vip_annual' ? 'yearly' : 'monthly',
+      planTier: planId === 'aura_vip_annual' ? 'yearly' : planId === 'aura_vip_three_month' ? 'three_month' : 'monthly',
       status: isActive ? 'active' : 'canceled',
       expiresAt: user.premiumExpiresAt,
       autoRenew: isActive,
