@@ -27,7 +27,15 @@ Status: NOT READY FOR PRODUCTION. This report supersedes older validation statem
 2. Verify two independent accounts against the same live PostgreSQL instance, including restart, map, privacy and block tests. There are two Cloud SQL instances; do not switch DB credentials blindly.
 3. Deploy the reviewed branch and route auragay.com to it. Domain was still a Coming Soon page in the last check.
 4. Merchant onboarding, approved payment methods/currencies/prices, production keys and verified webhooks remain unfinished. Current Checkout is card-based. TWINT, Bizum, BLIK and Pix are not activated by documentation; see LOCAL_PAYMENT_METHODS.md.
-5. Review legal consent evidence. Backend defaults still pre-populate special-category, AI, location and policy acceptance fields; these are not proof of user agreement. Device permissions and advertising choices fixed here do not constitute a complete legal consent implementation.
+5. Review legal consent evidence. Defaults for new consent records now opt out and leave policy acceptance empty; preference updates reject fabricated policy versions/timestamps and non-boolean choices. Historical consent rows are not rewritten and remain unverified. Device permissions and advertising choices fixed here do not constitute a complete legal consent implementation.
 6. Verify Firebase/backend identity bridging and account deletion/reporting/moderation end-to-end; finish store metadata, policies and platform review.
 
 No production deployment, live charge, policy acceptance on behalf of the owner, or store submission was performed by this change. No concealed escort discovery functionality is included.
+
+## Follow-up verification
+
+- Consent preference regression, authentication/billing/security suites, TypeScript and production build passed after the default/validation fixes. Settings now restores the previous choice and displays an error on failed saves.
+- SQL defaults corrected for new rows; existing rows are not retroactive proof of agreement. Versioned policy acceptance and enforcement of optional processing choices across all features still need implementation and review.
+- Live Studio preview showed one other profile in Discover. Radar interaction then timed out; full two-account/radar/restart verification is not complete. Studio still displays the old sensor consent modal and has newer edits not yet synchronized into this PR; do not overwrite them blindly.
+- Owner reports Spain and a verified Stripe account. Connector returned reauthentication-required before listing any accounts; no account configuration or payment capability was verified or changed.
+- No sessions revoked, credentials rotated, Git history rewritten or production deployment performed in this follow-up.

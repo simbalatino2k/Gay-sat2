@@ -291,11 +291,11 @@ export async function initPostgresSchema(): Promise<boolean> {
 
       CREATE TABLE IF NOT EXISTS user_consents (
         user_id VARCHAR(128) PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        gdpr_accepted BOOLEAN NOT NULL DEFAULT TRUE,
-        age_verified_18_plus BOOLEAN NOT NULL DEFAULT TRUE,
-        privacy_policy_version VARCHAR(32) DEFAULT '2.0.0',
-        terms_version VARCHAR(32) DEFAULT '2.0.0',
-        dsa_accepted BOOLEAN NOT NULL DEFAULT TRUE,
+        gdpr_accepted BOOLEAN NOT NULL DEFAULT FALSE,
+        age_verified_18_plus BOOLEAN NOT NULL DEFAULT FALSE,
+        privacy_policy_version VARCHAR(32) DEFAULT '',
+        terms_version VARCHAR(32) DEFAULT '',
+        dsa_accepted BOOLEAN NOT NULL DEFAULT FALSE,
         timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         ip_address VARCHAR(128)
       );
@@ -456,14 +456,24 @@ export async function initPostgresSchema(): Promise<boolean> {
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS ai_assistance_consent BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS ai_assistance_consent BOOLEAN DEFAULT FALSE;
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS safe_content_enabled BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS location_processing_consent BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS special_category_consent BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS location_processing_consent BOOLEAN DEFAULT FALSE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS special_category_consent BOOLEAN DEFAULT FALSE;
 
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS necessary_cookies BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS functional_cookies BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS functional_cookies BOOLEAN DEFAULT FALSE;
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS analytics_cookies BOOLEAN DEFAULT FALSE;
+
+      ALTER TABLE user_consents ALTER COLUMN gdpr_accepted SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN age_verified_18_plus SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN dsa_accepted SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN ai_assistance_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN location_processing_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN special_category_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN functional_cookies SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN terms_version SET DEFAULT '';
+      ALTER TABLE user_consents ALTER COLUMN privacy_policy_version SET DEFAULT '';
 
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id VARCHAR(128);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
@@ -1258,10 +1268,10 @@ export class PostgresStoreAdapter {
       functionalCookies: !!r.functional_cookies,
       analyticsCookies: !!r.analytics_cookies,
       explicitSpecialCategoryConsent: !!r.special_category_consent,
-      aiAssistanceConsent: r.ai_assistance_consent !== false,
-      locationProcessingConsent: r.location_processing_consent !== false,
-      termsAcceptedVersion: r.terms_version || '2.0.0',
-      privacyPolicyAcceptedVersion: r.privacy_policy_version || '2.0.0',
+      aiAssistanceConsent: r.ai_assistance_consent === true,
+      locationProcessingConsent: r.location_processing_consent === true,
+      termsAcceptedVersion: r.terms_version || '',
+      privacyPolicyAcceptedVersion: r.privacy_policy_version || '',
       updatedAt: r.timestamp ? new Date(r.timestamp).toISOString() : new Date().toISOString(),
       safeContentEnabled: r.safe_content_enabled !== false
     };
@@ -1291,8 +1301,8 @@ export class PostgresStoreAdapter {
         consents.functionalCookies,
         consents.analyticsCookies,
         consents.explicitSpecialCategoryConsent,
-        consents.aiAssistanceConsent !== false,
-        consents.locationProcessingConsent !== false,
+        consents.aiAssistanceConsent === true,
+        consents.locationProcessingConsent === true,
         consents.termsAcceptedVersion,
         consents.privacyPolicyAcceptedVersion,
         consents.safeContentEnabled !== false

@@ -1,3 +1,4 @@
+import { defaultUserConsents, validateConsentPreferences } from '../lib/consentPreferences';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -546,18 +547,7 @@ export class DataStore {
     this.tokens.set(token, userId);
 
     // Initialize GDPR Consents
-    const initialConsents: UserConsents = {
-      necessaryCookies: true,
-      functionalCookies: true,
-      analyticsCookies: false,
-      explicitSpecialCategoryConsent: true,
-      aiAssistanceConsent: true,
-      locationProcessingConsent: true,
-      termsAcceptedVersion: '2026.1',
-      privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: now.toISOString(),
-      safeContentEnabled: true
-    };
+    const initialConsents = defaultUserConsents();
     this.consents.set(userId, initialConsents);
 
     this.saveToDisk();
@@ -1307,18 +1297,7 @@ export class DataStore {
     const existing = this.consents.get(userId);
     if (existing) return existing;
 
-    const defaultConsents: UserConsents = {
-      necessaryCookies: true,
-      functionalCookies: true,
-      analyticsCookies: false,
-      explicitSpecialCategoryConsent: true,
-      aiAssistanceConsent: true,
-      locationProcessingConsent: true,
-      termsAcceptedVersion: '2026.1',
-      privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: new Date().toISOString(),
-      safeContentEnabled: true
-    };
+    const defaultConsents = defaultUserConsents();
     this.consents.set(userId, defaultConsents);
     if (this.pgAdapter) {
       await this.pgAdapter.saveUserConsents(userId, defaultConsents);
@@ -1328,10 +1307,11 @@ export class DataStore {
   }
 
   public async updateUserConsents(userId: string, partial: Partial<UserConsents>): Promise<UserConsents> {
+    const preferences = validateConsentPreferences(partial);
     const current = await this.getUserConsents(userId);
     const updated: UserConsents = {
       ...current,
-      ...partial,
+      ...preferences,
       necessaryCookies: true,
       updatedAt: new Date().toISOString()
     };

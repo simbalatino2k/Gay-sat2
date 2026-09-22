@@ -190,7 +190,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleSaveConsent = async (key: keyof UserConsents, value: boolean) => {
-    if (!consents) return;
+    if (!consents || savingConsents) return;
+    const previous = consents;
     const updated = { ...consents, [key]: value };
     setConsents(updated);
     setSavingConsents(true);
@@ -203,11 +204,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         },
         body: JSON.stringify({ [key]: value })
       });
+      if (!res.ok) throw new Error('Privacy preferences could not be saved.');
+      const data = await res.json();
+      if (data.consents) setConsents(data.consents);
       if (res.ok) {
         setConsentSuccessMsg('Privacy preference saved.');
         setTimeout(() => setConsentSuccessMsg(''), 3000);
       }
     } catch (err) {
+      setConsents(previous);
+      setConsentSuccessMsg('Nie zapisano zmiany. Spróbuj ponownie.');
       console.error('Consent save error:', err);
     } finally {
       setSavingConsents(false);
