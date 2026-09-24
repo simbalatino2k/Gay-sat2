@@ -36,7 +36,7 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            def keystorePath = System.getenv("AURA_KEYSTORE_PATH")
+            def keystorePath = System.getenv("AURA_KEYSTORE_PATH") ?: project.findProperty("AURA_KEYSTORE_PATH")
             if (keystorePath && file(keystorePath).exists()) {
                 signingConfig signingConfigs.release
             }

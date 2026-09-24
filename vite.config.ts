@@ -17,32 +17,32 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
+        includeAssets: ['apple-touch-icon.png', 'icon.svg', 'icon-192.png', 'icon-512.png'],
         manifest: {
           id: '/',
           name: 'AURA GAY 18+ — Premium Gay Social',
           short_name: 'AURA 18+',
           description: 'A premium, secure, polished, mobile-first gay social & dating connection platform for adults 18+.',
-          theme_color: '#0b0d12',
-          background_color: '#0b0d12',
+          theme_color: '#100c19',
+          background_color: '#100c19',
           display: 'standalone',
           start_url: '/',
           scope: '/',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: '/icon-192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/icon-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: '/icon-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
