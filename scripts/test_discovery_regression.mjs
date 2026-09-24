@@ -5,15 +5,18 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 
-function loadClass(file, name, end) {
+function loadClass(file, name, end, globals = {}) {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
   const start = source.indexOf('export class ' + name);
   const code = source.slice(start, end ? source.indexOf(end, start) : undefined)
     .replace('export class ', 'class ');
-  return vm.runInNewContext(stripTypeScriptTypes(code, { mode: 'transform' }) + '\n' + name, { console });
+  return vm.runInNewContext(stripTypeScriptTypes(code, { mode: 'transform' }) + '\n' + name, { console, ...globals });
 }
 const Adapter = loadClass('../src/db/postgres.ts', 'PostgresStoreAdapter');
-const Store = loadClass('../src/db/store.ts', 'DataStore', 'export const store');
+const Store = loadClass('../src/db/store.ts', 'DataStore', 'export const store', {
+  PROFILE_PHOTO_PRESETS: new Set(),
+  getPostgresPool: () => null
+});
 const rows = new Map();
 const queries = [];
 const client = {
@@ -43,7 +46,12 @@ const user = {
   profile: {
     id: 'account-b', userId: 'account-b', displayName: 'B', age: 28,
     location: 'Test city', lat: 0, lng: 0, locationPrivacy: 'HIDDEN',
-    lookingFor: ['Dating', 'Friends'], tribes: ['Queer', 'Bear'], photos: [], interests: []
+    lookingFor: ['Dating', 'Friends'], tribes: ['Queer', 'Bear'],
+    photos: [
+      { id: 'public', url: 'https://example.invalid/public.jpg', isPrimary: true },
+      { id: 'private', url: 'https://example.invalid/private.jpg', isPrivate: true }
+    ],
+    interests: []
   }
 };
 await writer.saveUserAndSession(user, 'test-session', new Date());
@@ -77,10 +85,18 @@ assert.notEqual(feed[0].lat, restored.profile.lat, 'Approximate mode obscures co
 for (const invalid of [{ lat: 91, lng: 0 }, { lat: 0 }, { lat: null, lng: 0 }, { lat: NaN, lng: 0 }, { locationPrivacy: 'PUBLIC' }]) {
   await assert.rejects(() => store.updateProfile(user.id, invalid));
 }
-await store.updateProfile(user.id, { lat: 0, lng: 0, role: 'ADMIN', verified: true });
+await assert.rejects(
+  () => store.updateProfile(user.id, { lat: 0, lng: 0, role: 'ADMIN', verified: true }),
+  /Verification status cannot be changed from profile settings/
+);
 restored = await reader.getUserById(user.id);
 assert.equal(restored.role, 'USER');
 assert.equal(restored.profile.verified, false);
+assert.equal(restored.profile.lat, 47.37, 'Rejected update does not partly change the profile');
+assert.equal(restored.profile.lng, 8.54);
+await store.updateProfile(user.id, { lat: 0, lng: 0, role: 'ADMIN' });
+restored = await reader.getUserById(user.id);
+assert.equal(restored.role, 'USER', 'Profile updates cannot grant an admin role');
 assert.equal(restored.profile.lat, 0);
 await store.updateProfile(user.id, {
   age: 29,
@@ -93,9 +109,14 @@ restored = await reader.getUserById(user.id);
 assert.equal(restored.profile.age, 29);
 assert.equal(restored.profile.photos.length, 2);
 feed = await store.getDiscoverFeed('account-a');
-assert.equal(feed[0].photos.length, 1, 'Private photos are omitted from discovery');
+assert.equal(feed[0].photos.length, 2, 'Private photos keep a locked placeholder in discovery');
 assert.equal(feed[0].photos[0].url, 'https://example.invalid/public.jpg');
+assert.equal(feed[0].photos[1].url, '', 'Private photo URL is not disclosed');
+assert.equal(feed[0].photos[1].isLocked, true);
 await assert.rejects(() => store.updateProfile(user.id, { age: 17 }));
-await assert.rejects(() => store.updateProfile(user.id, { photos: [{ id: 'bad', url: 'javascript:alert(1)' }] }));
+await assert.rejects(
+  () => store.updateProfile(user.id, { photos: [{ id: 'bad', url: 'javascript:alert(1)' }] }),
+  /Choose an AURA preset or upload this photo to AURA first/
+);
 console.log('PASS: registration serialization, location and profile persistence, discovery without cache, privacy and input validation.');
 console.log('SQL is inspected using a test transport; a live PostgreSQL integration test is still required.');
