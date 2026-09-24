@@ -1,22 +1,24 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Heart, 
-  X, 
-  Star, 
-  RotateCcw, 
-  Info, 
-  Zap, 
-  Sparkles, 
-  ShieldCheck, 
-  MapPin, 
-  ChevronLeft, 
-  ChevronRight, 
-  MessageCircle, 
-  Flame 
+import {
+  Heart,
+  X,
+  Star,
+  RotateCcw,
+  Info,
+  Zap,
+  Sparkles,
+  ShieldCheck,
+  MapPin,
+  ChevronLeft,
+  ChevronRight,
+  MessageCircle,
+  Flame,
+  Rocket
 } from 'lucide-react';
 import { UserProfile, UserAccount, TapType } from '../types';
 import { formatDistance } from '../utils/formatDistance';
+import { AuraVerifiedBadge } from './common/AuraVerifiedBadge';
 
 interface SwipeCardDeckProps {
   profiles: UserProfile[];
@@ -47,7 +49,7 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
   const [activePhotoIndex, setActivePhotoIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [exitDirection, setExitDirection] = useState<'left' | 'right' | 'up' | null>(null);
-  
+
   // Quick Tap Menu State
   const [showTapMenu, setShowTapMenu] = useState(false);
   const [tapSuccessFeedback, setTapSuccessFeedback] = useState<string | null>(null);
@@ -203,7 +205,7 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
   // Stack is exhausted
   if (!currentProfile) {
     return (
-      <motion.div 
+      <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         className="w-full max-w-md mx-auto min-h-[520px] rounded-[32px] border border-white/10 bg-[#0b0d19]/80 backdrop-blur-2xl p-8 flex flex-col items-center justify-center text-center space-y-5 shadow-2xl my-4"
@@ -245,18 +247,18 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
   const currentPhotos = currentProfile.photos && currentProfile.photos.length > 0
     ? currentProfile.photos
     : [{ id: 'default-ph', url: 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800', isPrimary: true }];
-  
+
   const currentPhotoUrl = currentPhotos[activePhotoIndex]?.url || currentPhotos[0]?.url;
 
   return (
     <div className="w-full max-w-[420px] mx-auto relative select-none pb-8 pt-1">
-      
+
       {/* Cards Stack Stage */}
       <div className="relative w-full aspect-[3/4.4] max-h-[620px]">
-        
+
         {/* Third Background Card (Peek) */}
         {thirdProfile && (
-          <div 
+          <div
             className="absolute inset-0 rounded-[30px] overflow-hidden border border-white/[0.04] bg-slate-900/60 pointer-events-none shadow-xl transition-all duration-300"
             style={{
               transform: 'scale(0.88) translateY(26px)',
@@ -264,28 +266,32 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
               zIndex: 1
             }}
           >
-            <img 
-              src={thirdProfile.photos[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'} 
+            <img
+              src={thirdProfile.photos?.[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
               alt=""
-              className="w-full h-full object-cover filter blur-[1px] brightness-75"
+              draggable={false}
+              className="w-full h-full object-cover filter blur-[1px] brightness-75 protected-image select-none"
+              onContextMenu={(e) => e.preventDefault()}
             />
           </div>
         )}
 
         {/* Second Background Card */}
         {nextProfile && (
-          <div 
-            className="absolute inset-0 rounded-[30px] overflow-hidden border border-white/[0.08] bg-slate-900/80 pointer-events-none shadow-2xl transition-all duration-300"
+          <div
+            className="absolute inset-0 rounded-[30px] overflow-hidden border border-white/[0.08] bg-slate-900/80 pointer-events-none shadow-2xl transition-all duration-300 protected-media-container select-none"
             style={{
               transform: 'scale(0.94) translateY(14px)',
               opacity: 0.75,
               zIndex: 2
             }}
           >
-            <img 
-              src={nextProfile.photos[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'} 
+            <img
+              src={nextProfile.photos?.[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
               alt=""
-              className="w-full h-full object-cover filter brightness-90"
+              draggable={false}
+              className="w-full h-full object-cover filter brightness-90 protected-image select-none"
+              onContextMenu={(e) => e.preventDefault()}
             />
             <div className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-black/80 to-transparent p-4 flex items-end">
               <span className="text-sm font-bold text-white/80">{nextProfile.displayName}, {nextProfile.age}</span>
@@ -305,14 +311,17 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
               ? { y: -550, opacity: 0, scale: 1.05, transition: { duration: 0.28 } }
               : { x: 0, y: 0, rotate: 0, opacity: 1 }
           }
-          className="absolute inset-0 rounded-[30px] overflow-hidden border border-white/15 bg-[#0a0c16] shadow-[0_20px_50px_rgba(0,0,0,0.85),0_0_20px_rgba(217,70,239,0.15)] z-10"
+          className="absolute inset-0 rounded-[30px] overflow-hidden border border-white/15 bg-[#0a0c16] shadow-[0_20px_50px_rgba(0,0,0,0.85),0_0_20px_rgba(217,70,239,0.15)] z-10 protected-media-container select-none"
+          onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
         >
           {/* Main Photo */}
           <img
             src={currentPhotoUrl}
             alt={currentProfile.displayName}
             referrerPolicy="no-referrer"
-            className="w-full h-full object-cover pointer-events-none"
+            draggable={false}
+            className="w-full h-full object-cover pointer-events-none protected-image select-none"
+            onContextMenu={(e) => e.preventDefault()}
           />
 
           {/* Top Vignette Gradient */}
@@ -322,16 +331,16 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
           {currentPhotos.length > 1 && (
             <div className="absolute top-3 inset-x-4 flex items-center gap-1.5 z-20 pointer-events-none">
               {currentPhotos.map((_, idx) => (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className="flex-1 h-1 rounded-full overflow-hidden bg-white/25 backdrop-blur-sm transition-all"
                 >
-                  <div 
+                  <div
                     className={`h-full transition-all duration-200 ${
-                      idx === activePhotoIndex 
-                        ? 'bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]' 
-                        : idx < activePhotoIndex 
-                        ? 'bg-white/70' 
+                      idx === activePhotoIndex
+                        ? 'bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]'
+                        : idx < activePhotoIndex
+                        ? 'bg-white/70'
                         : 'bg-transparent'
                     }`}
                   />
@@ -387,7 +396,7 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
 
           {/* Quick Taps Popover Menu */}
           {showTapMenu && (
-            <div 
+            <div
               onClick={e => e.stopPropagation()}
               className="absolute inset-x-4 bottom-24 bg-black/92 backdrop-blur-xl border border-white/20 rounded-2xl p-2.5 z-40 shadow-2xl flex items-center justify-around gap-1.5 animate-in zoom-in-95 duration-150"
             >
@@ -413,7 +422,7 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
 
           {/* Bottom Card Profile Content */}
           <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#05060d] via-[#05060d]/90 via-55% to-transparent p-5 pt-16 space-y-2 z-20 pointer-events-auto">
-            
+
             {/* Name, Age, Verification & Info Trigger */}
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 overflow-hidden">
@@ -421,8 +430,12 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
                   {currentProfile.displayName}, {currentProfile.age}
                 </h3>
                 {currentProfile.verified && (
-                  <span className="inline-flex items-center justify-center p-1 rounded-full bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.4)] shrink-0" title="Zweryfikowany profil 18+">
-                    <ShieldCheck className="w-3.5 h-3.5 stroke-[2.5]" />
+                  <AuraVerifiedBadge size="sm" variant="icon-only" />
+                )}
+                {currentProfile.isBoosted && (!currentProfile.boostExpiresAt || new Date(currentProfile.boostExpiresAt).getTime() > Date.now()) && (
+                  <span className="inline-flex items-center gap-1 bg-amber-500/90 text-slate-950 text-[9px] font-black px-2 py-0.5 rounded-full shadow-[0_0_12px_rgba(245,158,11,0.8)] border border-amber-300 animate-pulse tracking-wider shrink-0">
+                    <Rocket className="w-3 h-3 fill-current" />
+                    <span>BOOST</span>
                   </span>
                 )}
               </div>
@@ -479,9 +492,9 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
 
       </div>
 
-      {/* Tactile Control Buttons Bar */}
+      {/* Tactile Control Buttons Bar with Vivid Neon Highlights */}
       <div className="flex items-center justify-center gap-3.5 pt-5 px-2">
-        
+
         {/* Rewind / Undo Button */}
         <button
           type="button"
@@ -490,58 +503,58 @@ export const SwipeCardDeck: React.FC<SwipeCardDeckProps> = ({
           disabled={history.length === 0}
           className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all active:scale-90 shadow-lg ${
             history.length > 0
-              ? 'bg-amber-500/15 border-amber-500/40 text-amber-400 hover:bg-amber-500/25 hover:scale-105 shadow-amber-950/30'
-              : 'bg-white/[0.03] border-white/10 text-slate-600 cursor-not-allowed opacity-50'
+              ? 'bg-amber-500/20 border-amber-400 text-amber-300 hover:bg-amber-500/30 hover:scale-105 shadow-[0_0_15px_rgba(245,158,11,0.5)]'
+              : 'bg-white/[0.03] border-white/10 text-slate-600 cursor-not-allowed opacity-40'
           }`}
-          title="Cofnij ostatni swipe (Undo)"
+          title="Undo"
         >
           <RotateCcw className="w-5 h-5" />
         </button>
 
-        {/* Pass (NOPE) Button */}
+        {/* Pass (NOPE) Button with Vivid Neon Rose Glow */}
         <button
           type="button"
           id="btn-swipe-pass"
           onClick={() => handleSwipe('left')}
-          className="w-14 h-14 rounded-full bg-rose-500/15 hover:bg-rose-500/25 border-2 border-rose-500/50 text-rose-400 flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95 shadow-xl shadow-rose-950/40 group"
-          title="Przesuń w lewo (Pass)"
+          className="w-14 h-14 rounded-full bg-rose-500/20 hover:bg-rose-500/35 border-2 border-rose-400 text-rose-300 flex items-center justify-center transition-all duration-200 hover:scale-110 active:scale-95 shadow-[0_0_20px_rgba(244,63,94,0.45)] hover:shadow-[0_0_30px_rgba(244,63,94,0.7)] group"
+          title="Pass"
         >
-          <X className="w-7 h-7 stroke-[2.5] transition-transform group-hover:scale-110" />
+          <X className="w-7 h-7 stroke-[2.5] transition-transform group-hover:scale-115 drop-shadow-[0_0_8px_rgba(244,63,94,0.8)]" />
         </button>
 
-        {/* SuperLike Button */}
+        {/* SuperLike Button with Vivid Neon Cyan Glow */}
         <button
           type="button"
           id="btn-swipe-superlike"
           onClick={() => handleSwipe('up')}
-          className="w-12 h-12 rounded-full bg-cyan-500/15 hover:bg-cyan-500/25 border-2 border-cyan-400/50 text-cyan-300 flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95 shadow-xl shadow-cyan-950/40 group"
+          className="w-12 h-12 rounded-full bg-cyan-500/20 hover:bg-cyan-500/35 border-2 border-cyan-300 text-cyan-200 flex items-center justify-center transition-all duration-200 hover:scale-110 active:scale-95 shadow-[0_0_20px_rgba(6,182,212,0.5)] hover:shadow-[0_0_30px_rgba(6,182,212,0.8)] group"
           title="Super Like (⭐)"
         >
-          <Star className="w-5 h-5 fill-current transition-transform group-hover:scale-110" />
+          <Star className="w-5 h-5 fill-current transition-transform group-hover:scale-115 drop-shadow-[0_0_8px_rgba(6,182,212,0.9)]" />
         </button>
 
-        {/* Like (Heart) Button */}
+        {/* Like (Heart) Button with Vivid Neon Fuchsia / Pink Glow */}
         <button
           type="button"
           id="btn-swipe-like"
           onClick={() => handleSwipe('right')}
-          className="w-14 h-14 rounded-full bg-gradient-to-tr from-fuchsia-600 to-purple-600 border-2 border-fuchsia-400/60 text-white flex items-center justify-center transition-all duration-200 hover:scale-105 active:scale-95 shadow-xl shadow-fuchsia-950/50 group"
-          title="Polub (Like ❤️)"
+          className="w-14 h-14 rounded-full bg-gradient-to-tr from-fuchsia-600 via-pink-500 to-rose-500 border-2 border-fuchsia-300 text-white flex items-center justify-center transition-all duration-200 hover:scale-110 active:scale-95 shadow-[0_0_25px_rgba(217,70,239,0.75)] hover:shadow-[0_0_35px_rgba(217,70,239,1)] group"
+          title="Like ❤️"
         >
-          <Heart className="w-7 h-7 fill-current transition-transform group-hover:scale-110" />
+          <Heart className="w-7 h-7 fill-current transition-transform group-hover:scale-115 drop-shadow-[0_0_10px_rgba(255,255,255,0.8)]" />
         </button>
 
-        {/* Quick Tap Trigger Button */}
+        {/* Quick Tap Trigger Button with Vivid Neon Purple / Violet Glow */}
         <button
           type="button"
           id="btn-swipe-tap"
           onClick={() => setShowTapMenu(prev => !prev)}
           className={`w-12 h-12 rounded-full flex items-center justify-center border transition-all active:scale-90 shadow-lg ${
             showTapMenu
-              ? 'bg-fuchsia-500 border-white text-white shadow-[0_0_15px_rgba(217,70,239,0.8)]'
-              : 'bg-white/10 hover:bg-white/15 border-white/20 text-fuchsia-300 hover:scale-105'
+              ? 'bg-fuchsia-500 border-white text-white shadow-[0_0_20px_rgba(217,70,239,1)]'
+              : 'bg-purple-950/60 hover:bg-purple-900/60 border-purple-400/60 text-purple-300 hover:scale-105 shadow-[0_0_15px_rgba(168,85,247,0.4)]'
           }`}
-          title="Szybka zaczepka (Quick Tap)"
+          title="Quick Tap (⚡)"
         >
           <Zap className="w-5 h-5 fill-current" />
         </button>

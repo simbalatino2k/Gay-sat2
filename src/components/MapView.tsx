@@ -3,8 +3,6 @@ import * as maplibregl from 'maplibre-gl';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { UserAccount, UserProfile, LocationPrivacyMode, QueerVenue } from '../types';
-import { auth } from '../lib/firebase';
-import { saveProfileToFirestore } from '../services/firebaseService';
 import {
   LocateFixed,
   Shield,
@@ -32,6 +30,24 @@ import {
 
 // MapLibre 6 requires an explicit bundled worker URL with Vite.
 maplibregl.setWorkerUrl(mapWorkerUrl);
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function escapeAttribute(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 interface MapViewProps {
   authToken: string | null;
@@ -63,6 +79,13 @@ export const POPULAR_CITIES: CityPreset[] = [
   { id: 'amsterdam', name: 'Amsterdam', flag: '🇳🇱', lat: 52.3676, lng: 4.9041, zoom: 12.5 },
   { id: 'paris', name: 'Paryż', flag: '🇫🇷', lat: 48.8566, lng: 2.3522, zoom: 12.5 },
   { id: 'barcelona', name: 'Barcelona', flag: '🇪🇸', lat: 41.3879, lng: 2.1699, zoom: 12.5 },
+  { id: 'madrid', name: 'Madryt', flag: '🇪🇸', lat: 40.4168, lng: -3.7038, zoom: 12.5 },
+  { id: 'nyc', name: 'Nowy Jork', flag: '🇺🇸', lat: 40.7338, lng: -74.0021, zoom: 12.5 },
+  { id: 'sf', name: 'San Francisco', flag: '🇺🇸', lat: 37.7624, lng: -122.4351, zoom: 12.5 },
+  { id: 'tokyo', name: 'Tokio', flag: '🇯🇵', lat: 35.6908, lng: 139.7078, zoom: 12.8 },
+  { id: 'bangkok', name: 'Bangkok', flag: '🇹🇭', lat: 13.7292, lng: 100.5345, zoom: 12.8 },
+  { id: 'sydney', name: 'Sydney', flag: '🇦🇺', lat: -33.8837, lng: 151.2163, zoom: 12.5 },
+  { id: 'saopaulo', name: 'São Paulo', flag: '🇧🇷', lat: -23.5505, lng: -46.6333, zoom: 12.5 },
   { id: 'krakow', name: 'Kraków', flag: '🇵🇱', lat: 50.0647, lng: 19.9450, zoom: 13.0 }
 ];
 
@@ -134,9 +157,8 @@ export const MapView: React.FC<MapViewProps> = ({
   const fetchProfiles = useCallback(async () => {
     try {
       const headers: Record<string, string> = {};
-      const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
-      if (bearerToken) {
-        headers['Authorization'] = `Bearer ${bearerToken}`;
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
       }
       const res = await fetch('/api/discover', { headers });
       if (!res.ok) throw new Error('Błąd ładowania profili');
@@ -148,14 +170,13 @@ export const MapView: React.FC<MapViewProps> = ({
       setProfiles(list);
     } catch (err: any) {
       console.warn('[MapView] Nie udało się pobrać profili:', err.message || err);
-      showNotice('Nie udało się pobrać profili. Spróbuj odświeżyć mapę.', 'warning');
     }
-  }, [authToken, showNotice]);
+  }, [authToken]);
 
   // Fetch LGBTQ+ venues & cruising spots from backend
-  const fetchVenues = useCallback(async (customCoords?: { lat: number; lng: number }, queryOverride?: string) => {
+  const fetchVenues = useCallback(async (customCoords?: { lat: number; lng: number } | null, queryOverride?: string) => {
     try {
-      const coords = customCoords || userCoordsRef.current;
+      const coords = customCoords === null ? null : (customCoords || (selectedCity === 'all' ? null : userCoordsRef.current));
       const params = new URLSearchParams();
       const q = queryOverride !== undefined ? queryOverride : searchQuery;
       if (q && q.trim()) {
@@ -182,7 +203,7 @@ export const MapView: React.FC<MapViewProps> = ({
     } catch (err: any) {
       console.warn('[MapView] Błąd pobierania miejsc LGBT+ / cruisingu:', err);
     }
-  }, [venueFilter, searchQuery]);
+  }, [venueFilter, searchQuery, selectedCity]);
 
   const handleSelectCity = (city: CityPreset) => {
     setSelectedCity(city.id);
@@ -418,11 +439,11 @@ export const MapView: React.FC<MapViewProps> = ({
     const el = document.createElement('div');
     el.className = 'aura-current-user-pin relative flex items-center justify-center cursor-pointer';
     el.innerHTML = `
-      <div class="absolute w-8 h-8 rounded-full bg-fuchsia-500/25 animate-ping"></div>
-      <div class="relative w-7 h-7 rounded-full bg-gradient-to-tr from-purple-600 via-fuchsia-600 to-indigo-600 border-2 border-white shadow-[0_0_15px_rgba(217,70,239,0.9)] flex items-center justify-center text-white text-[10px] font-black">
+      <div class="absolute w-6 h-6 rounded-full bg-fuchsia-500/25 animate-ping"></div>
+      <div class="relative w-5 h-5 rounded-full bg-gradient-to-tr from-purple-600 via-fuchsia-600 to-indigo-600 border border-white shadow-[0_0_10px_rgba(217,70,239,0.8)] flex items-center justify-center text-white text-[8px] font-black">
         TY
       </div>
-      <div class="absolute -bottom-5 px-2 py-0.5 rounded-full bg-[#070810]/90 border border-white/20 text-[9px] font-bold text-fuchsia-300 shadow-lg whitespace-nowrap">
+      <div class="absolute -bottom-4 px-1.5 py-0.5 rounded-full bg-[#070810]/90 border border-white/20 text-[8px] font-bold text-fuchsia-300 shadow-md whitespace-nowrap">
         ${currentPrivacy === 'EXACT' ? 'Dokładna' : 'Przybliżona (~1.5 km)'}
       </div>
     `;
@@ -456,34 +477,35 @@ export const MapView: React.FC<MapViewProps> = ({
       el.className =
         'aura-profile-marker group relative cursor-pointer transform hover:scale-110 active:scale-95 transition-all duration-200';
 
-      const photoUrl = prof.photos?.find(photo => !photo.isPrivate && !photo.isLocked)?.url || '';
-      const isOnline = prof.isOnline;
+      const photoUrl = prof.photos && prof.photos.length > 0 && prof.photos[0].url ? prof.photos[0].url : '';
+      const isOnline = !!prof.isOnline;
       const isExact = prof.locationPrivacy === 'EXACT';
-      const avatar = document.createElement('div');
-      avatar.className = `relative w-10 h-10 rounded-full overflow-hidden border-2 bg-[#0b0d14] flex items-center justify-center ${
-        isExact ? 'border-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]' : 'border-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]'
-      }`;
-      if (photoUrl) {
-        const img = document.createElement('img');
-        img.src = photoUrl;
-        img.alt = prof.displayName;
-        img.className = 'w-full h-full object-cover';
-        avatar.appendChild(img);
-      } else {
-        const initial = document.createElement('div');
-        initial.className = 'w-full h-full bg-gradient-to-br from-purple-900 to-indigo-900 flex items-center justify-center text-white text-xs font-bold';
-        initial.textContent = prof.displayName.charAt(0);
-        avatar.appendChild(initial);
-      }
-      if (isOnline) {
-        const online = document.createElement('span');
-        online.className = 'absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0b0d14]';
-        avatar.appendChild(online);
-      }
-      const label = document.createElement('div');
-      label.className = 'absolute -bottom-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-full bg-[#070810]/95 border border-white/15 text-[9px] font-semibold text-slate-200 whitespace-nowrap shadow-md pointer-events-none group-hover:border-purple-400';
-      label.textContent = `${prof.displayName}, ${prof.age}`;
-      el.append(avatar, label);
+      const safeName = escapeHtml(prof.displayName || 'Użytkownik');
+      const safeAge = typeof prof.age === 'number' ? prof.age : '';
+      const initial = escapeHtml((prof.displayName || 'U').charAt(0).toUpperCase());
+      const safePhotoUrl = photoUrl ? escapeAttribute(photoUrl) : '';
+
+      el.innerHTML = `
+        <div class="relative w-12 h-12 rounded-full overflow-hidden border-2 ${
+          isExact
+            ? 'border-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]'
+            : 'border-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.5)]'
+        } bg-[#0b0d14] flex items-center justify-center">
+          ${
+            safePhotoUrl
+              ? `<img src="${safePhotoUrl}" alt="${safeName}" class="w-full h-full object-cover rounded-full" loading="lazy" />`
+              : `<div class="w-full h-full bg-gradient-to-br from-purple-700 via-fuchsia-800 to-indigo-900 flex items-center justify-center text-white text-base font-black">${initial}</div>`
+          }
+          ${
+            isOnline
+              ? `<span class="absolute top-0 right-0 w-3 h-3 rounded-full bg-emerald-400 ring-2 ring-[#0b0d14] shadow-[0_0_6px_rgba(52,211,153,0.9)]"></span>`
+              : ''
+          }
+        </div>
+        <div class="absolute -bottom-4 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-[#070810]/95 border border-white/20 text-[9px] font-bold text-slate-100 whitespace-nowrap shadow-md pointer-events-none group-hover:border-purple-400 group-hover:text-white transition-colors">
+          ${safeName}${safeAge ? `, ${safeAge}` : ''}
+        </div>
+      `;
 
       el.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -518,26 +540,26 @@ export const MapView: React.FC<MapViewProps> = ({
 
       const el = document.createElement('div');
       el.className =
-        'aura-venue-marker group relative cursor-pointer transform hover:scale-115 active:scale-95 transition-all duration-200 z-10';
+        'aura-venue-marker group relative cursor-pointer transform hover:scale-120 active:scale-95 transition-all duration-200 z-10';
 
       let pinGradient = 'from-purple-600 to-indigo-600 border-purple-300';
-      let pinShadow = 'shadow-[0_0_12px_rgba(168,85,247,0.6)]';
+      let pinShadow = 'shadow-[0_0_8px_rgba(168,85,247,0.5)]';
       let iconHtml = `📍`;
-      let typeBadge = 'LGBT+';
+      let typeBadge = 'LGBT';
 
       if (isCruising) {
         pinGradient = 'from-amber-500 via-rose-600 to-red-600 border-amber-300';
-        pinShadow = 'shadow-[0_0_18px_rgba(244,63,94,0.95)]';
+        pinShadow = 'shadow-[0_0_12px_rgba(244,63,94,0.8)]';
         iconHtml = `🔥`;
-        typeBadge = 'CRUISING';
+        typeBadge = 'CRUISE';
       } else if (isSauna) {
         pinGradient = 'from-cyan-500 via-blue-600 to-indigo-600 border-cyan-300';
-        pinShadow = 'shadow-[0_0_15px_rgba(6,182,212,0.85)]';
+        pinShadow = 'shadow-[0_0_10px_rgba(6,182,212,0.7)]';
         iconHtml = `♨️`;
         typeBadge = 'SAUNA';
       } else if (venue.category === 'club') {
         pinGradient = 'from-fuchsia-600 to-purple-700 border-fuchsia-300';
-        pinShadow = 'shadow-[0_0_14px_rgba(217,70,239,0.7)]';
+        pinShadow = 'shadow-[0_0_10px_rgba(217,70,239,0.6)]';
         iconHtml = `🪩`;
         typeBadge = 'KLUB';
       } else if (venue.category === 'bar') {
@@ -548,13 +570,13 @@ export const MapView: React.FC<MapViewProps> = ({
 
       el.innerHTML = `
         <div class="relative flex flex-col items-center">
-          ${isCruising ? `<div class="absolute -inset-1 rounded-2xl bg-rose-500/40 animate-ping"></div>` : ''}
-          <div class="relative w-9 h-9 rounded-2xl bg-gradient-to-tr ${pinGradient} border-2 ${pinShadow} flex items-center justify-center text-sm">
+          ${isCruising ? `<div class="absolute -inset-0.5 rounded-full bg-rose-500/40 animate-ping"></div>` : ''}
+          <div class="relative w-5 h-5 rounded-lg bg-gradient-to-tr ${pinGradient} border border-white/70 ${pinShadow} flex items-center justify-center text-[9px]">
             <span>${iconHtml}</span>
           </div>
-          <div class="mt-1 px-1.5 py-0.5 rounded-md bg-[#05060a]/95 border ${
+          <div class="mt-0.5 px-1 py-0.1 rounded bg-[#05060a]/95 border ${
             isCruising ? 'border-amber-400/80 text-amber-300 font-black' : 'border-white/20 text-slate-200 font-bold'
-          } text-[8.5px] uppercase tracking-wider shadow-xl whitespace-nowrap">
+          } text-[6.5px] uppercase tracking-tighter shadow-sm whitespace-nowrap scale-75 origin-top">
             ${typeBadge}
           </div>
         </div>
@@ -605,14 +627,13 @@ export const MapView: React.FC<MapViewProps> = ({
         }
 
         // Persist coordinates to user's profile on backend
-        if (authToken || auth.currentUser) {
+        if (authToken) {
           try {
-            const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
             const res = await fetch('/api/profile', {
               method: 'PUT',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${bearerToken}`
+                Authorization: `Bearer ${authToken}`
               },
               body: JSON.stringify({
                 lat: latitude,
@@ -622,10 +643,6 @@ export const MapView: React.FC<MapViewProps> = ({
             });
             if (res.ok) {
               const data = await res.json();
-              const firebaseUser = auth.currentUser;
-              if (data.profile && firebaseUser && firebaseUser.uid === currentUser?.id) {
-                await saveProfileToFirestore(firebaseUser.uid, data.profile);
-              }
               if (data.profile && currentUser) onUpdateUser({ ...currentUser, profile: data.profile });
             } else {
               throw new Error('Location update failed');
@@ -658,21 +675,17 @@ export const MapView: React.FC<MapViewProps> = ({
   const handleChangePrivacy = async (mode: LocationPrivacyMode) => {
     setIsUpdatingPrivacy(true);
     try {
-      const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {})
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
         },
         body: JSON.stringify({ locationPrivacy: mode })
       });
       if (res.ok) {
         const data = await res.json();
         if (data.profile && currentUser) {
-          if (auth.currentUser?.uid === currentUser.id) {
-            await saveProfileToFirestore(auth.currentUser.uid, data.profile);
-          }
           onUpdateUser({ ...currentUser, profile: data.profile });
         }
         showNotice(`Zmieniono tryb prywatności na: ${mode}`, 'success');
@@ -694,34 +707,29 @@ export const MapView: React.FC<MapViewProps> = ({
     fetchProfiles();
   };
 
-  const unmappedProfiles = profiles.filter(p =>
-    p.userId !== currentUser?.id && p.id !== currentUser?.id &&
-    (typeof p.lat !== 'number' || typeof p.lng !== 'number' || p.locationPrivacy === 'HIDDEN')
-  );
-
   return (
     <div className="relative w-full h-[calc(100vh-8.5rem)] md:h-[calc(100vh-7rem)] rounded-3xl overflow-hidden border border-white/[0.08] shadow-2xl flex flex-col bg-[#05060a]">
       {/* Top Floating Control Bar */}
       <div className="absolute top-3 inset-x-3 z-20 flex flex-col gap-2 pointer-events-none">
         <div className="flex items-center justify-between gap-2">
           {/* Radar Status Badge */}
-          <div className="pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 shadow-lg">
-            <div className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+          <div className="pointer-events-auto flex items-center gap-2 px-3.5 py-1.5 rounded-2xl bg-[#090716]/95 backdrop-blur-xl border border-purple-500/30 shadow-[0_0_15px_rgba(147,51,234,0.25)]">
+            <div className="w-2.5 h-2.5 rounded-full bg-fuchsia-500 shadow-[0_0_8px_rgba(217,70,239,0.9)] animate-pulse" />
+            <span className="text-xs font-black uppercase tracking-wider text-white">
               Radar AURA
             </span>
-            <span className="text-[11px] text-purple-300 font-medium px-1.5 py-0.5 rounded-md bg-purple-500/15 border border-purple-500/20">
+            <span className="text-[11px] text-fuchsia-200 font-bold px-2 py-0.5 rounded-lg bg-fuchsia-950/60 border border-fuchsia-500/40">
               {profiles.length} osób
             </span>
-            <span className="text-[10px] text-amber-400 font-bold px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 flex items-center gap-1">
-              <Flame className="w-3 h-3" /> {venues.length} miejsc
+            <span className="text-[10px] text-amber-300 font-extrabold px-2 py-0.5 rounded-lg bg-amber-950/60 border border-amber-500/50 flex items-center gap-1 shadow-sm">
+              <Flame className="w-3.5 h-3.5 text-amber-400" /> {venues.length} miejsc
             </span>
           </div>
 
           {/* Privacy Selector Trigger */}
           <button
             onClick={() => setShowPrivacyModal(true)}
-            className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-[#070810]/90 backdrop-blur-xl border border-white/10 hover:border-purple-500/40 text-slate-200 hover:text-white transition-all shadow-lg active:scale-95 text-xs font-medium"
+            className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-[#090716]/95 backdrop-blur-xl border border-purple-500/30 hover:border-fuchsia-400 text-slate-200 hover:text-white transition-all shadow-[0_0_15px_rgba(147,51,234,0.2)] active:scale-95 text-xs font-semibold cursor-pointer"
             title="Ustawienia prywatności lokalizacji"
           >
             {currentPrivacy === 'HIDDEN' ? (
@@ -729,10 +737,10 @@ export const MapView: React.FC<MapViewProps> = ({
             ) : currentPrivacy === 'EXACT' ? (
               <Shield className="w-3.5 h-3.5 text-emerald-400" />
             ) : (
-              <Eye className="w-3.5 h-3.5 text-purple-400" />
+              <Eye className="w-3.5 h-3.5 text-fuchsia-400" />
             )}
             <span className="hidden sm:inline">Prywatność:</span>
-            <span className="font-bold text-purple-300">
+            <span className="font-extrabold text-fuchsia-300">
               {currentPrivacy === 'HIDDEN'
                 ? 'Ukryta'
                 : currentPrivacy === 'EXACT'
@@ -743,16 +751,16 @@ export const MapView: React.FC<MapViewProps> = ({
         </div>
 
         {/* City Switcher & Search Bar */}
-        <div className="pointer-events-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 bg-[#070810]/92 backdrop-blur-2xl p-1.5 rounded-2xl border border-white/10 shadow-xl">
+        <div className="pointer-events-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 bg-[#090716]/95 backdrop-blur-2xl p-2 rounded-2xl border border-purple-500/30 shadow-[0_4px_25px_rgba(0,0,0,0.8),0_0_20px_rgba(147,51,234,0.15)]">
           {/* Quick Search Input */}
           <form onSubmit={handleSearchSubmit} className="relative flex-1 flex items-center">
-            <Search className="w-3.5 h-3.5 text-purple-400 absolute left-2.5 pointer-events-none" />
+            <Search className="w-3.5 h-3.5 text-fuchsia-400 absolute left-2.5 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Szukaj: Zurych, klub, sauna, cruising..."
-              className="w-full pl-8 pr-7 py-1.5 bg-black/40 border border-white/10 focus:border-purple-500 rounded-xl text-xs text-white placeholder-slate-400 outline-none transition-all"
+              placeholder="Szukaj miasta lub miejsca na świecie..."
+              className="w-full pl-8 pr-7 py-1.5 bg-black/60 border border-purple-500/30 focus:border-fuchsia-400 rounded-xl text-xs text-white placeholder-slate-400 outline-none transition-all shadow-inner focus:shadow-[0_0_12px_rgba(217,70,239,0.3)]"
             />
             {searchQuery && (
               <button
@@ -761,7 +769,7 @@ export const MapView: React.FC<MapViewProps> = ({
                   setSearchQuery('');
                   fetchVenues(undefined, '');
                 }}
-                className="absolute right-2 text-slate-400 hover:text-white p-0.5 cursor-pointer"
+                className="absolute right-2 text-slate-300 hover:text-white p-0.5 cursor-pointer"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -769,7 +777,31 @@ export const MapView: React.FC<MapViewProps> = ({
           </form>
 
           {/* Quick City Presets */}
-          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-full">
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5 max-w-full">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedCity('all');
+                setSearchQuery('');
+                if (mapRef.current) {
+                  mapRef.current.flyTo({
+                    center: [15, 30],
+                    zoom: 2.2,
+                    duration: 1200
+                  });
+                }
+                fetchVenues(null, '');
+                showNotice('Wyświetlanie wszystkich miejsc na całym świecie 🌍', 'info');
+              }}
+              className={`px-2.5 py-1 rounded-xl text-[11px] font-bold whitespace-nowrap flex items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                selectedCity === 'all'
+                  ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 text-white shadow-[0_0_15px_rgba(217,70,239,0.8)] border border-fuchsia-300 scale-105'
+                  : 'bg-purple-950/40 text-purple-200 hover:text-white hover:bg-purple-900/60 border border-purple-500/20'
+              }`}
+            >
+              <span>🌍</span>
+              <span>Cały świat</span>
+            </button>
             {POPULAR_CITIES.map((c) => {
               const isActive = selectedCity === c.id;
               return (
@@ -779,8 +811,8 @@ export const MapView: React.FC<MapViewProps> = ({
                   onClick={() => handleSelectCity(c)}
                   className={`px-2.5 py-1 rounded-xl text-[11px] font-bold whitespace-nowrap flex items-center gap-1 transition-all active:scale-95 cursor-pointer ${
                     isActive
-                      ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(168,85,247,0.6)] border border-purple-300'
-                      : 'bg-white/[0.04] text-slate-300 hover:text-white hover:bg-white/[0.08] border border-white/10'
+                      ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 text-white shadow-[0_0_15px_rgba(217,70,239,0.8)] border border-fuchsia-300 scale-105'
+                      : 'bg-purple-950/40 text-purple-200 hover:text-white hover:bg-purple-900/60 border border-purple-500/20'
                   }`}
                 >
                   <span>{c.flag}</span>
@@ -795,10 +827,10 @@ export const MapView: React.FC<MapViewProps> = ({
         <div className="pointer-events-auto flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
           <button
             onClick={() => setVenueFilter('cruising')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-black whitespace-nowrap flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer ${
               venueFilter === 'cruising'
-                ? 'bg-gradient-to-r from-amber-500 to-rose-600 text-white shadow-[0_0_15px_rgba(244,63,94,0.6)] border border-amber-300'
-                : 'bg-[#070810]/90 backdrop-blur-xl text-amber-300/90 border border-amber-500/30 hover:border-amber-400'
+                ? 'bg-gradient-to-r from-amber-500 via-rose-600 to-red-600 text-white shadow-[0_0_18px_rgba(244,63,94,0.8)] border border-amber-300'
+                : 'bg-[#090716]/95 backdrop-blur-xl text-amber-300 border border-amber-500/40 hover:border-amber-400'
             }`}
           >
             <Flame className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
@@ -807,10 +839,10 @@ export const MapView: React.FC<MapViewProps> = ({
 
           <button
             onClick={() => setVenueFilter('sauna')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer ${
               venueFilter === 'sauna'
-                ? 'bg-cyan-600 text-white shadow-[0_0_12px_rgba(6,182,212,0.6)] border border-cyan-300'
-                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-cyan-400/50'
+                ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-[0_0_15px_rgba(6,182,212,0.8)] border border-cyan-300'
+                : 'bg-[#090716]/95 backdrop-blur-xl text-cyan-200 border border-cyan-500/30 hover:border-cyan-400'
             }`}
           >
             <span>♨️ Sauny</span>
@@ -818,10 +850,10 @@ export const MapView: React.FC<MapViewProps> = ({
 
           <button
             onClick={() => setVenueFilter('club')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer ${
               venueFilter === 'club'
-                ? 'bg-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.6)] border border-fuchsia-300'
-                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-fuchsia-400/50'
+                ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-pink-600 text-white shadow-[0_0_16px_rgba(217,70,239,0.8)] border border-fuchsia-300'
+                : 'bg-[#090716]/95 backdrop-blur-xl text-fuchsia-200 border border-purple-500/30 hover:border-fuchsia-400'
             }`}
           >
             <span>🪩 Kluby</span>
@@ -829,10 +861,10 @@ export const MapView: React.FC<MapViewProps> = ({
 
           <button
             onClick={() => setVenueFilter('bar')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer ${
               venueFilter === 'bar'
-                ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(139,92,246,0.6)] border border-violet-300'
-                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-violet-400/50'
+                ? 'bg-gradient-to-r from-violet-600 to-purple-600 text-white shadow-[0_0_15px_rgba(139,92,246,0.8)] border border-violet-300'
+                : 'bg-[#090716]/95 backdrop-blur-xl text-violet-200 border border-purple-500/30 hover:border-violet-400'
             }`}
           >
             <span>🍸 Bary</span>
@@ -840,18 +872,18 @@ export const MapView: React.FC<MapViewProps> = ({
 
           <button
             onClick={() => setVenueFilter('all')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all shadow-md active:scale-95 ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer ${
               venueFilter === 'all'
-                ? 'bg-purple-600 text-white shadow-[0_0_12px_rgba(168,85,247,0.6)] border border-purple-300'
-                : 'bg-[#070810]/90 backdrop-blur-xl text-slate-300 border border-white/10 hover:border-purple-400/50'
+                ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 text-white shadow-[0_0_16px_rgba(168,85,247,0.8)] border border-purple-300'
+                : 'bg-[#090716]/95 backdrop-blur-xl text-purple-200 border border-purple-500/30 hover:border-purple-400'
             }`}
           >
             <span>🌈 Wszystkie</span>
           </button>
 
-          <div className="ml-auto hidden sm:flex items-center gap-1 text-[10px] text-purple-300/80 px-2 py-1 rounded-lg bg-[#070810]/80 border border-white/10">
+          <div className="ml-auto hidden sm:flex items-center gap-1.5 text-[10px] text-fuchsia-300 px-2.5 py-1 rounded-xl bg-[#090716]/95 border border-purple-500/30 shadow-[0_0_10px_rgba(147,51,234,0.2)]">
             <RefreshCw className="w-2.5 h-2.5 text-emerald-400 animate-spin" />
-            <span>Aktualizacja na żywo</span>
+            <span className="font-semibold">Aktualizacja na żywo</span>
           </div>
         </div>
       </div>
@@ -882,25 +914,6 @@ export const MapView: React.FC<MapViewProps> = ({
 
       {/* Map Canvas Container */}
       <div ref={mapContainerRef} className="w-full h-full flex-1 bg-[#05060a]" />
-
-      {!selectedProfile && unmappedProfiles.length > 0 && (
-        <div className="absolute bottom-20 left-3 right-24 z-20 max-w-md rounded-2xl border border-white/15 bg-[#070810]/95 p-2 shadow-xl">
-          <p className="px-1 pb-1 text-[10px] text-slate-300">Profile bez udostępnionej pozycji na mapie</p>
-          <div className="flex gap-2 overflow-x-auto">
-            {unmappedProfiles.map(person => {
-              const photo = person.photos?.find(p => !p.isPrivate && !p.isLocked);
-              return (
-                <button key={person.userId || person.id} type="button" onClick={() => setSelectedProfile(person)}
-                  className="flex shrink-0 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-left text-xs text-white">
-                  {photo ? <img src={photo.url} alt="" className="h-7 w-7 rounded-full object-cover" />
-                    : <span className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-700 font-bold">{person.displayName.charAt(0)}</span>}
-                  <span>{person.displayName}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Loading Overlay */}
       {mapLoading && (
@@ -950,10 +963,20 @@ export const MapView: React.FC<MapViewProps> = ({
       {/* Selected LGBT / Gay Cruising Venue Preview Card */}
       {selectedVenue && (
         <div className="absolute bottom-3 inset-x-3 sm:left-auto sm:right-4 sm:w-96 z-20 animate-slide-up">
-          <div className="p-4 rounded-3xl bg-[#080a14]/95 backdrop-blur-2xl border border-white/15 shadow-[0_16px_45px_rgba(0,0,0,0.85)] flex flex-col gap-3.5">
-            <div className="flex items-start justify-between gap-3">
+          <div className="relative p-4 rounded-3xl bg-[#090714]/95 backdrop-blur-2xl border-2 border-purple-500/40 shadow-[0_16px_50px_rgba(147,51,234,0.35),0_0_25px_rgba(217,70,239,0.25)] flex flex-col gap-3">
+            {/* Dedicated Top-Right Close Button with vivid accent */}
+            <button
+              onClick={() => setSelectedVenue(null)}
+              className="absolute -top-2.5 -right-2.5 z-30 w-7 h-7 rounded-full bg-gradient-to-tr from-purple-700 to-fuchsia-600 border-2 border-white/80 shadow-[0_0_12px_rgba(217,70,239,0.8)] text-white hover:scale-110 active:scale-95 flex items-center justify-center transition-all cursor-pointer"
+              title="Zamknij (X)"
+              aria-label="Zamknij okno miejsca"
+            >
+              <X className="w-3.5 h-3.5 stroke-[2.5]" />
+            </button>
+
+            <div className="flex items-start justify-between gap-3 pr-4">
               <div className="flex items-center gap-3">
-                <div className="relative w-12 h-12 rounded-2xl overflow-hidden border border-white/15 bg-gradient-to-br from-purple-950 to-indigo-950 shrink-0 flex items-center justify-center text-xl shadow-inner">
+                <div className="relative w-12 h-12 rounded-2xl overflow-hidden border-2 border-purple-500/40 bg-gradient-to-br from-purple-900 to-indigo-950 shrink-0 flex items-center justify-center text-xl shadow-inner">
                   {selectedVenue.imageUrl ? (
                     <img
                       src={selectedVenue.imageUrl}
@@ -971,74 +994,52 @@ export const MapView: React.FC<MapViewProps> = ({
 
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <h4 className="font-bold text-sm text-white truncate">
+                    <h4 className="font-extrabold text-sm text-white truncate drop-shadow-sm">
                       {selectedVenue.name}
                     </h4>
                     {selectedVenue.isCruising ? (
-                      <span className="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/20 to-rose-500/20 border border-amber-500/40 text-amber-300 font-extrabold text-[9px] tracking-wide uppercase">
+                      <span className="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-500/30 to-rose-500/30 border border-amber-400 text-amber-300 font-extrabold text-[9px] tracking-wide uppercase shadow-[0_0_8px_rgba(245,158,11,0.3)]">
                         Gay Cruising
                       </span>
                     ) : selectedVenue.category === 'sauna' ? (
-                      <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-bold text-[9px] tracking-wide uppercase">
+                      <span className="px-2 py-0.5 rounded-full bg-cyan-500/30 border border-cyan-400 text-cyan-200 font-bold text-[9px] tracking-wide uppercase shadow-[0_0_8px_rgba(6,182,212,0.3)]">
                         Sauna dla Mężczyzn
                       </span>
                     ) : (
-                      <span className="px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-500/40 text-purple-300 font-bold text-[9px] tracking-wide uppercase">
+                      <span className="px-2 py-0.5 rounded-full bg-purple-600/30 border border-purple-400 text-purple-200 font-bold text-[9px] tracking-wide uppercase shadow-[0_0_8px_rgba(168,85,247,0.3)]">
                         {selectedVenue.category}
                       </span>
                     )}
                   </div>
 
-                  <p className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
-                    <MapPin className="w-3 h-3 text-purple-400 shrink-0" />
+                  <p className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-0.5">
+                    <MapPin className="w-3 h-3 text-fuchsia-400 shrink-0" />
                     <span className="truncate">{selectedVenue.address}{selectedVenue.neighborhood ? `, ${selectedVenue.neighborhood}` : ''}</span>
                     {typeof selectedVenue.distanceKm === 'number' && (
-                      <span className="text-emerald-400 font-bold ml-auto shrink-0">
+                      <span className="text-emerald-300 font-black ml-auto shrink-0">
                         {selectedVenue.distanceKm.toFixed(1)} km
                       </span>
                     )}
                   </p>
                 </div>
               </div>
-
-              <button
-                onClick={() => setSelectedVenue(null)}
-                className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                title="Zamknij"
-              >
-                <X className="w-4 h-4" />
-              </button>
             </div>
 
-            {/* Description */}
-            <p className="text-xs text-slate-300 line-clamp-3 leading-relaxed">
-              {selectedVenue.description}
-            </p>
+            {/* Description (zwięzły i czytelny) */}
+            {selectedVenue.description && (
+              <p className="text-xs text-slate-200 font-normal line-clamp-2 leading-relaxed bg-purple-950/25 p-2 rounded-xl border border-purple-500/20">
+                {selectedVenue.description}
+              </p>
+            )}
 
-            {/* Opening Hours & Cruising Details */}
-            <div className="space-y-1.5">
-              {selectedVenue.openingHours && (
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-300 bg-white/[0.03] px-2.5 py-1.5 rounded-xl border border-white/[0.08]">
-                  <Clock className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                  <span className="font-semibold text-slate-400">Godziny:</span>
-                  <span className="font-medium text-slate-200">{selectedVenue.openingHours}</span>
-                </div>
-              )}
-
-              {/* Tags / Amenities */}
-              {selectedVenue.tags && selectedVenue.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1 pt-0.5">
-                  {selectedVenue.tags.map((tag, idx) => (
-                    <span
-                      key={idx}
-                      className="px-2 py-0.5 rounded-lg bg-white/5 border border-white/10 text-[10px] text-slate-300 font-medium"
-                    >
-                      #{tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Opening Hours */}
+            {selectedVenue.openingHours && (
+              <div className="flex items-center gap-1.5 text-[11px] text-purple-200 bg-purple-900/30 px-2.5 py-1.5 rounded-xl border border-purple-500/30">
+                <Clock className="w-3.5 h-3.5 text-fuchsia-400 shrink-0" />
+                <span className="font-bold text-fuchsia-300">Godziny:</span>
+                <span className="font-semibold text-white">{selectedVenue.openingHours}</span>
+              </div>
+            )}
 
             {/* Action Buttons: Navigate & Check Nearby */}
             <div className="grid grid-cols-2 gap-2 pt-1">
@@ -1046,10 +1047,10 @@ export const MapView: React.FC<MapViewProps> = ({
                 href={`https://www.google.com/maps/dir/?api=1&destination=${selectedVenue.lat},${selectedVenue.lng}`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:brightness-110 text-white text-xs font-bold shadow-md transition-all active:scale-95"
+                className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:brightness-125 text-white text-xs font-black shadow-[0_0_15px_rgba(217,70,239,0.5)] transition-all active:scale-95"
               >
                 <Navigation className="w-3.5 h-3.5 text-amber-300" />
-                <span>Trasa (Google Maps)</span>
+                <span>Trasa</span>
               </a>
 
               <button
@@ -1062,10 +1063,10 @@ export const MapView: React.FC<MapViewProps> = ({
                     });
                   }
                 }}
-                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 hover:text-white text-xs font-semibold border border-white/10 transition-all active:scale-95 cursor-pointer"
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-purple-900/40 hover:bg-purple-800/50 text-white text-xs font-bold border border-purple-500/40 shadow-sm transition-all active:scale-95 cursor-pointer"
               >
-                <Compass className="w-3.5 h-3.5 text-purple-400" />
-                <span>Przybliż na mapie</span>
+                <Compass className="w-3.5 h-3.5 text-fuchsia-400" />
+                <span>Przybliż</span>
               </button>
             </div>
           </div>
@@ -1075,13 +1076,23 @@ export const MapView: React.FC<MapViewProps> = ({
       {/* Selected Profile Preview Card (Requirement 5 & 6) */}
       {selectedProfile && (
         <div className="absolute bottom-3 inset-x-3 sm:left-auto sm:right-4 sm:w-80 z-20 animate-slide-up">
-          <div className="p-3.5 rounded-3xl bg-[#090b14]/95 backdrop-blur-2xl border border-white/10 shadow-[0_12px_40px_rgba(0,0,0,0.85)] flex flex-col gap-3">
-            <div className="flex items-start justify-between gap-3">
+          <div className="relative p-3.5 rounded-3xl bg-[#090714]/95 backdrop-blur-2xl border-2 border-purple-500/40 shadow-[0_12px_45px_rgba(147,51,234,0.35),0_0_20px_rgba(217,70,239,0.2)] flex flex-col gap-3">
+            {/* Top-Right Dedicated Close X Button */}
+            <button
+              onClick={() => setSelectedProfile(null)}
+              className="absolute -top-2.5 -right-2.5 z-30 w-7 h-7 rounded-full bg-gradient-to-tr from-purple-700 to-fuchsia-600 border-2 border-white/80 shadow-[0_0_12px_rgba(217,70,239,0.8)] text-white hover:scale-110 active:scale-95 flex items-center justify-center transition-all cursor-pointer"
+              title="Zamknij (X)"
+              aria-label="Zamknij okno profilu"
+            >
+              <X className="w-3.5 h-3.5 stroke-[2.5]" />
+            </button>
+
+            <div className="flex items-start justify-between gap-3 pr-4">
               <div className="flex items-center gap-3">
-                <div className="relative w-12 h-12 rounded-2xl overflow-hidden border border-white/15 bg-purple-950/40 shrink-0">
-                  {selectedProfile.photos?.some(photo => !photo.isPrivate && !photo.isLocked) ? (
+                <div className="relative w-12 h-12 rounded-2xl overflow-hidden border-2 border-purple-500/40 bg-purple-950/60 shrink-0">
+                  {selectedProfile.photos && selectedProfile.photos.length > 0 ? (
                     <img
-                      src={selectedProfile.photos.find(photo => !photo.isPrivate && !photo.isLocked)!.url}
+                      src={selectedProfile.photos[0].url}
                       alt={selectedProfile.displayName}
                       className="w-full h-full object-cover"
                     />
@@ -1097,42 +1108,32 @@ export const MapView: React.FC<MapViewProps> = ({
 
                 <div>
                   <div className="flex items-center gap-1.5">
-                    <h4 className="font-bold text-sm text-white">
+                    <h4 className="font-extrabold text-sm text-white">
                       {selectedProfile.displayName}, {selectedProfile.age}
                     </h4>
                     {selectedProfile.verified && (
-                      <CheckCircle2 className="w-3.5 h-3.5 text-purple-400" />
+                      <CheckCircle2 className="w-3.5 h-3.5 text-fuchsia-400" />
                     )}
                   </div>
-                  <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
-                    <Radio className="w-3 h-3 text-purple-400" />
+                  <p className="text-[11px] text-slate-300 flex items-center gap-1 mt-0.5">
+                    <Radio className="w-3 h-3 text-fuchsia-400" />
                     <span>
                       {selectedProfile.locationPrivacy === 'EXACT'
                         ? 'Dokładna pozycja'
-                        : selectedProfile.locationPrivacy === 'HIDDEN' || selectedProfile.lat === undefined
-                        ? 'Pozycja nieudostępniona'
-                        : 'Przybliżona pozycja'}
+                        : '~1.5 km w okolicy'}
                     </span>
                     {selectedProfile.identityRole && (
-                      <span className="px-1.5 py-0.2 rounded-md bg-white/5 text-purple-300 text-[10px]">
+                      <span className="px-1.5 py-0.2 rounded-md bg-purple-900/40 text-purple-200 border border-purple-500/30 text-[10px]">
                         {selectedProfile.identityRole}
                       </span>
                     )}
                   </p>
                 </div>
               </div>
-
-              <button
-                onClick={() => setSelectedProfile(null)}
-                className="p-1 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
-                title="Zamknij"
-              >
-                <X className="w-4 h-4" />
-              </button>
             </div>
 
             {selectedProfile.bio && (
-              <p className="text-xs text-slate-300 line-clamp-2 italic">
+              <p className="text-xs text-slate-200 line-clamp-2 italic bg-purple-950/25 p-2 rounded-xl border border-purple-500/20">
                 "{selectedProfile.bio}"
               </p>
             )}
@@ -1140,14 +1141,14 @@ export const MapView: React.FC<MapViewProps> = ({
             <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 onClick={() => onOpenChat(selectedProfile.userId || selectedProfile.id)}
-                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
+                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-indigo-600 hover:brightness-125 text-white text-xs font-bold shadow-[0_0_12px_rgba(217,70,239,0.5)] transition-all active:scale-95"
               >
                 <MessageCircle className="w-3.5 h-3.5" />
                 <span>Napisz</span>
               </button>
               <button
                 onClick={() => onOpenProfile(selectedProfile)}
-                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 hover:text-white text-xs font-semibold border border-white/10 transition-all active:scale-95"
+                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-purple-900/40 hover:bg-purple-800/50 text-white text-xs font-bold border border-purple-500/40 transition-all active:scale-95"
               >
                 <UserIcon className="w-3.5 h-3.5" />
                 <span>Profil</span>

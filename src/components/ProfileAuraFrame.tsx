@@ -8,6 +8,7 @@ export interface ProfileAuraFrameProps {
   intensity?: 'subtle' | 'normal' | 'prominent';
   borderWidth?: number;
   onClick?: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onContextMenu?: (e: React.MouseEvent<HTMLDivElement>) => void;
   style?: React.CSSProperties;
   role?: string;
   'aria-label'?: string;
@@ -34,6 +35,7 @@ export const ProfileAuraFrame: React.FC<ProfileAuraFrameProps> = ({
   intensity = 'normal',
   borderWidth = 1.5,
   onClick,
+  onContextMenu,
   style,
   role,
   'aria-label': ariaLabel,
@@ -56,6 +58,7 @@ export const ProfileAuraFrame: React.FC<ProfileAuraFrameProps> = ({
   return (
     <div
       onClick={onClick}
+      onContextMenu={onContextMenu}
       role={role || (isInteractive ? 'button' : undefined)}
       tabIndex={isInteractive ? 0 : undefined}
       aria-label={ariaLabel}

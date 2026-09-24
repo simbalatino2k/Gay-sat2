@@ -17,6 +17,7 @@ export async function sendAdEvent(
 ): Promise<void> {
   const consent = getAdConsent();
   if (!consent.consentGiven || !consent.allowAnalytics) return;
+  if (ADS_CONFIG.TELEMETRY_SAMPLE_RATE <= 0) return;
   if (Math.random() > ADS_CONFIG.TELEMETRY_SAMPLE_RATE) return;
 
   const eventPayload: AdAnalyticsEvent = {

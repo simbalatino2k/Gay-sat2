@@ -26,8 +26,10 @@ import {
   CheckCircle,
   Zap,
   Crown,
-  ArrowLeft
+  ArrowLeft,
+  Globe
 } from 'lucide-react';
+import { useTranslation, CollapsedLanguageSelector } from '../context/LanguageContext';
 import { AdSlot } from './ads';
 import { getAdConsent, saveAdConsent } from '../config/adsConfig';
 import { PremiumPaywallModal } from './billing/PremiumPaywallModal';
@@ -48,6 +50,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onSelectTab,
   onUpdateUser
 }) => {
+  const { language, setLanguage, t, languages } = useTranslation();
   const [upgrading, setUpgrading] = useState(false);
   const [upgradeUrl, setUpgradeUrl] = useState<string | null>(null);
   const [showPaywall, setShowPaywall] = useState(false);
@@ -207,10 +210,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       if (!res.ok) throw new Error('Privacy preferences could not be saved.');
       const data = await res.json();
       if (data.consents) setConsents(data.consents);
-      if (res.ok) {
-        setConsentSuccessMsg('Privacy preference saved.');
-        setTimeout(() => setConsentSuccessMsg(''), 3000);
-      }
+      setConsentSuccessMsg('Privacy preference saved.');
+      setTimeout(() => setConsentSuccessMsg(''), 3000);
     } catch (err) {
       setConsents(previous);
       setConsentSuccessMsg('Nie zapisano zmiany. Spróbuj ponownie.');
@@ -378,12 +379,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           )}
           <h2 className="text-base font-extrabold text-white tracking-wide flex items-center gap-2">
             <Shield className="w-4 h-4 text-purple-400" />
-            <span>Settings & Privacy Center</span>
+            <span>{t('settings_title', 'Settings & Privacy Center')}</span>
           </h2>
         </div>
-        <span className="text-[10px] font-bold text-fuchsia-400 bg-fuchsia-500/10 px-2.5 py-1 rounded-full border border-fuchsia-500/30 flex items-center gap-1">
-          <Sparkles className="w-3 h-3" /> GDPR & DSA Certified
+        <span className="text-[10px] font-bold text-fuchsia-400 bg-fuchsia-500/10 px-2.5 py-1 rounded-full border border-fuchsia-500/30 flex items-center gap-1 shadow-[0_0_10px_rgba(217,70,239,0.3)]">
+          <Sparkles className="w-3 h-3 text-fuchsia-400" /> GDPR & DSA
         </span>
+      </div>
+
+      {/* Language Selector (Small, Collapsed by Default) */}
+      <div className="aura-glass-card rounded-[24px] border border-cyan-500/30 bg-[#0d101e]/80 p-3.5 flex items-center justify-between shadow-lg">
+        <div className="flex items-center gap-2">
+          <Globe className="w-4 h-4 text-cyan-400" />
+          <span className="text-xs font-bold text-white">{t('settings_language', 'Język aplikacji')}</span>
+        </div>
+        <CollapsedLanguageSelector />
       </div>
 
       {/* Membership Plan Tier Card */}
@@ -397,7 +407,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
             <div>
               <h3 className="text-xs font-black text-white tracking-wide">AURA VIP PASS</h3>
-              <p className="text-[10px] text-fuchsia-300/80">Sensual & Privileged Experience</p>
+              <p className="text-[10px] text-fuchsia-300/80">Konto Premium</p>
             </div>
           </div>
           <span className="text-[9px] font-black tracking-wider text-rose-300 bg-rose-500/20 px-2 py-0.5 rounded-full border border-rose-500/40">
@@ -405,24 +415,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </span>
         </div>
 
-        <p className="text-xs text-slate-300 leading-relaxed">
-          Enjoy unlimited likes, see who viewed your profile, stealth incognito mode, and priority in Discover.
-        </p>
-
-        {/* Ad-Free Guarantee Badge */}
-        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-purple-950/40 border border-purple-500/20 text-[11px] text-fuchsia-200">
-          <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-          <span><strong>100% Ad-Free Guarantee:</strong> Premium members experience zero sponsored content across Discover and Radar.</span>
-        </div>
-
         {/* Current VIP Status */}
         <div className="flex items-center justify-between pt-1">
           <span className="text-xs text-slate-300">
-            Membership: {currentUser.isPremium ? <strong className="text-emerald-400">ACTIVE VIP (Ad-Free)</strong> : <span className="text-slate-400">Standard Tier (Subtle Ads)</span>}
+            Status: {currentUser.isPremium ? <strong className="text-emerald-400">VIP Aktywny</strong> : <span className="text-slate-400">Podstawowy</span>}
           </span>
           {currentUser.isPremium && (
             <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full">
-              Verified Active
+              Aktywny
             </span>
           )}
         </div>
@@ -437,10 +437,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             id="btn-open-paywall-modal"
             onClick={() => setShowPaywall(true)}
-            className="w-full py-3 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-lg shadow-fuchsia-950/50 hover:brightness-110 active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2"
+            className="w-full py-4 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-600 to-rose-500 text-sm font-black uppercase tracking-wider text-white shadow-xl shadow-fuchsia-950/60 hover:brightness-110 active:scale-[0.98] transition-all duration-200 flex items-center justify-center gap-2"
           >
-            <Crown className="w-4 h-4" />
-            <span>{currentUser.isPremium ? 'Change / View AURA VIP Plans' : 'Unlock AURA Premium'}</span>
+            <Crown className="w-5 h-5" />
+            <span>Wybierz Premium</span>
           </button>
 
           <div className="flex items-center justify-between px-1 text-xs">
@@ -451,7 +451,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className="text-violet-400 hover:text-violet-300 transition flex items-center gap-1.5 font-medium disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${restoringPurchases ? 'animate-spin' : ''}`} />
-              <span>{restoringPurchases ? 'Checking store...' : 'Restore Purchases'}</span>
+              <span>{restoringPurchases ? 'Sprawdzanie...' : 'Przywróć zakupy'}</span>
             </button>
 
             <button
@@ -459,121 +459,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               onClick={() => billingClient.openSubscriptionManagement()}
               className="text-slate-400 hover:text-slate-200 transition font-medium"
             >
-              Manage Subscription
+              Zarządzaj subskrypcją
             </button>
           </div>
         </div>
       </div>
 
-      {/* GDPR Privacy & Consent Management (EU GDPR Article 7 & 9) */}
-      <div className="aura-glass-card rounded-[28px] border border-purple-500/20 bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3.5 shadow-lg">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Lock className="w-4 h-4 text-purple-400" />
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider">GDPR Consent Hub</h3>
-          </div>
-          {consentSuccessMsg && (
-            <span className="text-[10px] text-emerald-400 font-semibold animate-fade-in flex items-center gap-1">
-              <Check className="w-3 h-3" /> {consentSuccessMsg}
-            </span>
-          )}
+      {/* Zasady UE (Dokładnie 3 konkretne zdania) */}
+      <div className="aura-glass-card rounded-[24px] border border-blue-500/30 bg-[#0c1222]/85 p-4 space-y-2.5 shadow-lg">
+        <div className="flex items-center gap-2">
+          <Scale className="w-4 h-4 text-blue-400" />
+          <h3 className="text-xs font-black text-white uppercase tracking-wider">Zasady UE</h3>
         </div>
-
-        <p className="text-[11px] text-slate-400 leading-relaxed">
-          Manage your processing permissions anytime under Regulation (EU) 2016/679 (GDPR).
+        <p className="text-xs text-slate-200 leading-relaxed font-normal">
+          AI podpowiada treści, nie podejmuje automatycznie decyzji moderacyjnych. Zgłoszenia i odwołania są dostępne zgodnie z DSA. Dane i zgody można zmienić lub pobrać.
         </p>
-
-        <div className="space-y-2">
-          {/* Strictly Necessary */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div>
-              <p className="text-xs font-bold text-white">Security & Necessary Services</p>
-              <p className="text-[10px] text-slate-400">Authentication, session integrity, age gating (Art. 6(1)(b))</p>
-            </div>
-            <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
-              MANDATORY
-            </span>
-          </div>
-
-          {/* ePrivacy Directive / Ad Personalization */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="pr-2">
-              <p className="text-xs font-bold text-white">Ad Personalization (ePrivacy / GDPR)</p>
-              <p className="text-[10px] text-slate-400">Contextual interest matching without third-party cross-site trackers</p>
-            </div>
-            <button
-              onClick={() => handleUpdateAdConsent(!adConsent.allowPersonalizedAds)}
-              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${adConsent.allowPersonalizedAds ? 'bg-purple-600' : 'bg-white/20'}`}
-            >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${adConsent.allowPersonalizedAds ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-
-          {/* Special Category Data */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="pr-2">
-              <p className="text-xs font-bold text-white">Special Category Consent (Art. 9)</p>
-              <p className="text-[10px] text-slate-400">Processing sexual orientation and dating preferences</p>
-            </div>
-            <button
-              onClick={() => handleSaveConsent('explicitSpecialCategoryConsent', !consents?.explicitSpecialCategoryConsent)}
-              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.explicitSpecialCategoryConsent ? 'bg-purple-600' : 'bg-white/20'}`}
-            >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.explicitSpecialCategoryConsent ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-
-          {/* Location Processing */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="pr-2">
-              <p className="text-xs font-bold text-white">Location Services (Radar)</p>
-              <p className="text-[10px] text-slate-400">Real-time approximate proximity calculation</p>
-            </div>
-            <button
-              onClick={() => handleSaveConsent('locationProcessingConsent', !consents?.locationProcessingConsent)}
-              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.locationProcessingConsent ? 'bg-purple-600' : 'bg-white/20'}`}
-            >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.locationProcessingConsent ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-
-          {/* AI Wingman Suggestions */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="pr-2">
-              <p className="text-xs font-bold text-white">AI Wingman Icebreaker Generator</p>
-              <p className="text-[10px] text-slate-400">Assistive conversation starters powered by Gemini</p>
-            </div>
-            <button
-              onClick={() => handleSaveConsent('aiAssistanceConsent', !consents?.aiAssistanceConsent)}
-              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.aiAssistanceConsent ? 'bg-purple-600' : 'bg-white/20'}`}
-            >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.aiAssistanceConsent ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-
-          {/* Anonymous Analytics */}
-          <div className="flex items-center justify-between p-2.5 rounded-2xl bg-white/[0.03] border border-white/[0.05]">
-            <div className="pr-2">
-              <p className="text-xs font-bold text-white">Product Quality Analytics</p>
-              <p className="text-[10px] text-slate-400">Aggregated telemetry to improve stability</p>
-            </div>
-            <button
-              onClick={() => handleSaveConsent('analyticsCookies', !consents?.analyticsCookies)}
-              className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${consents?.analyticsCookies ? 'bg-purple-600' : 'bg-white/20'}`}
-            >
-              <div className={`w-3.5 h-3.5 rounded-full bg-white transition-transform absolute top-0.5 ${consents?.analyticsCookies ? 'right-1' : 'left-1'}`} />
-            </button>
-          </div>
-        </div>
       </div>
-
-      {/* Subtle Native Ad in Settings (between major sections) */}
-      <AdSlot
-        placement="settings"
-        format="wide-card"
-        currentUser={currentUser}
-        onOpenPrivacy={() => {}}
-      />
 
       {/* GDPR Data Subject Rights (Articles 15, 16, 17, 18, 20, 21) */}
       <div className="aura-glass-card rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/80 backdrop-blur-xl p-4 space-y-3.5 shadow-lg">
@@ -878,7 +779,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           className="w-full py-3 rounded-2xl border border-rose-500/20 bg-rose-500/[0.08] text-xs font-bold text-rose-400 flex items-center justify-center gap-2 hover:bg-rose-500/[0.14] active:scale-[0.98] transition-all"
         >
           <Trash2 className="w-4 h-4" />
-          <span>Erase Personal Data & Delete Account (Art. 17)</span>
+          <span>Delete Account</span>
         </button>
 
         {showDeleteConfirm && (

@@ -17,14 +17,14 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['apple-touch-icon.png', 'icon.svg', 'icon-192.png', 'icon-512.png'],
+        includeAssets: ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'],
         manifest: {
           id: '/',
           name: 'AURA GAY 18+ — Premium Gay Social',
           short_name: 'AURA 18+',
           description: 'A premium, secure, polished, mobile-first gay social & dating connection platform for adults 18+.',
-          theme_color: '#100c19',
-          background_color: '#100c19',
+          theme_color: '#0b0d12',
+          background_color: '#0b0d12',
           display: 'standalone',
           start_url: '/',
           scope: '/',
@@ -42,7 +42,7 @@ export default defineConfig(() => {
               purpose: 'any',
             },
             {
-              src: '/icon-512.png',
+              src: '/icon-maskable-512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -65,6 +65,7 @@ export default defineConfig(() => {
     },
     server: {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
     },
     build: {
       outDir: 'dist/web',

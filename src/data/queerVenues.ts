@@ -810,6 +810,564 @@ export const GLOBAL_QUEER_VENUES: QueerVenue[] = [
     isVerified: true,
     isCruising: true,
     openingHours: 'Codziennie 14:00 - 05:00'
+  },
+
+  // ==========================================
+  // --- NEW YORK CITY, USA ---
+  // ==========================================
+  {
+    id: 'venue-nyc-stonewall',
+    name: 'The Stonewall Inn',
+    category: 'bar',
+    lat: 40.7338,
+    lng: -74.0021,
+    address: '53 Christopher St, New York, NY 10014, USA',
+    neighborhood: 'Greenwich Village',
+    city: 'New York',
+    description: 'Historyczne miejsce narodzin współczesnego ruchu praw LGBT+ (Stonewall 1969). Legendarne miejsce spotkań, drinków i występów na żywo.',
+    distanceKm: 0,
+    tags: ['Historyczne', 'Stonewall', 'Bar', 'Greenwich Village', 'Nowy Jork'],
+    imageUrl: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 14:00 - 04:00'
+  },
+  {
+    id: 'venue-nyc-the-cock',
+    name: 'The Cock (East Village)',
+    category: 'cruising',
+    lat: 40.7252,
+    lng: -73.9877,
+    address: '93 2nd Ave, New York, NY 10003, USA',
+    neighborhood: 'East Village',
+    city: 'New York',
+    description: 'Kultowy undergroundowy bar i klub gejowski w Nowym Jorku z mrocznym parkietem, piwnicą cruisingową i niesamowitą energią.',
+    distanceKm: 0,
+    tags: ['Cruising', 'Darkroom', 'Underground', 'East Village', 'Nowy Jork'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 22:00 - 04:00'
+  },
+  {
+    id: 'venue-nyc-east-side-club',
+    name: 'East Side Club NYC',
+    category: 'sauna',
+    lat: 40.7584,
+    lng: -73.9678,
+    address: '227 E 56th St, New York, NY 10022, USA',
+    neighborhood: 'Midtown East',
+    city: 'New York',
+    description: 'Całodobowa sauna gejowska w centrum Manhattanu: parówki, sauna sucha, kabiny prywatne, leżanki i strefa cruisingowa.',
+    distanceKm: 0,
+    tags: ['Sauna NYC', 'Całodobowa', 'Cruising', 'Manhattan', 'Nowy Jork'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+  {
+    id: 'venue-nyc-rambles',
+    name: 'The Ramble (Central Park Cruising)',
+    category: 'cruising',
+    lat: 40.7785,
+    lng: -73.9692,
+    address: 'Central Park (The Ramble), New York, NY, USA',
+    neighborhood: 'Central Park',
+    city: 'New York',
+    description: 'Światowej sławy zabytkowy leśny obszar w Central Parku, znany z cruisingu na świeżym powietrzu wśród malowniczych ścieżek.',
+    distanceKm: 0,
+    tags: ['Outdoor Cruising', 'Central Park', 'The Ramble', 'Nowy Jork'],
+    imageUrl: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Zmierzch i noc'
+  },
+
+  // ==========================================
+  // --- SAN FRANCISCO, USA ---
+  // ==========================================
+  {
+    id: 'venue-sf-twin-peaks',
+    name: 'Twin Peaks Tavern (Castro)',
+    category: 'bar',
+    lat: 37.7624,
+    lng: -122.4351,
+    address: '401 Castro St, San Francisco, CA 94114, USA',
+    neighborhood: 'The Castro',
+    city: 'San Francisco',
+    description: 'Zabytkowy pierwszy bar gejowski z wielkimi oknami na ulicę Castro, punkt orientacyjny światowej historii LGBT+.',
+    distanceKm: 0,
+    tags: ['The Castro', 'Bar', 'Zabytkowy', 'San Francisco'],
+    imageUrl: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 12:00 - 02:00'
+  },
+  {
+    id: 'venue-sf-eros',
+    name: 'Eros SF (Sex & Cruising Club)',
+    category: 'cruising',
+    lat: 37.7818,
+    lng: -122.4172,
+    address: '86 14th St, San Francisco, CA 94103, USA',
+    neighborhood: 'SoMa / Mission',
+    city: 'San Francisco',
+    description: 'Kultowy klub swingerski i cruisingowy w San Francisco z łaźniami, slingami, labiryntami i strefą safer-sex.',
+    distanceKm: 0,
+    tags: ['Cruising Club', 'SoMa', 'Slings', 'Darkroom', 'San Francisco'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Wtorek - Niedziela 16:00 - 02:00'
+  },
+  {
+    id: 'venue-sf-steamworks-berkeley',
+    name: 'Steamworks Baths Berkeley',
+    category: 'sauna',
+    lat: 37.8548,
+    lng: -122.2907,
+    address: '2107 4th St, Berkeley, CA 94710, USA',
+    neighborhood: 'Bay Area / Berkeley',
+    city: 'San Francisco',
+    description: 'Jedna z najsłynniejszych łaźni parowych w USA: basen, sauna parowa, gigantyczne jacuzzi, labirynty i pokoje prywatne.',
+    distanceKm: 0,
+    tags: ['Sauna', 'Basen', 'Jacuzzi', 'Bay Area', 'Cruising'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+
+  // ==========================================
+  // --- LOS ANGELES, USA ---
+  // ==========================================
+  {
+    id: 'venue-la-abbey',
+    name: 'The Abbey Food & Bar',
+    category: 'club',
+    lat: 34.0848,
+    lng: -118.3852,
+    address: '692 N Robertson Blvd, West Hollywood, CA 90069, USA',
+    neighborhood: 'West Hollywood (WeHo)',
+    city: 'Los Angeles',
+    description: 'Najsłynniejszy bar i klub LGBT+ na świecie, serce sceny WeHo w Los Angeles z tancerzami go-go, patio i koktajlami.',
+    distanceKm: 0,
+    tags: ['WeHo', 'Klub', 'Go-Go', 'West Hollywood', 'Los Angeles'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 11:00 - 02:00'
+  },
+  {
+    id: 'venue-la-slammer',
+    name: 'Slammer LA (Cruising Club)',
+    category: 'cruising',
+    lat: 34.0522,
+    lng: -118.2437,
+    address: 'Industrial St, Los Angeles, CA 90021, USA',
+    neighborhood: 'Downtown Arts District',
+    city: 'Los Angeles',
+    description: 'Surowy klub cruisingowy z labiryntem, klatkami, slingami i darkroomem dla entuzjastów fetyszu i skóry w Los Angeles.',
+    distanceKm: 0,
+    tags: ['Cruising', 'Leather & Fetish', 'Darkroom', 'Los Angeles'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Czw - Ndz 21:00 - 04:00'
+  },
+
+  // ==========================================
+  // --- MIAMI, USA ---
+  // ==========================================
+  {
+    id: 'venue-mia-twist',
+    name: 'Twist South Beach',
+    category: 'club',
+    lat: 25.7824,
+    lng: -80.1342,
+    address: '1057 Washington Ave, Miami Beach, FL 33139, USA',
+    neighborhood: 'South Beach',
+    city: 'Miami',
+    description: 'Legendarny kompleks 7 barów w jednym budynku na South Beach. Nigdy nie ma opłaty za wstęp, tancerze, muzyka latino i pop.',
+    distanceKm: 0,
+    tags: ['South Beach', 'Klub nocny', 'Brak coveru', 'Miami'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 13:00 - 05:00'
+  },
+  {
+    id: 'venue-mia-club-ft-lauderdale',
+    name: 'The Club Fort Lauderdale',
+    category: 'sauna',
+    lat: 26.1224,
+    lng: -80.1373,
+    address: '2991 W Broward Blvd, Fort Lauderdale, FL 33312, USA',
+    neighborhood: 'Greater Miami / Fort Lauderdale',
+    city: 'Miami',
+    description: 'Największy kurort saunowy w południowej Florydzie: odkryty basen w słońcu, strefa nagości, siłownia, jacuzzi i łaźnie.',
+    distanceKm: 0,
+    tags: ['Sauna Floryda', 'Odkryty basen', 'Strefa nagości', 'Cruising', 'Miami'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+  {
+    id: 'venue-mia-haulover',
+    name: 'Haulover Nude Beach (Gay Area)',
+    category: 'cruising',
+    lat: 25.9015,
+    lng: -80.1215,
+    address: '10800 Collins Ave, Miami Beach, FL 33154, USA',
+    neighborhood: 'Haulover Inlet',
+    city: 'Miami',
+    description: 'Najsłynniejsza plaża naturystyczna w USA z wydzieloną gejowską częścią na północnym krańcu, doskonała do spotkań w słońcu.',
+    distanceKm: 0,
+    tags: ['Naturystyka', 'Plaża Gejowska', 'Outdoor Cruising', 'Miami'],
+    imageUrl: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Od wschodu do zachodu słońca'
+  },
+
+  // ==========================================
+  // --- TORONTO, CANADA ---
+  // ==========================================
+  {
+    id: 'venue-tor-woody',
+    name: "Woody's & Sailor",
+    category: 'bar',
+    lat: 43.6645,
+    lng: -79.3804,
+    address: '467 Church St, Toronto, ON M4Y 2C5, Canada',
+    neighborhood: 'The Village (Church & Wellesley)',
+    city: 'Toronto',
+    description: 'Serce tęczowej dzielnicy Church-Wellesley w Toronto. Znany na całym świecie z serialu Queer as Folk.',
+    distanceKm: 0,
+    tags: ['Church Street', 'The Village', 'Bar', 'Toronto'],
+    imageUrl: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 14:00 - 02:00'
+  },
+  {
+    id: 'venue-tor-steamworks',
+    name: 'Steamworks Toronto',
+    category: 'sauna',
+    lat: 43.6664,
+    lng: -79.3813,
+    address: '540 Church St, Toronto, ON M4Y 2E1, Canada',
+    neighborhood: 'Church & Wellesley',
+    city: 'Toronto',
+    description: 'Całodobowa ekskluzywna sauna gejowska z łaźnią turecką, labiryntem, prywatnymi kabinami i strefą sling.',
+    distanceKm: 0,
+    tags: ['Sauna Toronto', 'Cruising', 'Church St', 'Darkroom'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+
+  // ==========================================
+  // --- SÃO PAULO, BRAZIL ---
+  // ==========================================
+  {
+    id: 'venue-sp-chilli',
+    name: 'Chilli Pepper Single Hotel & Sauna',
+    category: 'sauna',
+    lat: -23.5352,
+    lng: -46.6508,
+    address: 'Largo do Arouche, 610 - Santa Cecilia, São Paulo, Brazil',
+    neighborhood: 'Largo do Arouche',
+    city: 'São Paulo',
+    description: 'Największy hotel i sauna dla mężczyzn w Ameryce Łacińskiej: baseny, sauny, bary, taras na dachu i dziesiątki kabin.',
+    distanceKm: 0,
+    tags: ['Sauna Brasil', 'Largo do Arouche', 'Cruising', 'Basen', 'São Paulo'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+  {
+    id: 'venue-sp-yacht',
+    name: 'Club Yacht São Paulo',
+    category: 'club',
+    lat: -23.5539,
+    lng: -46.6565,
+    address: 'Rua Treze de Maio, 703 - Bela Vista, São Paulo, Brazil',
+    neighborhood: 'Bixiga / Bela Vista',
+    city: 'São Paulo',
+    description: 'Wystawny klub z motywem marynistycznym, muzyką pop, electro i wspaniałym tłumem São Paulo LGBT+.',
+    distanceKm: 0,
+    tags: ['Klub', 'Muzyka Pop/Electro', 'Bela Vista', 'São Paulo'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Środa - Sobota 23:30 - 06:00'
+  },
+
+  // ==========================================
+  // --- BUENOS AIRES, ARGENTINA ---
+  // ==========================================
+  {
+    id: 'venue-ba-amerika',
+    name: 'Amerika Disco Buenos Aires',
+    category: 'club',
+    lat: -34.6022,
+    lng: -58.4239,
+    address: 'Gascón 1040, Almagro, Buenos Aires, Argentina',
+    neighborhood: 'Almagro',
+    city: 'Buenos Aires',
+    description: 'Największa gejowska dyskoteka w Ameryce Południowej: 3 parkiety taneczne, gigantyczny darkroom i cruising mezzanine.',
+    distanceKm: 0,
+    tags: ['Mega Disco', 'Darkroom', 'Cruising', 'Buenos Aires'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Piątek - Niedziela 00:00 - 07:00'
+  },
+  {
+    id: 'venue-ba-madness',
+    name: 'Madness Sex Club & Cruising',
+    category: 'cruising',
+    lat: -34.5985,
+    lng: -58.3912,
+    address: 'Av. Santa Fe 1740, Recoleta, Buenos Aires, Argentina',
+    neighborhood: 'Recoleta / Barrio Norte',
+    city: 'Buenos Aires',
+    description: 'Kultowy klub cruisingowy w centrum Buenos Aires z kabinami, korytarzami labiryntu i pokazami filmów.',
+    distanceKm: 0,
+    tags: ['Cruising Club', 'Recoleta', 'Kabiny', 'Buenos Aires'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 14:00 - 04:00'
+  },
+
+  // ==========================================
+  // --- TOKYO, JAPAN (SHINJUKU NI-CHOME) ---
+  // ==========================================
+  {
+    id: 'venue-tky-dragon-men',
+    name: 'Dragon Men Shinjuku',
+    category: 'bar',
+    lat: 35.6908,
+    lng: 139.7078,
+    address: '2-11-4 Shinjuku, Shinjuku City, Tokyo 160-0022, Japan',
+    neighborhood: 'Shinjuku Ni-chōme',
+    city: 'Tokyo',
+    description: 'Najbardziej przyjazny obcokrajowcom bar taneczny w tęczowej dzielnicy Ni-chome w Tokio z międzynarodowym klimatem.',
+    distanceKm: 0,
+    tags: ['Ni-chome', 'Bar', 'Tokyo LGBT', 'Shinjuku', 'Tokio'],
+    imageUrl: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 18:00 - 04:00'
+  },
+  {
+    id: 'venue-tky-24kaikan',
+    name: '24 Kaikan Shinjuku (Sauna & Cruising)',
+    category: 'sauna',
+    lat: 35.6915,
+    lng: 139.7092,
+    address: '2-13-11 Shinjuku, Shinjuku City, Tokyo 160-0022, Japan',
+    neighborhood: 'Shinjuku Ni-chōme',
+    city: 'Tokyo',
+    description: 'Słynna 8-piętrowa japońska łaźnia i hotel kapsułowy dla gejów w Shinjuku: japońskie łaźnie onsen, darkroomy i labirynty.',
+    distanceKm: 0,
+    tags: ['Onsen Sauna', 'Kapsuły', 'Cruising', 'Ni-chome', 'Tokio'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+  {
+    id: 'venue-tky-arstokyo',
+    name: 'Ars Tokyo (Cruising & Fetish Club)',
+    category: 'cruising',
+    lat: 35.6896,
+    lng: 139.7065,
+    address: 'Shinjuku 2-chome, Tokyo 160-0022, Japan',
+    neighborhood: 'Shinjuku Ni-chōme',
+    city: 'Tokyo',
+    description: 'Klub cruisingowy z ciemnymi korytarzami, prywatnymi kabinami i dress code dedykowanym męskiej energii.',
+    distanceKm: 0,
+    tags: ['Cruising', 'Fetish', 'Darkroom', 'Tokio'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 15:00 - 05:00'
+  },
+
+  // ==========================================
+  // --- BANGKOK, THAILAND (SILOM) ---
+  // ==========================================
+  {
+    id: 'venue-bkk-djstation',
+    name: 'DJ Station Silom Soi 2',
+    category: 'club',
+    lat: 13.7292,
+    lng: 100.5345,
+    address: 'Silom Soi 2, Silom, Bang Rak, Bangkok 10500, Thailand',
+    neighborhood: 'Silom Soi 2',
+    city: 'Bangkok',
+    description: 'Najsłynniejszy klub gejowski w Azji Południowo-Wschodniej. Pokazy drag show o północy, energetyczny parkiet i międzynarodowa publiczność.',
+    distanceKm: 0,
+    tags: ['Silom Soi 2', 'Klub', 'Drag Show', 'Bangkok'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 21:00 - 02:00'
+  },
+  {
+    id: 'venue-bkk-babylon',
+    name: 'The Babylon Bangkok Sauna',
+    category: 'sauna',
+    lat: 13.7198,
+    lng: 100.5432,
+    address: '34 Soi Nantha, South Sathorn Rd, Bangkok 10120, Thailand',
+    neighborhood: 'Sathorn / Silom',
+    city: 'Bangkok',
+    description: 'Światowej sławy kurort i sauna: odkryty basen w tropikalnym ogrodzie, siłownia, łaźnie parowe, strefa cruisingu i relaksu.',
+    distanceKm: 0,
+    tags: ['Sauna Kurort', 'Basen tropikalny', 'Cruising', 'Sathorn', 'Bangkok'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 12:00 - 23:00'
+  },
+  {
+    id: 'venue-bkk-chuku',
+    name: 'Chuku Sauna & Cruising Bangkok',
+    category: 'cruising',
+    lat: 13.7265,
+    lng: 100.5312,
+    address: 'Silom Soi 6, Bang Rak, Bangkok 10500, Thailand',
+    neighborhood: 'Silom',
+    city: 'Bangkok',
+    description: 'Popularny wśród lokalnych i turystów punkt cruisingowy w Silom z labiryntem, ciemnymi pokojami i strefą relaksu.',
+    distanceKm: 0,
+    tags: ['Cruising Club', 'Silom', 'Darkroom', 'Bangkok'],
+    imageUrl: 'https://images.unsplash.com/photo-1572116469696-31de0f17cc34?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 14:00 - 01:00'
+  },
+
+  // ==========================================
+  // --- SYDNEY, AUSTRALIA (OXFORD STREET) ---
+  // ==========================================
+  {
+    id: 'venue-syd-beresford',
+    name: 'The Beresford Hotel (Sunday Sundown)',
+    category: 'bar',
+    lat: -33.8837,
+    lng: 151.2163,
+    address: '354 Bourke St, Surry Hills, NSW 2010, Australia',
+    neighborhood: 'Surry Hills / Darlinghurst',
+    city: 'Sydney',
+    description: 'Piękny ogródek piwny i bar w sercu Surry Hills, legendarna niedzielna impreza beer garden w Sydney.',
+    distanceKm: 0,
+    tags: ['Oxford St area', 'Beer Garden', 'Surry Hills', 'Sydney'],
+    imageUrl: 'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Codziennie 12:00 - 00:00'
+  },
+  {
+    id: 'venue-syd-sydneysauna',
+    name: 'Sydney Sauna (Oxford Street)',
+    category: 'sauna',
+    lat: -33.8795,
+    lng: 151.2155,
+    address: '1/38-42 Oxford St, Darlinghurst, NSW 2010, Australia',
+    neighborhood: 'Darlinghurst',
+    city: 'Sydney',
+    description: 'Całodobowa sauna i przestrzeń cruisingowa przy kultowej Oxford Street: łaźnia parowa, spa, labirynt i prywatne kabiny.',
+    distanceKm: 0,
+    tags: ['Oxford Street', 'Sauna Sydney', 'Cruising', 'Sydney'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Otwarte 24/7'
+  },
+  {
+    id: 'venue-syd-lady-jane',
+    name: 'Lady Jane Beach (Nude Cruising Sydney)',
+    category: 'cruising',
+    lat: -33.8344,
+    lng: 151.2825,
+    address: 'Lady Bay Beach, Watsons Bay, NSW 2030, Australia',
+    neighborhood: 'Watsons Bay / South Head',
+    city: 'Sydney',
+    description: 'Oficjalna plaża dla naturystów w zatoce Sydney z widokiem na panoramę miasta i słynną atmosferą wolności.',
+    distanceKm: 0,
+    tags: ['Naturystyka', 'Plaża Gejowska', 'Outdoor Cruising', 'Sydney'],
+    imageUrl: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Od świtu do zmierzchu'
+  },
+
+  // ==========================================
+  // --- VIENNA, AUSTRIA (WIEDEŃ) ---
+  // ==========================================
+  {
+    id: 'venue-vie-kaiserbruendl',
+    name: 'Kaiserbründl Herrensauna Wien',
+    category: 'sauna',
+    lat: 48.2052,
+    lng: 16.3712,
+    address: 'Weihburggasse 18-20, 1010 Wien, Austria',
+    neighborhood: 'Innere Stadt',
+    city: 'Wiedeń',
+    description: 'Zabytkowa łaźnia rzymska z czasów cesarza Franciszka Józefa, jedna z najbardziej luksusowych i architektonicznie zjawiskowych saun w Europie.',
+    distanceKm: 0,
+    tags: ['Zabytkowa sauna cesarska', 'Innere Stadt', 'Cruising', 'Wiedeń', 'Wien'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 14:00 - 02:00'
+  },
+
+  // ==========================================
+  // --- PRAGUE, CZECHIA (PRAGA) ---
+  // ==========================================
+  {
+    id: 'venue-prg-babylon',
+    name: 'Sauna Babylon Praha',
+    category: 'sauna',
+    lat: 50.0882,
+    lng: 14.4312,
+    address: 'Hybernská 24, 110 00 Nové Město, Praha, Czechia',
+    neighborhood: 'Nové Město',
+    city: 'Praga',
+    description: 'Największa gejowska sauna w Pradze: labirynt cruisingowy na 3 piętrach, sucha sauna, łaźnia parowa i strefa wypoczynku.',
+    distanceKm: 0,
+    tags: ['Sauna Praga', 'Cruising', 'Darkroom', 'Praha'],
+    imageUrl: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=600&q=80',
+    isVerified: true,
+    isCruising: true,
+    openingHours: 'Codziennie 14:00 - 04:00'
+  },
+  {
+    id: 'venue-prg-termix',
+    name: 'Club Termix Praha',
+    category: 'club',
+    lat: 50.0768,
+    lng: 14.4418,
+    address: 'Třebízského 4a, 120 00 Vinohrady, Praha, Czechia',
+    neighborhood: 'Vinohrady',
+    city: 'Praga',
+    description: 'Kultowy klub gejowski w sercu dzielnicy Vinohrady. Szklany parkiet, retro muzyka pop i swobodna praska atmosfera.',
+    distanceKm: 0,
+    tags: ['Vinohrady', 'Klub', 'Muzyka Pop', 'Praga'],
+    imageUrl: 'https://images.unsplash.com/photo-1566737236500-c8ac43014a67?w=600&q=80',
+    isVerified: true,
+    isCruising: false,
+    openingHours: 'Środa - Sobota 20:00 - 05:00'
   }
 ];
 

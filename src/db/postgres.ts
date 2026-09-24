@@ -26,6 +26,7 @@ import {
 
 let pgPool: Pool | null = null;
 let isInitialized = false;
+let messageReceiptColumnsAvailable = true;
 
 /**
  * Checks whether a Unix domain socket path exists on the local filesystem.
@@ -232,9 +233,221 @@ export function getAdminPostgresPool(): Pool | null {
 }
 
 /**
- * Auto-creates tables and migrations safely.
+ * Required tables and essential columns that must exist for runtime operation.
+ */
+const REQUIRED_SCHEMA_DEFINITIONS: Record<string, string[]> = {
+  users: [
+    'id', 'email', 'display_name', 'age', 'role', 'status', 'bio',
+    'sexual_role', 'tribe', 'looking_for', 'vibe', 'interests', 'location',
+    'photos', 'is_verified', 'is_premium', 'premium_tier', 'privacy',
+    'user_mode', 'mode_updated_at', 'created_at', 'updated_at'
+  ],
+  user_passwords: ['user_id', 'salt_hash', 'created_at', 'updated_at'],
+  password_resets: ['token', 'user_id', 'expires_at', 'used', 'created_at'],
+  sessions: ['token', 'user_id', 'created_at', 'expires_at', 'last_used_at'],
+  user_consents: [
+    'user_id', 'gdpr_accepted', 'age_verified_18_plus', 'privacy_policy_version',
+    'terms_version', 'dsa_accepted', 'ai_assistance_consent', 'safe_content_enabled',
+    'location_processing_consent', 'special_category_consent', 'necessary_cookies',
+    'functional_cookies', 'analytics_cookies', 'timestamp', 'ip_address'
+  ],
+  likes: ['id', 'from_user_id', 'to_user_id', 'is_super_like', 'created_at'],
+  matches: ['id', 'user1_id', 'user2_id', 'is_super_match', 'created_at'],
+  blocks: ['id', 'blocker_user_id', 'blocked_user_id', 'created_at'],
+  reports: [
+    'id', 'reporter_user_id', 'reported_user_id', 'reason', 'details',
+    'status', 'reported_message_id', 'reported_media_id', 'decision',
+    'decision_reason', 'decided_at', 'decided_by', 'created_at'
+  ],
+  conversations: ['id', 'participant_ids', 'last_message_text', 'last_message_timestamp', 'created_at', 'updated_at'],
+  messages: [
+    'id', 'conversation_id', 'sender_id', 'receiver_id', 'text', 'type',
+    'media', 'status', 'client_message_id', 'created_at'
+  ],
+  moments: ['id', 'user_id', 'media_url', 'caption', 'expires_at', 'likes_count', 'views_count', 'created_at'],
+  subscriptions: ['id', 'user_id', 'stripe_customer_id', 'stripe_subscription_id', 'status', 'plan_id', 'current_period_end', 'created_at', 'updated_at'],
+  store_subscriptions: [
+    'id', 'user_id', 'provider', 'product_id', 'base_plan_id', 'purchase_token_hash',
+    'transaction_id', 'original_transaction_id', 'environment', 'status', 'auto_renew',
+    'purchase_date', 'expires_at', 'grace_period_expires_at', 'revoked_at', 'created_at',
+    'updated_at', 'last_verified_at'
+  ],
+  store_billing_events: ['id', 'provider', 'external_event_id', 'event_type', 'received_at', 'processed_at', 'status', 'metadata'],
+  stripe_events: ['event_id', 'event_type', 'processed_at'],
+  admin_audit_logs: ['id', 'admin_id', 'action', 'target_id', 'details', 'timestamp'],
+  moderation_notices: ['id', 'user_id', 'reason', 'dsa_statement_of_reasons', 'action_taken', 'created_at'],
+  dsa_appeals: ['id', 'notice_id', 'user_id', 'explanation', 'status', 'created_at', 'reviewed_at', 'reviewer_notes'],
+  media_records: ['id', 'owner_id', 'category', 'moderation_status', 'moderation_reason', 'mime_type', 'size', 'created_at'],
+  vault_grants: ['owner_id', 'granted_id', 'granted_at']
+};
+
+/**
+ * Read-only schema and privilege verification for production when running without DDL/admin rights.
+ * Returns true if all required tables, columns, and DML privileges exist.
+ * Otherwise logs precise details and returns false (fail-closed).
+ */
+export async function validatePostgresProductionSchema(pool: Pool): Promise<boolean> {
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (connErr: any) {
+    console.error('[PostgreSQL Production Audit Connection Failed]', connErr.message || connErr);
+    return false;
+  }
+
+  try {
+    const whoRes = await client.query(`
+      SELECT current_user, current_database(),
+             has_schema_privilege(current_user, 'public', 'USAGE') AS has_usage,
+             has_schema_privilege(current_user, 'public', 'CREATE') AS has_create
+    `);
+    const who = whoRes.rows[0] || {};
+    console.log(
+      `[PostgreSQL Production Audit] Connected as user='${who.current_user}' on database='${who.current_database}' (public USAGE=${who.has_usage}, CREATE=${who.has_create})`
+    );
+
+    // 1. Query all existing tables in schema public
+    const tablesRes = await client.query(`
+      SELECT tablename
+      FROM pg_tables
+      WHERE schemaname = 'public'
+    `);
+    const existingTables = new Set(tablesRes.rows.map((r: any) => r.tablename));
+
+    const missingTables: string[] = [];
+    const requiredTableNames = Object.keys(REQUIRED_SCHEMA_DEFINITIONS);
+    for (const tbl of requiredTableNames) {
+      if (!existingTables.has(tbl)) {
+        missingTables.push(tbl);
+      }
+    }
+
+    if (missingTables.length > 0) {
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Missing ${missingTables.length} required table(s) in schema public: ${missingTables.join(', ')}`
+      );
+      return false;
+    }
+
+    // 2. Query all existing columns for the required tables
+    const colsRes = await client.query(`
+      SELECT table_name, column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = ANY($1)
+    `, [requiredTableNames]);
+
+    const tableColumnsMap = new Map<string, Set<string>>();
+    for (const row of colsRes.rows) {
+      if (!tableColumnsMap.has(row.table_name)) {
+        tableColumnsMap.set(row.table_name, new Set());
+      }
+      tableColumnsMap.get(row.table_name)!.add(row.column_name);
+    }
+
+    const messageColumns = tableColumnsMap.get('messages') || new Set<string>();
+    messageReceiptColumnsAvailable = messageColumns.has('read_at') && messageColumns.has('delivered_at');
+    if (!messageReceiptColumnsAvailable) {
+      console.warn('[PostgreSQL] Message receipt timestamps unavailable; preserving read/delivered status until the columns are migrated.');
+    }
+
+    const missingColumns: Array<{ table: string; column: string }> = [];
+    for (const [tbl, cols] of Object.entries(REQUIRED_SCHEMA_DEFINITIONS)) {
+      const existingCols = tableColumnsMap.get(tbl) || new Set<string>();
+      for (const col of cols) {
+        if (!existingCols.has(col)) {
+          missingColumns.push({ table: tbl, column: col });
+        }
+      }
+    }
+
+    if (missingColumns.length > 0) {
+      const detailed = missingColumns.map(m => `${m.table}.${m.column}`).join(', ');
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Missing ${missingColumns.length} required column(s) in schema public: ${detailed}`
+      );
+      return false;
+    }
+
+    // 3. Verify DML privileges (SELECT, INSERT, UPDATE, DELETE) on key tables
+    const sampleTablesToCheck = ['users', 'sessions', 'user_consents', 'conversations', 'messages'];
+    const missingPrivileges: string[] = [];
+
+    for (const tbl of sampleTablesToCheck) {
+      const privRes = await client.query(`
+        SELECT
+          has_table_privilege(current_user, $1, 'SELECT') AS can_select,
+          has_table_privilege(current_user, $1, 'INSERT') AS can_insert,
+          has_table_privilege(current_user, $1, 'UPDATE') AS can_update,
+          has_table_privilege(current_user, $1, 'DELETE') AS can_delete
+      `, [`public.${tbl}`]);
+      const p = privRes.rows[0] || {};
+      if (!p.can_select) missingPrivileges.push(`${tbl}:SELECT`);
+      if (!p.can_insert) missingPrivileges.push(`${tbl}:INSERT`);
+      if (!p.can_update) missingPrivileges.push(`${tbl}:UPDATE`);
+      if (!p.can_delete) missingPrivileges.push(`${tbl}:DELETE`);
+    }
+
+    if (missingPrivileges.length > 0) {
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Runtime user lacks required DML privileges: ${missingPrivileges.join(', ')}`
+      );
+      return false;
+    }
+
+    console.log(
+      `[PostgreSQL Production Audit] All ${requiredTableNames.length} tables, required columns, and DML permissions verified successfully in schema public.`
+    );
+    return true;
+  } catch (err: any) {
+    console.error('[PostgreSQL Production Audit ERROR]', err.message || err);
+    return false;
+  } finally {
+    if (client) {
+      try {
+        client.release();
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Auto-creates tables and migrations safely in development or when admin credentials are provided.
+ * In production when running without SQL_ADMIN_USER/SQL_ADMIN_PASSWORD, skips all DDL and runs
+ * read-only validation instead to prevent permission errors on restricted runtime roles.
  */
 export async function initPostgresSchema(): Promise<boolean> {
+  const isCloudRun = !!(process.env.K_SERVICE || process.env.K_REVISION || process.env.K_CONFIGURATION);
+  const isProd = process.env.NODE_ENV === 'production' || process.env.SQL_DB_NAME === 'cloud_sql_production_database' || isCloudRun;
+  const hasAdminCredentials = !!(process.env.SQL_ADMIN_USER && process.env.SQL_ADMIN_PASSWORD);
+
+  // In production / Cloud Run without admin credentials, execute ONLY read-only verification
+  if (isProd && !hasAdminCredentials) {
+    console.log('[PostgreSQL] Production environment without admin credentials detected. Running read-only schema & permission validation (no DDL)...');
+    const runtimePool = getPostgresPool();
+    if (!runtimePool) {
+      console.error('[PostgreSQL FAIL-CLOSED] PostgreSQL connection pool unavailable for production audit.');
+      return false;
+    }
+
+    try {
+      const isValid = await validatePostgresProductionSchema(runtimePool);
+      if (isValid) {
+        isInitialized = true;
+        console.log('[PostgreSQL] Production schema validated successfully. API is ready to serve requests.');
+        return true;
+      } else {
+        isInitialized = false;
+        console.error('[PostgreSQL FAIL-CLOSED] Production schema validation failed. Blocking startup to prevent data loss or crashes.');
+        return false;
+      }
+    } catch (auditErr: any) {
+      isInitialized = false;
+      console.error('[PostgreSQL FAIL-CLOSED] Production schema validation error:', auditErr.message || auditErr);
+      return false;
+    }
+  }
+
+  // Development mode or when admin credentials are provided: run migrations via admin/dev pool
   const pool = getAdminPostgresPool() || getPostgresPool();
   if (!pool) return false;
 
@@ -476,6 +689,8 @@ export async function initPostgresSchema(): Promise<boolean> {
       ALTER TABLE user_consents ALTER COLUMN privacy_policy_version SET DEFAULT '';
 
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id VARCHAR(128);
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS mode_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
       ALTER TABLE sessions ALTER COLUMN token TYPE TEXT;
@@ -567,6 +782,23 @@ export class PostgresStoreAdapter {
     });
   }
 
+  private serializePrivacy(profile: UserProfile): string {
+    return JSON.stringify({
+      ...(profile as any).privacy,
+      locationPrivacy: profile.locationPrivacy || 'APPROXIMATE',
+      profileExtras: {
+        heightCm: profile.heightCm,
+        weightKg: profile.weightKg,
+        relationshipStatus: profile.relationshipStatus,
+        approximateArea: profile.approximateArea,
+        instagramHandle: profile.instagramHandle,
+        spotifyTopArtist: profile.spotifyTopArtist,
+        isBoosted: profile.isBoosted,
+        boostExpiresAt: profile.boostExpiresAt
+      }
+    });
+  }
+
   public async getUserById(userId: string): Promise<UserAccount | null> {
     const res = await this.pool.query('SELECT * FROM users WHERE id = $1', [userId]);
     if (res.rows.length === 0) return null;
@@ -653,7 +885,7 @@ export class PostgresStoreAdapter {
           p.verified || false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || 'none',
-          JSON.stringify({ ...(p as any).privacy, locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          this.serializePrivacy(p),
           p.userMode || 'ONLINE',
           user.createdAt || new Date().toISOString()
         ]
@@ -738,7 +970,7 @@ export class PostgresStoreAdapter {
           p.verified ?? (p as any).isVerified ?? false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || null,
-          JSON.stringify({ ...(p as any).privacy, locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          this.serializePrivacy(p),
           p.userMode || 'ONLINE',
           user.createdAt || new Date().toISOString()
         ]
@@ -1077,6 +1309,7 @@ export class PostgresStoreAdapter {
     const lookingForArr = parseList(row.looking_for, ['Dating', 'Friends']);
     const tribesArr = parseList(row.tribe, ['Queer']);
     const privacy = row.privacy && typeof row.privacy === 'object' ? row.privacy : {};
+    const profileExtras = privacy.profileExtras && typeof privacy.profileExtras === 'object' ? privacy.profileExtras : {};
 
     let interests: string[] = [];
     if (typeof row.interests === 'string') {
@@ -1137,6 +1370,14 @@ export class PostgresStoreAdapter {
         lat: typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 ? lat : undefined,
         lng: typeof lng === 'number' && Number.isFinite(lng) && Math.abs(lng) <= 180 ? lng : undefined,
         locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(privacy.locationPrivacy) ? privacy.locationPrivacy : 'APPROXIMATE',
+        approximateArea: typeof profileExtras.approximateArea === 'string' ? profileExtras.approximateArea : undefined,
+        heightCm: typeof profileExtras.heightCm === 'number' ? profileExtras.heightCm : undefined,
+        weightKg: typeof profileExtras.weightKg === 'number' ? profileExtras.weightKg : undefined,
+        relationshipStatus: typeof profileExtras.relationshipStatus === 'string' ? profileExtras.relationshipStatus : undefined,
+        instagramHandle: typeof profileExtras.instagramHandle === 'string' ? profileExtras.instagramHandle : undefined,
+        spotifyTopArtist: typeof profileExtras.spotifyTopArtist === 'string' ? profileExtras.spotifyTopArtist : undefined,
+        isBoosted: profileExtras.isBoosted === true,
+        boostExpiresAt: typeof profileExtras.boostExpiresAt === 'string' ? profileExtras.boostExpiresAt : undefined,
         distanceKm: 0,
         photos,
         verified: !!row.is_verified,
@@ -1170,23 +1411,90 @@ export class PostgresStoreAdapter {
     );
   }
 
+  public async saveMessageAndConversationTransaction(msg: Message, conv: Conversation): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO conversations (id, participant_ids, last_message_text, last_message_timestamp, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET
+           participant_ids = EXCLUDED.participant_ids,
+           last_message_text = EXCLUDED.last_message_text,
+           last_message_timestamp = EXCLUDED.last_message_timestamp,
+           updated_at = EXCLUDED.updated_at`,
+        [
+          conv.id,
+          JSON.stringify(conv.participantIds || []),
+          conv.lastMessage?.text || null,
+          conv.lastMessage?.createdAt || null,
+          conv.createdAt ? new Date(conv.createdAt) : new Date(),
+          conv.updatedAt ? new Date(conv.updatedAt) : new Date()
+        ]
+      );
+      await client.query(
+        `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`,
+        [
+          msg.id,
+          msg.conversationId,
+          msg.senderId,
+          msg.receiverId,
+          msg.text || null,
+          msg.type,
+          msg.media ? JSON.stringify(msg.media) : null,
+          msg.status,
+          msg.createdAt ? new Date(msg.createdAt) : new Date(),
+          msg.clientMessageId || null
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   public async saveMessage(msg: Message): Promise<void> {
+    const receiptColumns = messageReceiptColumnsAvailable ? ', read_at, delivered_at' : '';
+    const receiptValues = messageReceiptColumnsAvailable ? ', $11, $12' : '';
+    const receiptUpdates = messageReceiptColumnsAvailable
+      ? ', read_at = EXCLUDED.read_at, delivered_at = EXCLUDED.delivered_at'
+      : '';
+    const values = [
+      msg.id,
+      msg.conversationId,
+      msg.senderId,
+      msg.receiverId,
+      msg.text || null,
+      msg.type,
+      msg.media ? JSON.stringify(msg.media) : null,
+      msg.status,
+      msg.createdAt ? new Date(msg.createdAt) : new Date(),
+      msg.clientMessageId || null
+    ];
+    if (messageReceiptColumnsAvailable) {
+      values.push(msg.readAt ? new Date(msg.readAt) : null);
+      values.push(msg.deliveredAt ? new Date(msg.deliveredAt) : null);
+    }
     await this.pool.query(
-      `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`,
-      [
-        msg.id,
-        msg.conversationId,
-        msg.senderId,
-        msg.receiverId,
-        msg.text || null,
-        msg.type,
-        msg.media ? JSON.stringify(msg.media) : null,
-        msg.status,
-        msg.createdAt ? new Date(msg.createdAt) : new Date(),
-        msg.clientMessageId || null
-      ]
+      `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id${receiptColumns})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10${receiptValues})
+       ON CONFLICT (id) DO UPDATE SET
+         status = EXCLUDED.status${receiptUpdates}`,
+      values
+    );
+  }
+
+  public async markMessagesRead(conversationId: string, userId: string, readAtDate: Date = new Date()): Promise<void> {
+    await this.pool.query(
+      `UPDATE messages
+       SET status = 'READ'${messageReceiptColumnsAvailable ? ', read_at = $1' : ''}
+       WHERE conversation_id = $${messageReceiptColumnsAvailable ? '2' : '1'} AND receiver_id = $${messageReceiptColumnsAvailable ? '3' : '2'} AND status != 'READ'`,
+      messageReceiptColumnsAvailable ? [readAtDate, conversationId, userId] : [conversationId, userId]
     );
   }
 
@@ -1344,6 +1652,7 @@ export class PostgresStoreAdapter {
     const res = await this.pool.query('SELECT * FROM messages ORDER BY created_at ASC');
     return res.rows.map(row => ({
       id: row.id,
+      clientMessageId: row.client_message_id,
       conversationId: row.conversation_id,
       senderId: row.sender_id,
       receiverId: row.receiver_id,
@@ -1351,6 +1660,20 @@ export class PostgresStoreAdapter {
       type: row.type,
       media: row.media,
       status: row.status,
+      deliveryStatus: (row.status === 'READ' ? 'read' : row.status === 'DELIVERED' ? 'delivered' : 'sent') as any,
+      readStatus: row.status === 'READ',
+      readAt: row.read_at ? new Date(row.read_at).toISOString() : undefined,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : undefined,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
+    }));
+  }
+
+  public async loadAllBlocks(): Promise<BlockRecord[]> {
+    const res = await this.pool.query('SELECT * FROM blocks ORDER BY created_at ASC');
+    return res.rows.map(row => ({
+      id: row.id,
+      blockerUserId: row.blocker_user_id,
+      blockedUserId: row.blocked_user_id,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
     }));
   }
@@ -1362,6 +1685,7 @@ export class PostgresStoreAdapter {
     );
     return res.rows.map(row => ({
       id: row.id,
+      clientMessageId: row.client_message_id,
       conversationId: row.conversation_id,
       senderId: row.sender_id,
       receiverId: row.receiver_id,
@@ -1369,6 +1693,10 @@ export class PostgresStoreAdapter {
       type: row.type,
       media: row.media,
       status: row.status,
+      deliveryStatus: (row.status === 'READ' ? 'read' : row.status === 'DELIVERED' ? 'delivered' : 'sent') as any,
+      readStatus: row.status === 'READ',
+      readAt: row.read_at ? new Date(row.read_at).toISOString() : undefined,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : undefined,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
     }));
   }

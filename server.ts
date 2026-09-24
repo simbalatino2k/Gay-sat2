@@ -1,9 +1,17 @@
 import { buildStripeCheckout } from './src/lib/stripeCheckout';
-import { moderateText } from './src/lib/moderation.js';
+import { moderateText } from './src/lib/moderation';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
   delete (globalThis as any).__dirname;
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.warn('[Server Warning] Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server Warning] Uncaught exception safely captured:', err?.message || err);
+});
 
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
@@ -22,13 +30,13 @@ import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
 import { 
   initStorage, 
   uploadUserMedia, 
-  getLocalMediaFile,
   processAndSaveMedia,
   createUploadSession,
   getUploadSession,
-  getMediaRecord,
-  getMediaFileForServing,
-  deleteMediaRecord
+  getMediaRecordDurable,
+  getMediaFileForServingDurable,
+  deleteMediaRecordDurable,
+  bindMediaToConversationDurable
 } from './src/lib/storage';
 import { 
   MEDIA_LIMITS, 
@@ -110,7 +118,7 @@ const upload = multer({
 
 // Initialize Express App
 const app = express();
-const PORT = 3000; // Port 3000 is strictly hardcoded by the infrastructure for external ingress
+const PORT = Number(process.env.PORT) || 3000; // Cloud Run sets PORT dynamically, defaults to 3000 for local/infrastructure compatibility
 
 // Security & Parsing Middlewares with rawBody capture for webhook signature verification
 app.use(
@@ -243,15 +251,86 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
 
 // Lazy Gemini AI Client Initialization
 let genAIClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
+function getGeminiClient(): GoogleGenAI | null {
   if (!genAIClient) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable is not configured');
+      return null;
     }
-    genAIClient = new GoogleGenAI({ apiKey });
+    genAIClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
   }
   return genAIClient;
+}
+
+/**
+ * Resilient Gemini Content Generation with automated multi-model failover
+ * Handles temporary spikes in demand (503 UNAVAILABLE), rate limits (429), and transient failures
+ */
+async function generateGeminiContentWithFailover(options: {
+  contents: string;
+  config?: any;
+}): Promise<string | null> {
+  const client = getGeminiClient();
+  if (!client) {
+    console.warn('[Gemini AI] GEMINI_API_KEY is not set. Using personalized contextual propositions.');
+    return null;
+  }
+
+  // Model fallback chain: primary -> lite -> latest flash
+  const candidateModels = [
+    'gemini-3.8-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-latest'
+  ];
+
+  for (const model of candidateModels) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await client.models.generateContent({
+          model,
+          contents: options.contents,
+          config: options.config
+        });
+
+        const text = response.text;
+        if (text && text.trim().length > 0) {
+          return text;
+        }
+      } catch (err: any) {
+        const errMsg = String(err?.message || err || '');
+        const isHighDemandOrRateLimited =
+          err?.status === 503 ||
+          err?.status === 429 ||
+          errMsg.includes('503') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('RESOURCE_EXHAUSTED');
+
+        if (isHighDemandOrRateLimited) {
+          console.warn(`[Gemini AI] Model ${model} experiencing high demand (attempt ${attempt}/2).`);
+          if (attempt === 1) {
+            // Short exponential jitter delay before retry
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            continue;
+          }
+          // On second 503, immediately proceed to next fallback model
+          break;
+        } else {
+          console.warn(`[Gemini AI] Model ${model} encountered non-critical error, trying alternative.`);
+          break;
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 // --- REST API ENDPOINTS ---
@@ -387,6 +466,14 @@ app.post('/api/auth/register', authRateLimiter, async (req: Request, res: Respon
     }
 
     const result = await store.registerUser(email, cleanName, numAge, 'USER', password);
+    if (result && result.token) {
+      res.cookie('aura_token', result.token, {
+        path: '/',
+        secure: true,
+        sameSite: 'none',
+        maxAge: 30 * 24 * 3600 * 1000
+      });
+    }
     res.status(201).json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Registration failed' });
@@ -404,6 +491,15 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
     const result = await store.loginUser(email, password);
     if (!result) {
       return res.status(404).json({ error: 'No active account found for this email address. Please register.' });
+    }
+
+    if (result && result.token) {
+      res.cookie('aura_token', result.token, {
+        path: '/',
+        secure: true,
+        sameSite: 'none',
+        maxAge: 30 * 24 * 3600 * 1000
+      });
     }
 
     res.json(result);
@@ -478,6 +574,113 @@ app.post('/api/auth/reset-password', authRateLimiter, async (req: Request, res: 
 // RICH MEDIA BACKEND ENDPOINTS & ACCESS CONTROL
 // ============================================================================
 
+function localMediaIdFromUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return /^\/api\/media\/([a-zA-Z0-9_-]+)(?:\?[^#]*)?$/.exec(value)?.[1] || null;
+}
+
+async function canUseMediaConversation(userId: string, conversationId: unknown): Promise<boolean> {
+  if (typeof conversationId !== 'string' || !conversationId) return false;
+  const conversation = await store.getConversation(conversationId);
+  if (!conversation || !conversation.participantIds.includes(userId)) return false;
+  const otherId = conversation.participantIds.find(id => id !== userId);
+  if (!otherId || await store.isBlocked(userId, otherId)) return false;
+  const otherUser = await store.getUserById(otherId);
+  return Boolean(otherUser && otherUser.status === 'ACTIVE');
+}
+
+type MediaRecordForAccess = NonNullable<Awaited<ReturnType<typeof getMediaRecordDurable>>>;
+type MediaAccessDenial = { status: number; error: string };
+
+async function mediaAccessDenial(record: MediaRecordForAccess, viewerId: string): Promise<MediaAccessDenial | null> {
+  const owner = await store.getUserById(record.ownerId);
+  if (!owner || owner.status !== 'ACTIVE') return { status: 404, error: 'Media owner not found.' };
+  if (viewerId === record.ownerId) return null;
+  if (await store.isBlocked(viewerId, record.ownerId)) {
+    return { status: 403, error: 'Access blocked by user policy.' };
+  }
+
+  // A profile photo is public only while it is present in the owner's saved profile.
+  // An unlisted upload has no public audience, even when its category is `photo`.
+  const profilePhotos = (record.category === 'photo' || record.category === 'profile_photo')
+    ? (owner.profile.photos || []).filter(photo => localMediaIdFromUrl(photo.url) === record.id)
+    : [];
+  if (profilePhotos.length > 0) {
+    if (profilePhotos.some(photo => photo.isPrivate) &&
+        !(await store.hasVaultAccessDurable(record.ownerId, viewerId))) {
+      return { status: 403, error: 'This photo is private.' };
+    }
+    if (record.category === 'profile_photo' && record.moderationStatus !== 'APPROVED') {
+      return { status: 403, error: 'This profile photo is pending moderation and is currently unavailable.' };
+    }
+    return null;
+  }
+  if (record.category === 'profile_photo') {
+    return { status: 403, error: 'This profile photo is not published.' };
+  }
+
+  if (!record.conversationId) {
+    return { status: 403, error: 'This media item is private.' };
+  }
+  const conversation = await store.getConversation(record.conversationId);
+  if (!conversation || !conversation.participantIds.includes(viewerId) ||
+      !conversation.participantIds.includes(record.ownerId)) {
+    return { status: 403, error: 'Unauthorized conversation media access.' };
+  }
+  for (const participantId of conversation.participantIds) {
+    const participant = await store.getUserById(participantId);
+    if (!participant || participant.status !== 'ACTIVE' ||
+        (participantId !== viewerId && await store.isBlocked(viewerId, participantId))) {
+      return { status: 403, error: 'Conversation media is unavailable.' };
+    }
+  }
+
+  const messages = await store.getMessages(record.conversationId, viewerId);
+  const hasActiveMessage = messages.some(message =>
+    message.senderId === record.ownerId && (
+      message.photo?.mediaId === record.id ||
+      message.voice?.mediaId === record.id ||
+      message.starVideo?.mediaId === record.id ||
+      localMediaIdFromUrl(message.media?.url) === record.id ||
+      localMediaIdFromUrl(message.photoUrl) === record.id
+    )
+  );
+  return hasActiveMessage ? null : { status: 404, error: 'Media is no longer accessible or was deleted.' };
+}
+
+async function bindMessageMedia(
+  messageType: unknown,
+  payload: { photo?: any; photoUrl?: unknown; voice?: any; starVideo?: any; media?: any },
+  senderId: string,
+  conversationId: string
+): Promise<boolean> {
+  const references = messageType === 'PHOTO'
+    ? [payload.photo?.mediaId, localMediaIdFromUrl(payload.photoUrl), localMediaIdFromUrl(payload.media?.url)]
+    : messageType === 'VOICE'
+    ? [payload.voice?.mediaId, localMediaIdFromUrl(payload.media?.url)]
+    : messageType === 'STAR_VIDEO'
+    ? [payload.starVideo?.mediaId, localMediaIdFromUrl(payload.starVideo?.url), localMediaIdFromUrl(payload.media?.url)]
+    : [];
+  const ids = [...new Set(references.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+  if (ids.length === 0) return true; // Legacy external URL; no AURA media object is exposed.
+  if (ids.length !== 1 || !(await canUseMediaConversation(senderId, conversationId))) return false;
+
+  const record = await getMediaRecordDurable(ids[0]);
+  const expectedCategory = messageType === 'PHOTO' ? 'photo'
+    : messageType === 'VOICE' ? 'voice' : 'star_video';
+  if (!record || record.deletedAt || record.ownerId !== senderId || record.category !== expectedCategory) {
+    return false;
+  }
+  const bound = await bindMediaToConversationDurable(record.id, senderId, conversationId);
+  if (bound && messageType === 'PHOTO' && payload.photo && !payload.photo.mediaId) {
+    payload.photo.mediaId = record.id;
+  }
+  if (bound && messageType === 'STAR_VIDEO' && payload.starVideo && !payload.starVideo.mediaId) {
+    payload.starVideo.mediaId = record.id;
+  }
+  return bound;
+}
+
 // 1. Upload Init: Allocate upload session & validate parameters before transfer
 app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -496,22 +699,8 @@ app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedR
       return res.status(400).json({ error: `Invalid mediaType: ${mediaType}.` });
     }
 
-    if (conversationId) {
-      const conv = await store.getConversation(conversationId);
-      if (!conv || !conv.participantIds.includes(req.user!.id)) {
-        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
-      }
-
-      const otherId = conv.participantIds.find(id => id !== req.user!.id);
-      if (otherId) {
-        if (await store.isBlocked(req.user!.id, otherId)) {
-          return res.status(403).json({ error: 'Cannot upload media to a blocked conversation.' });
-        }
-        const otherUser = await store.getUserById(otherId);
-        if (!otherUser || otherUser.status !== 'ACTIVE') {
-          return res.status(403).json({ error: 'Recipient account is not active.' });
-        }
-      }
+    if (conversationId != null && !(await canUseMediaConversation(req.user!.id, conversationId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
     }
 
     const session = createUploadSession(req.user!.id, category, mimeType, size, conversationId);
@@ -561,6 +750,13 @@ app.post('/api/media/upload/complete', authenticateToken, upload.single('media')
       targetConvId = session.conversationId || targetConvId;
     } else if (req.body.category) {
       category = req.body.category;
+    }
+    if (!['photo', 'voice', 'star_video', 'profile_photo'].includes(category)) {
+      return res.status(400).json({ error: 'Invalid media category.' });
+    }
+
+    if (targetConvId != null && !(await canUseMediaConversation(req.user!.id, targetConvId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
     }
 
     if (category === 'star_video') {
@@ -617,6 +813,11 @@ app.post('/api/media/upload', authenticateToken, upload.single('media'), async (
       category = 'voice';
     } else if (req.file.mimetype.startsWith('video/')) {
       category = 'star_video';
+    }
+
+    if (req.body.conversationId != null &&
+        !(await canUseMediaConversation(req.user!.id, req.body.conversationId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
     }
 
     const record = await processAndSaveMedia({
@@ -681,6 +882,17 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       }
     }
 
+    // Also inspect cookies sent by native HTML5 media elements (<video>, <audio>, <img>)
+    if (!requestingUserId && req.headers.cookie) {
+      const match = req.headers.cookie.match(/(?:^|;\s*)(?:aura_auth_token|aura_token)=([^;]+)/);
+      if (match) {
+        const user = await store.getUserByToken(decodeURIComponent(match[1]));
+        if (user && user.status === 'ACTIVE') {
+          requestingUserId = user.id;
+        }
+      }
+    }
+
     if (!requestingUserId) {
       return res.status(401).json({ error: 'Authentication required to access media.' });
     }
@@ -690,60 +902,26 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       return res.status(429).json({ error: 'Download rate limit exceeded.' });
     }
 
-    // 2. Fetch media record
-    const record = getMediaRecord(mediaId);
+    // A file on disk is not proof of ownership. Never serve it without its metadata record.
+    const record = await getMediaRecordDurable(mediaId);
     if (!record || record.deletedAt) {
       return res.status(404).json({ error: 'Media not found or has been deleted.' });
     }
 
-    
-    if (record.category === 'profile_photo' && record.moderationStatus !== 'APPROVED') {
-      if (record.ownerId !== requestingUserId) {
-        return res.status(403).json({ error: 'This profile photo is pending moderation and is currently unavailable.' });
-      }
-    }
-
-    // 3. Conversation access control & block check
-    if (record.conversationId) {
-      const conv = await store.getConversation(record.conversationId);
-      if (!conv || !conv.participantIds.includes(requestingUserId)) {
-        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
-      }
-
-      const otherId = conv.participantIds.find(id => id !== requestingUserId);
-      if (otherId) {
-        if (await store.isBlocked(requestingUserId, otherId)) {
-          return res.status(403).json({ error: 'Access blocked by user policy.' });
-        }
-        const otherUser = await store.getUserById(otherId);
-        if (!otherUser || otherUser.status !== 'ACTIVE') {
-          return res.status(403).json({ error: 'Participant account is inactive.' });
-        }
-      }
-
-      const msgs = await store.getMessages(record.conversationId, requestingUserId);
-      const hasActiveMessage = msgs.some(m => 
-        m.photo?.mediaId === mediaId || 
-        m.voice?.mediaId === mediaId || 
-        m.starVideo?.mediaId === mediaId || 
-        m.media?.url?.includes(mediaId)
-      );
-      if (!hasActiveMessage && record.ownerId !== requestingUserId) {
-        return res.status(404).json({ error: 'Media is no longer accessible or was deleted.' });
-      }
-    }
+    const denial = await mediaAccessDenial(record, requestingUserId);
+    if (denial) return res.status(denial.status).json({ error: denial.error });
 
     // 4. Serve file with mandatory security headers
-    const fileInfo = getMediaFileForServing(mediaId, isThumb);
+    const fileInfo = await getMediaFileForServingDurable(mediaId, isThumb);
     if (!fileInfo) {
       return res.status(404).json({ error: 'Media binary file not found.' });
     }
 
     res.setHeader('Content-Type', fileInfo.mimeType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Disposition', 'inline; filename="safe_media"');
-    res.setHeader('Cache-Control', 'private, no-transform, max-age=3600');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.sendFile(fileInfo.path);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to deliver media.' });
@@ -751,24 +929,30 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
 });
 
 // 5. Generate Signed Media Access Token for Expiring Links
-app.get('/api/media/:mediaId/sign', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const mediaId = String(req.params.mediaId);
-  const record = getMediaRecord(mediaId);
-  if (!record) {
-    return res.status(404).json({ error: 'Media not found.' });
+app.get('/api/media/:mediaId/sign', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const mediaId = String(req.params.mediaId);
+    const record = await getMediaRecordDurable(mediaId);
+    if (!record || record.deletedAt) {
+      return res.status(404).json({ error: 'Media not found.' });
+    }
+    const denial = await mediaAccessDenial(record, req.user!.id);
+    if (denial) return res.status(denial.status).json({ error: denial.error });
+    const signedToken = signMediaAccessToken(mediaId, req.user!.id, 900); // 15 min TTL
+    res.json({
+      token: signedToken,
+      url: `/api/media/${mediaId}?token=${signedToken}`
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to sign media access.' });
   }
-  const signedToken = signMediaAccessToken(mediaId, req.user!.id, 900); // 15 min TTL
-  res.json({
-    token: signedToken,
-    url: `/api/media/${mediaId}?token=${signedToken}`
-  });
 });
 
 // 6. Delete Media Endpoint
-app.delete('/api/media/:mediaId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/media/:mediaId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const mediaId = String(req.params.mediaId);
-    const success = deleteMediaRecord(mediaId, req.user!.id);
+    const success = await deleteMediaRecordDurable(mediaId, req.user!.id);
     if (!success) {
       return res.status(404).json({ error: 'Media not found or already deleted.' });
     }
@@ -798,18 +982,10 @@ app.post('/api/media/link-preview', authenticateToken, async (req: Authenticated
   }
 });
 
-// Media: Authenticated / Sandboxed Delivery Endpoint (Legacy path support)
+// Legacy filenames have no reliable owner or privacy metadata. Fail closed;
+// current uploads use /api/media/:mediaId with an authorization check above.
 app.get('/api/media/files/:filename', (req: Request, res: Response) => {
-  const filename = Array.isArray(req.params.filename) ? req.params.filename[0] : (req.params.filename as string);
-  const fileInfo = getLocalMediaFile(filename);
-  if (!fileInfo) {
-    return res.status(404).json({ error: 'Media object not found.' });
-  }
-  res.setHeader('Content-Type', fileInfo.mimeType);
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'none'");
-  res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
-  res.sendFile(fileInfo.path);
+  return res.status(404).json({ error: 'Media object not found.' });
 });
 
 // Photo Album Import: Inspect Shared Album (iCloud & Google Photos)
@@ -904,7 +1080,14 @@ app.get('/api/webrtc/ice-servers', authenticateToken, (req: AuthenticatedRequest
   const turnUrls = process.env.TURN_URLS;
 
   const defaultStun = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:global.stun.twilio.com:3478'
+      ]
+    }
   ];
 
   if (!turnSecret || !turnUrls) {
@@ -1018,6 +1201,28 @@ app.put('/api/users/status-mode', authenticateToken, async (req: AuthenticatedRe
     res.json({ success: true, profile: updated, userMode: mode, modeUpdatedAt });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update status mode' });
+  }
+});
+
+// Profile Boost endpoint: increases visibility in the Discover feed for 1 hour
+app.post('/api/profile/boost', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const oneHourMs = 60 * 60 * 1000;
+    const boostExpiresAt = new Date(Date.now() + oneHourMs).toISOString();
+
+    const updated = await store.updateProfile(req.user!.id, {
+      isBoosted: true,
+      boostExpiresAt
+    }, { allowBoost: true });
+
+    res.json({
+      success: true,
+      message: 'Profile successfully boosted for 1 hour!',
+      boostExpiresAt,
+      profile: updated
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to boost profile' });
   }
 });
 
@@ -1255,10 +1460,21 @@ app.get('/api/conversations/:conversationId/messages', authenticateToken, async 
   try {
     const conversationId = String(req.params.conversationId);
     const messages = await store.getMessages(conversationId, req.user!.id);
-    await store.markMessagesRead(conversationId, req.user!.id);
-    res.json({ messages });
+    const readMessages = await store.markMessagesRead(conversationId, req.user!.id);
+    res.json({ messages, readCount: readMessages.length });
   } catch (err: any) {
     res.status(403).json({ error: err.message || 'Access to messages denied' });
+  }
+});
+
+// Conversations: Explicitly Mark Messages as Read
+app.post('/api/conversations/:conversationId/read', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const readMessages = await store.markMessagesRead(conversationId, req.user!.id);
+    res.json({ success: true, count: readMessages.length, readMessages });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to mark messages as read' });
   }
 });
 
@@ -1298,8 +1514,8 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
         return res.status(400).json({ error: 'Photo payload or media URL is required.' });
       }
       if (photo?.mediaId) {
-        const rec = getMediaRecord(photo.mediaId);
-        if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+        const rec = await getMediaRecordDurable(photo.mediaId);
+        if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'photo') {
           return res.status(400).json({ error: 'Invalid or unauthorized photo mediaId.' });
         }
       }
@@ -1385,8 +1601,8 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
       if (!voice?.mediaId) {
         return res.status(400).json({ error: 'Voice payload requires a verified mediaId.' });
       }
-      const rec = getMediaRecord(voice.mediaId);
-      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+      const rec = await getMediaRecordDurable(voice.mediaId);
+      if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'voice') {
         return res.status(400).json({ error: 'Invalid or unauthorized voice mediaId.' });
       }
     }
@@ -1397,8 +1613,8 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
         return res.status(400).json({ error: 'Star Video payload requires a verified mediaId or media url.' });
       }
       if (starVideo?.mediaId) {
-        const rec = getMediaRecord(starVideo.mediaId);
-        if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+        const rec = await getMediaRecordDurable(starVideo.mediaId);
+        if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'star_video') {
           return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
         }
         if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
@@ -1410,6 +1626,10 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
     // 7. Generic content requirement check
     if (!text?.trim() && !photoUrl && !photo && !media && !finalLocation && !finalStickerId && !voice && !starVideo && !tapType && !vaultAction && !link && !linkPreview) {
       return res.status(400).json({ error: 'Message content is required.' });
+    }
+
+    if (!(await bindMessageMedia(messageType, { photo, photoUrl, voice, starVideo, media }, req.user!.id, conversationId))) {
+      return res.status(403).json({ error: 'Media does not belong to you or this conversation.' });
     }
 
     const message = await store.sendMessage(req.user!.id, conversationId, {
@@ -1858,8 +2078,18 @@ const handleAIIcebreaker = async (req: AuthenticatedRequest, res: Response) => {
   const role = targetProfile.identityRole || 'Member';
   const bio = targetProfile.bio || 'Exploring connections';
 
+  const primaryInterest = targetProfile.interests?.[0] || 'good coffee';
+  const secondaryInterest = targetProfile.interests?.[1] || 'music';
+
+  // Dynamic contextual fallbacks personalized to their profile
+  const fallbackPropositions = [
+    `Hey ${displayName}! Loved your photos and saw you're into ${primaryInterest}. How has your week been?`,
+    `Hi ${displayName}! Your vibe is captivating. Up for grabbing a coffee or drinks nearby sometime?`,
+    `Hey there! Saw that you enjoy ${secondaryInterest}. What's your favorite spot in town?`,
+    `Hey handsome, couldn't scroll past without saying hi. What are you up to tonight?`
+  ];
+
   try {
-    const ai = getGeminiClient();
     const prompt = `You are an elite, respectful, charming conversational wingman for AURA GAY 18+, a premium adult gay dating app.
 Generate 4 distinct, engaging, authentic proposition messages/conversation starters for starting a chat with ${displayName}.
 
@@ -1880,8 +2110,7 @@ Rules:
 2. Tone must be authentic, adult 18+ appropriate, respectful, engaging, and never robotic or cheesy.
 3. Return ONLY a valid JSON array of 4 strings: ["Msg 1", "Msg 2", "Msg 3", "Msg 4"]. No markdown code fences.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const rawText = await generateGeminiContentWithFailover({
       contents: prompt,
       config: {
         temperature: 0.85,
@@ -1889,17 +2118,23 @@ Rules:
       }
     });
 
-    const text = response.text || '[]';
     let propositions: string[] = [];
-    try {
-      propositions = JSON.parse(text);
-    } catch {
-      propositions = [
-        `Hey ${displayName}! Loved your vibe and seeing you're into ${targetProfile.interests?.[0] || 'design'}. How has your week been?`,
-        `Hi ${displayName}! Your photos caught my attention. Up for grabbing an espresso or drink nearby sometime?`,
-        `Hey there! I saw we both appreciate good vibes and ${targetProfile.interests?.[1] || 'fitness'}. What are you up to today?`,
-        `Hey handsome, couldn't pass by your profile without saying hi! What brings you on Aura?`
-      ];
+    if (rawText) {
+      try {
+        const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const match = cleanText.match(/\[[\s\S]*\]/);
+        if (match) {
+          propositions = JSON.parse(match[0]);
+        } else {
+          propositions = JSON.parse(cleanText);
+        }
+      } catch {
+        propositions = [];
+      }
+    }
+
+    if (!Array.isArray(propositions) || propositions.length === 0) {
+      propositions = fallbackPropositions;
     }
 
     res.json({
@@ -1907,18 +2142,7 @@ Rules:
       propositions
     });
   } catch (err: any) {
-    console.error('Gemini API Error (fallback triggered):', err);
-    // Dynamic contextual fallbacks personalized to their profile
-    const primaryInterest = targetProfile.interests?.[0] || 'good coffee';
-    const secondaryInterest = targetProfile.interests?.[1] || 'music';
-
-    const fallbackPropositions = [
-      `Hey ${displayName}! Loved your photos and saw you're into ${primaryInterest}. How has your week been?`,
-      `Hi ${displayName}! Your vibe is captivating. Up for grabbing a coffee or drinks nearby sometime?`,
-      `Hey there! Saw that you enjoy ${secondaryInterest}. What's your favorite spot in town?`,
-      `Hey handsome, couldn't scroll past without saying hi. What are you up to tonight?`
-    ];
-
+    console.warn('[Gemini AI] Fallback propositions served:', err?.message || err);
     res.json({
       icebreakers: fallbackPropositions,
       propositions: fallbackPropositions,
@@ -1928,6 +2152,23 @@ Rules:
 };
 app.post('/api/ai/icebreaker', authenticateToken, handleAIIcebreaker);
 app.post('/api/ai/propositions', authenticateToken, handleAIIcebreaker);
+
+// Helper to resolve canonical application URL (no hardcoded localhost)
+const getCanonicalBaseUrl = (req: Request): string => {
+  if (process.env.APP_BASE_URL) {
+    return process.env.APP_BASE_URL.replace(/\/+$/, '');
+  }
+  const origin = req.headers.origin;
+  if (origin && typeof origin === 'string' && !origin.includes('localhost:3000')) {
+    return origin.replace(/\/+$/, '');
+  }
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  if (host) {
+    return `${proto}://${host}`.replace(/\/+$/, '');
+  }
+  return 'https://aura18.app';
+};
 
 // Payments / Subscription Checkout (Supports both create-checkout-session and checkout-session)
 const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
@@ -2362,30 +2603,60 @@ async function startServer() {
   // PostgreSQL PubSub listener for multi-instance Cloud Run WebRTC signaling
   const pool = getPostgresPool();
   if (pool) {
-    pool.connect().then(client => {
-      client.query('LISTEN aura_webrtc_signals').catch(e => console.warn('[WebRTC PG Listen] Failed:', e.message));
-      client.on('notification', (msg) => {
-        if (msg.channel === 'aura_webrtc_signals' && msg.payload) {
-          try {
-            const data = JSON.parse(msg.payload);
-            const { targetUserId, message: remoteMessage } = data;
-            if (targetUserId) {
-              const localSockets = connectedCallSockets.get(targetUserId);
-              if (localSockets && localSockets.size > 0) {
-                const payloadStr = JSON.stringify(remoteMessage);
-                localSockets.forEach(ws => {
-                  if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(payloadStr);
-                  }
-                });
-              }
-            }
-          } catch (err) {
-            // Ignore parse errors on broadcast
+    let reconnectTimeout: any = null;
+    const setupListener = () => {
+      pool.connect().then(client => {
+        client.on('error', (err) => {
+          console.warn('[WebRTC PG Client] Socket error, reconnecting:', err.message);
+          try { client.release(true); } catch {}
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              reconnectTimeout = null;
+              setupListener();
+            }, 5000);
           }
+        });
+        client.on('end', () => {
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              reconnectTimeout = null;
+              setupListener();
+            }, 5000);
+          }
+        });
+        client.query('LISTEN aura_webrtc_signals').catch(e => console.warn('[WebRTC PG Listen] Failed:', e.message));
+        client.on('notification', (msg) => {
+          if (msg.channel === 'aura_webrtc_signals' && msg.payload) {
+            try {
+              const data = JSON.parse(msg.payload);
+              const { targetUserId, message: remoteMessage } = data;
+              if (targetUserId) {
+                const localSockets = connectedCallSockets.get(targetUserId);
+                if (localSockets && localSockets.size > 0) {
+                  const payloadStr = JSON.stringify(remoteMessage);
+                  localSockets.forEach(ws => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(payloadStr);
+                    }
+                  });
+                }
+              }
+            } catch (err) {
+              // Ignore parse errors on broadcast
+            }
+          }
+        });
+      }).catch(err => {
+        console.warn('[WebRTC PG Listen] Connection attempt failed, retrying in 10s:', err?.message);
+        if (!reconnectTimeout) {
+          reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            setupListener();
+          }, 10000);
         }
       });
-    }).catch(() => {});
+    };
+    setupListener();
   }
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
@@ -2429,6 +2700,14 @@ async function startServer() {
             return;
           }
 
+          if (type === 'CALL_REQUEST') {
+            // Check if recipient is already in an active call
+            if (activeCallPairs.has(targetUserId)) {
+              ws.send(JSON.stringify({ type: 'CALL_REJECTED', reason: 'BUSY', targetUserId }));
+              return;
+            }
+          }
+
           if (type === 'CALL_ACCEPTED') {
             activeCallPairs.set(authenticatedUserId, targetUserId);
             activeCallPairs.set(targetUserId, authenticatedUserId);
@@ -2437,9 +2716,23 @@ async function startServer() {
             activeCallPairs.delete(targetUserId);
           }
 
+          // Enrich CALL_REQUEST with sender's public profile info
+          let senderName = 'Użytkownik AURA';
+          let senderPhoto: string | undefined;
+          if (type === 'CALL_REQUEST') {
+            try {
+              const senderUser = await store.getUserById(authenticatedUserId);
+              if (senderUser) {
+                senderName = senderUser.profile.displayName || 'Użytkownik AURA';
+                senderPhoto = senderUser.profile.photos?.find(p => p.isPrimary)?.url || senderUser.profile.photos?.[0]?.url;
+              }
+            } catch {}
+          }
+
           const forwardPayload = {
             ...message,
-            senderId: authenticatedUserId
+            senderId: authenticatedUserId,
+            ...(type === 'CALL_REQUEST' ? { senderName, senderPhoto, callType: message.callType || 'video' } : {})
           };
           const forwardPayloadStr = JSON.stringify(forwardPayload);
 
@@ -2476,16 +2769,16 @@ async function startServer() {
 
     ws.on('close', () => {
       if (authenticatedUserId) {
-        const partnerId = activeCallPairs.get(authenticatedUserId);
-        if (partnerId) {
-          terminateActiveCallBetweenUsers(authenticatedUserId, partnerId, 'DISCONNECTED');
-        }
-
         const userSockets = connectedCallSockets.get(authenticatedUserId);
         if (userSockets) {
           userSockets.delete(ws);
+          // Only terminate active call if the user has no remaining open connections
           if (userSockets.size === 0) {
             connectedCallSockets.delete(authenticatedUserId);
+            const partnerId = activeCallPairs.get(authenticatedUserId);
+            if (partnerId) {
+              terminateActiveCallBetweenUsers(authenticatedUserId, partnerId, 'DISCONNECTED');
+            }
           }
         }
       }
@@ -2501,8 +2794,12 @@ async function startServer() {
     delete (globalThis as any).__dirname;
     const { createServer: createViteServer } = await import('vite');
 
+    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: isHmrDisabled ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -2517,11 +2814,38 @@ async function startServer() {
     });
   }
 
+  httpServer.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[Server Fatal] Port ${PORT} is already in use. Exiting to allow clean supervisor restart.`);
+      process.exit(1);
+    } else {
+      console.error('[Server Fatal] Server socket error:', err);
+    }
+  });
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`[AURA GAY 18+] Server actively running on http://0.0.0.0:${PORT} (${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'})`);
   });
+
+  // Graceful shutdown handling for container and dev server process restarts
+  const handleShutdown = () => {
+    console.log('[Server] Graceful shutdown initiated. Closing sockets and HTTP server...');
+    try {
+      wss.close();
+    } catch {}
+    httpServer.close(() => {
+      console.log('[Server] HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      process.exit(0);
+    }, 1500).unref();
+  };
+
+  process.once('SIGTERM', handleShutdown);
+  process.once('SIGINT', handleShutdown);
 
   // Asynchronous initialization of persistent database layer without blocking server readiness
   store.initializeDatabase().then((dbInitOk) => {

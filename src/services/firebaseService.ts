@@ -16,7 +16,9 @@ import {
   getDocs, 
   query, 
   where,
-  serverTimestamp 
+  serverTimestamp,
+  onSnapshot,
+  deleteDoc
 } from 'firebase/firestore';
 import { 
   auth, 
@@ -38,33 +40,27 @@ export function formatUserAccount(
   fbUser: FirebaseUser, 
   firestoreData?: any
 ): UserAccount {
-  const savedProfile = firestoreData?.profile || firestoreData || {};
   const defaultProfile: UserProfile = {
     id: `prof-${fbUser.uid}`,
     userId: fbUser.uid,
-    displayName: savedProfile.displayName || fbUser.displayName || 'AURA Member',
-    age: savedProfile.age || 25,
-    identityRole: savedProfile.identityRole || 'Versatile',
-    location: savedProfile.location || 'Los Angeles, CA',
-    lat: typeof savedProfile.lat === 'number' ? savedProfile.lat : undefined,
-    lng: typeof savedProfile.lng === 'number' ? savedProfile.lng : undefined,
-    locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(savedProfile.locationPrivacy)
-      ? savedProfile.locationPrivacy : 'APPROXIMATE',
-    approximateArea: savedProfile.approximateArea,
-    distanceKm: savedProfile.distanceKm ?? 0.8,
-    bio: savedProfile.bio ?? 'Passionate about life, good energy, and authentic connections.',
-    relationshipStatus: savedProfile.relationshipStatus || 'Single',
-    lookingFor: savedProfile.lookingFor || ['Dating', 'Friends'],
-    tribes: savedProfile.tribes || ['Clean Cut'],
-    interests: savedProfile.interests || ['Coffee', 'Travel', 'Art'],
-    photos: savedProfile.photos || [
+    displayName: firestoreData?.displayName || fbUser.displayName || 'AURA Member',
+    age: firestoreData?.age || 25,
+    identityRole: firestoreData?.identityRole || 'Versatile',
+    location: firestoreData?.location || 'Los Angeles, CA',
+    distanceKm: firestoreData?.distanceKm || 0.8,
+    bio: firestoreData?.bio || 'Passionate about life, good energy, and authentic connections.',
+    relationshipStatus: firestoreData?.relationshipStatus || 'Single',
+    lookingFor: firestoreData?.lookingFor || ['Dating', 'Friends'],
+    tribes: firestoreData?.tribes || ['Clean Cut'],
+    interests: firestoreData?.interests || ['Coffee', 'Travel', 'Art'],
+    photos: firestoreData?.photos || [
       {
         id: `ph-${fbUser.uid}`,
         url: fbUser.photoURL || AURA_ALBUM_PHOTOS[0] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
         isPrimary: true
       }
     ],
-    verified: savedProfile.verified ?? true,
+    verified: firestoreData?.verified === true,
     isOnline: true,
     lastActiveMinutesAgo: 0
   };
@@ -72,8 +68,7 @@ export function formatUserAccount(
   return {
     id: fbUser.uid,
     email: fbUser.email || '',
-    // Firestore user documents are owner-writable, so they cannot grant privileges.
-    role: 'USER',
+    role: firestoreData?.role || 'USER',
     status: firestoreData?.status || 'ACTIVE',
     isAgeVerified18Plus: true,
     createdAt: firestoreData?.createdAt || new Date().toISOString(),
@@ -286,27 +281,38 @@ export async function loginWithFirebaseEmail(
 export async function saveProfileToFirestore(
   uid: string, 
   updates: Partial<UserProfile>
-): Promise<UserProfile> {
+): Promise<void> {
   const userDocRef = doc(db, 'users', uid);
   try {
     const userDocSnap = await getDoc(userDocRef);
-    const existing = userDocSnap.exists() ? userDocSnap.data() : {};
-    const updatedProfile = {
-      ...(existing.profile || {}),
-      id: existing.profile?.id || `prof-${uid}`,
-      userId: uid,
-      ...updates
-    } as UserProfile;
-    await setDoc(userDocRef, {
-      profile: updatedProfile,
-      displayName: updatedProfile.displayName,
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
-    return updatedProfile;
+    if (userDocSnap.exists()) {
+      const existing = userDocSnap.data();
+      const updatedProfile = {
+        ...(existing.profile || {}),
+        ...updates
+      };
+      await updateDoc(userDocRef, {
+        profile: updatedProfile,
+        displayName: updates.displayName || existing.displayName,
+        updatedAt: new Date().toISOString()
+      });
+    } else {
+      await setDoc(userDocRef, {
+        uid,
+        displayName: updates.displayName || 'AURA Member',
+        role: 'USER',
+        status: 'ACTIVE',
+        isAgeVerified18Plus: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        profile: updates
+      }, { merge: true });
+    }
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
     }
+    console.warn('Notice updating profile in Firestore:', err);
     throw err;
   }
 }
@@ -316,4 +322,91 @@ export async function saveProfileToFirestore(
  */
 export async function logoutFirebase(): Promise<void> {
   await signOut(auth);
+}
+
+/**
+ * Updates the user's typing status in Firestore for an active conversation
+ */
+export async function setTypingStatus(
+  conversationId: string,
+  userId: string,
+  isTyping: boolean
+): Promise<void> {
+  if (!conversationId || !userId) return;
+  const typingDocId = `${conversationId}_${userId}`;
+  const typingDocRef = doc(db, 'typing', typingDocId);
+  try {
+    await setDoc(typingDocRef, {
+      conversationId,
+      userId,
+      isTyping,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `typing/${typingDocId}`);
+    }
+    console.debug('Notice updating typing status in Firestore:', err?.message || err);
+  }
+}
+
+/**
+ * Clears user's typing status on leave or unmount
+ */
+export async function clearTypingStatus(
+  conversationId: string,
+  userId: string
+): Promise<void> {
+  if (!conversationId || !userId) return;
+  const typingDocId = `${conversationId}_${userId}`;
+  const typingDocRef = doc(db, 'typing', typingDocId);
+  try {
+    await deleteDoc(typingDocRef);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.DELETE, `typing/${typingDocId}`);
+    }
+    console.debug('Notice clearing typing status in Firestore:', err?.message || err);
+  }
+}
+
+/**
+ * Listens in real time to the other participant's typing state in a conversation
+ */
+export function subscribeToTypingStatus(
+  conversationId: string,
+  otherUserId: string,
+  onTypingChange: (isTyping: boolean) => void
+): () => void {
+  if (!conversationId || !otherUserId) {
+    return () => {};
+  }
+  const typingDocId = `${conversationId}_${otherUserId}`;
+  const typingDocRef = doc(db, 'typing', typingDocId);
+
+  return onSnapshot(
+    typingDocRef,
+    (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.isTyping) {
+          const updatedAt = data.updatedAt ? new Date(data.updatedAt).getTime() : 0;
+          // Validate timestamp freshness (within 7 seconds)
+          const isFresh = Date.now() - updatedAt < 7000;
+          onTypingChange(isFresh);
+        } else {
+          onTypingChange(false);
+        }
+      } else {
+        onTypingChange(false);
+      }
+    },
+    (err: any) => {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.GET, `typing/${typingDocId}`);
+      }
+      console.debug('Notice listening to typing status:', err?.message || err);
+      onTypingChange(false);
+    }
+  );
 }

@@ -1,11 +1,19 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
-import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2 } from 'lucide-react';
+import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2, HardDrive, RotateCcw, Rocket, Radio, Flame } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
 import { ImportAlbumModal } from './ImportAlbumModal';
+import {
+  getProfileDraftStorageKey,
+  saveLocalProfileDraft,
+  loadLocalProfileDraft,
+  clearLocalProfileDraft,
+  getPlatformBackupHook
+} from '../services/platformBackupService';
 import { auth } from '../lib/firebase';
 import { saveProfileToFirestore } from '../services/firebaseService';
-import { t, labelRole, labelTribe, labelLookingFor } from '../i18n';
+import { AuraVerifiedBadge } from './common/AuraVerifiedBadge';
+import { ProfileBoostOverlay } from './common/ProfileBoostOverlay';
 
 interface ProfileEditorProps {
   profile: UserProfile;
@@ -18,43 +26,28 @@ const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bot
 const TRIBES: Tribe[] = ['Bear', 'Otter', 'Cub', 'Jock', 'Twink', 'Geek', 'Daddy', 'Leather', 'Clean Cut', 'Muscle', 'Trans', 'Queer', 'Pup'];
 const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking', 'Relationship', 'Right Now', 'Chat'];
 
-type ProfileDraft = Pick<UserProfile, 'displayName' | 'age' | 'identityRole' | 'location' | 'bio' | 'interests' | 'lookingFor' | 'tribes' | 'photos'> & Pick<UserProfile, 'instagramHandle' | 'spotifyTopArtist'>;
-
-const profileDraftKey = (userId: string) => `aura:profile-draft:${userId}`;
-
-const readProfileDraft = (userId: string): Partial<ProfileDraft> | null => {
-  try {
-    const raw = localStorage.getItem(profileDraftKey(userId));
-    const parsed = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-};
-
 export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   profile,
   authToken,
   onProfileUpdated,
   onOpenSettings
 }) => {
-  const [restoredDraft] = useState(() => readProfileDraft(profile.userId));
-  const [displayName, setDisplayName] = useState(restoredDraft?.displayName ?? profile.displayName);
-  const [age, setAge] = useState(restoredDraft?.age ?? profile.age);
-  const [identityRole, setIdentityRole] = useState<SexualRole>(restoredDraft?.identityRole ?? profile.identityRole);
-  const [location, setLocation] = useState(restoredDraft?.location ?? profile.location);
-  const [bio, setBio] = useState(restoredDraft?.bio ?? profile.bio);
-  const [instagramHandle, setInstagramHandle] = useState(restoredDraft?.instagramHandle ?? profile.instagramHandle ?? '');
-  const [spotifyTopArtist, setSpotifyTopArtist] = useState(restoredDraft?.spotifyTopArtist ?? profile.spotifyTopArtist ?? '');
+  const [displayName, setDisplayName] = useState(profile.displayName);
+  const [age, setAge] = useState(profile.age);
+  const [identityRole, setIdentityRole] = useState<SexualRole>(profile.identityRole);
+  const [location, setLocation] = useState(profile.location);
+  const [bio, setBio] = useState(profile.bio);
+  const [instagramHandle, setInstagramHandle] = useState(profile.instagramHandle || '');
+  const [spotifyTopArtist, setSpotifyTopArtist] = useState(profile.spotifyTopArtist || '');
 
   // Enhanced Customization
-  const [interests, setInterests] = useState<string[]>(restoredDraft?.interests ?? profile.interests ?? []);
+  const [interests, setInterests] = useState<string[]>(profile.interests || []);
   const [newTagInput, setNewTagInput] = useState('');
-  const [lookingFor, setLookingFor] = useState<LookingFor[]>(restoredDraft?.lookingFor ?? profile.lookingFor ?? []);
-  const [tribes, setTribes] = useState<Tribe[]>(restoredDraft?.tribes ?? profile.tribes ?? []);
+  const [lookingFor, setLookingFor] = useState<LookingFor[]>(profile.lookingFor || []);
+  const [tribes, setTribes] = useState<Tribe[]>(profile.tribes || []);
 
-  const [photos, setPhotos] = useState(restoredDraft?.photos ?? profile.photos ?? []);
-  const [newPhotoUrl, setNewPhotoUrl] = useState('');
+  const [photos, setPhotos] = useState(profile.photos || []);
+  const verified = profile.verified === true;
   const [showAlbumPicker, setShowAlbumPicker] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -63,27 +56,118 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const savedSnapshot = useRef(JSON.stringify({
-    displayName: profile.displayName, age: profile.age, identityRole: profile.identityRole,
-    location: profile.location, bio: profile.bio, instagramHandle: profile.instagramHandle || '',
-    spotifyTopArtist: profile.spotifyTopArtist || '', interests: profile.interests || [],
-    lookingFor: profile.lookingFor || [], tribes: profile.tribes || [], photos: profile.photos || []
-  }));
+  // Profile Boost state
+  const [isBoosting, setIsBoosting] = useState(false);
+  const [showBoostOverlay, setShowBoostOverlay] = useState(false);
+  const [boostExpiresAt, setBoostExpiresAt] = useState<string | undefined>(profile.boostExpiresAt);
+  const [isBoostActive, setIsBoostActive] = useState<boolean>(() => {
+    if (!profile.boostExpiresAt) return Boolean(profile.isBoosted);
+    return new Date(profile.boostExpiresAt).getTime() > Date.now();
+  });
 
+  // Platform Backup & Local Draft State
+  const storageKey = getProfileDraftStorageKey(profile.userId || profile.id || 'current');
+  const backupHook = getPlatformBackupHook();
+  const [hasDraftRestored, setHasDraftRestored] = useState(false);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+
+  // Restore draft on mount
   useEffect(() => {
-    const draft: ProfileDraft = {
-      displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist,
-      interests, lookingFor, tribes, photos
-    };
-    const snapshot = JSON.stringify(draft);
-    if (snapshot === savedSnapshot.current) return;
-    const timeout = window.setTimeout(() => {
-      if (snapshot === savedSnapshot.current) return;
-      try { localStorage.setItem(profileDraftKey(profile.userId), snapshot); } catch { /* Storage may be disabled. */ }
-    }, 500);
-    return () => window.clearTimeout(timeout);
-  }, [profile.userId, displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist, interests, lookingFor, tribes, photos]);
+    const draft = loadLocalProfileDraft(storageKey);
+    if (draft && draft.updatedAt) {
+      if (draft.displayName !== undefined) setDisplayName(draft.displayName);
+      if (typeof draft.age === 'number') setAge(draft.age);
+      if (draft.identityRole) setIdentityRole(draft.identityRole);
+      if (draft.location !== undefined) setLocation(draft.location);
+      if (draft.bio !== undefined) setBio(draft.bio);
+      if (draft.instagramHandle !== undefined) setInstagramHandle(draft.instagramHandle);
+      if (draft.spotifyTopArtist !== undefined) setSpotifyTopArtist(draft.spotifyTopArtist);
+      if (draft.interests) setInterests(draft.interests);
+      if (draft.lookingFor) setLookingFor(draft.lookingFor);
+      if (draft.tribes) setTribes(draft.tribes);
+      if (Array.isArray(draft.photos)) setPhotos(draft.photos);
+      setDraftSavedAt(draft.updatedAt);
+      setHasDraftRestored(true);
+    }
+  }, [storageKey]);
+
+  const hasUnsavedChanges =
+    displayName !== profile.displayName ||
+    age !== profile.age ||
+    identityRole !== profile.identityRole ||
+    location !== profile.location ||
+    bio !== profile.bio ||
+    instagramHandle !== (profile.instagramHandle || '') ||
+    spotifyTopArtist !== (profile.spotifyTopArtist || '') ||
+    JSON.stringify(interests) !== JSON.stringify(profile.interests || []) ||
+    JSON.stringify(lookingFor) !== JSON.stringify(profile.lookingFor || []) ||
+    JSON.stringify(tribes) !== JSON.stringify(profile.tribes || []) ||
+    JSON.stringify(photos) !== JSON.stringify(profile.photos || []);
+
+  // Auto-save local draft on edits
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      if (draftSavedAt !== null) {
+        clearLocalProfileDraft(storageKey);
+        setDraftSavedAt(null);
+        setHasDraftRestored(false);
+      }
+      return;
+    }
+    const timer = setTimeout(() => {
+      const now = Date.now();
+      saveLocalProfileDraft(storageKey, {
+        displayName,
+        age,
+        identityRole,
+        location,
+        bio,
+        instagramHandle,
+        spotifyTopArtist,
+        interests,
+        lookingFor,
+        tribes,
+        photos,
+        updatedAt: now
+      });
+      setDraftSavedAt(now);
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [
+    storageKey,
+    hasUnsavedChanges,
+    displayName,
+    age,
+    identityRole,
+    location,
+    bio,
+    instagramHandle,
+    spotifyTopArtist,
+    interests,
+    lookingFor,
+    tribes,
+    photos
+  ]);
+
+  const handleDiscardDraft = () => {
+    clearLocalProfileDraft(storageKey);
+    setDisplayName(profile.displayName);
+    setAge(profile.age);
+    setIdentityRole(profile.identityRole);
+    setLocation(profile.location);
+    setBio(profile.bio);
+    setInstagramHandle(profile.instagramHandle || '');
+    setSpotifyTopArtist(profile.spotifyTopArtist || '');
+    setInterests(profile.interests || []);
+    setLookingFor(profile.lookingFor || []);
+    setTribes(profile.tribes || []);
+    setPhotos(profile.photos || []);
+    setHasDraftRestored(false);
+    setDraftSavedAt(null);
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -112,14 +196,11 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     try {
       const formData = new FormData();
       formData.append('media', file);
-      const bearerToken = auth.currentUser?.uid === profile.userId
-        ? await auth.currentUser.getIdToken()
-        : authToken;
 
       const res = await fetch('/api/media/upload', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${bearerToken}`
+          Authorization: `Bearer ${authToken}`
         },
         body: formData
       });
@@ -135,7 +216,11 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         isPrimary: photos.length === 0
       };
 
-      setPhotos(prev => [...prev, newPhoto]);
+      const updatedPhotos = [...photos, newPhoto];
+      setPhotos(updatedPhotos);
+      const persistedProfile = await syncProfile({ photos: updatedPhotos });
+      setPhotos(persistedProfile.photos);
+      onProfileUpdated(persistedProfile);
     } catch (err: any) {
       setUploadError(err.message || 'Failed to upload photo. Please try again.');
     } finally {
@@ -157,17 +242,6 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
   const handleRemoveTag = (tag: string) => {
     setInterests(interests.filter(i => i !== tag));
-  };
-
-  const handleAddPhoto = () => {
-    if (!newPhotoUrl.trim()) return;
-    const newPh = {
-      id: `ph-${Date.now()}`,
-      url: newPhotoUrl.trim(),
-      isPrimary: photos.length === 0
-    };
-    setPhotos([...photos, newPh]);
-    setNewPhotoUrl('');
   };
 
   const handleRemovePhoto = (id: string) => {
@@ -195,70 +269,209 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     );
   };
 
+  const syncProfile = async (updates: Partial<UserProfile>): Promise<UserProfile> => {
+    // 1. First write to PostgreSQL API
+    const res = await fetch('/api/profile', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+      },
+      body: JSON.stringify(updates)
+    });
+
+    if (!res.ok) {
+      let errorMsg = `Błąd zapisu profilu (HTTP ${res.status})`;
+      try {
+        const errJson = await res.json();
+        if (errJson?.error) {
+          errorMsg = errJson.error;
+          if (errJson.reason) errorMsg += `: ${errJson.reason}`;
+        }
+      } catch {}
+      throw new Error(errorMsg);
+    }
+
+    const data = await res.json();
+    if (!data || !data.profile) {
+      throw new Error('Serwer nie zwrócił zaktualizowanego profilu.');
+    }
+
+    const updatedProfile: UserProfile = data.profile;
+
+    // 2. Only upon confirmed PostgreSQL API success, sync to Firebase Firestore if logged in with Firebase
+    const currentFbUser = auth.currentUser;
+    const targetUid = currentFbUser?.uid || profile.userId || profile.id;
+    if (targetUid) {
+      try {
+        await saveProfileToFirestore(targetUid, updatedProfile);
+      } catch (firestoreErr: any) {
+        console.warn('Notice syncing profile updates to Firestore:', firestoreErr?.message || firestoreErr);
+      }
+    }
+
+    return updatedProfile;
+  };
+
+  const handleTriggerBoost = async () => {
+    if (isBoosting) return;
+    setIsBoosting(true);
+    setSaveError(null);
+
+    try {
+      // 1. Call Profile Boost API (backed by PostgreSQL store and prioritized in Discover feed)
+      const res = await fetch('/api/profile/boost', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+
+      if (!res.ok) {
+        let errDesc = 'Nie udało się aktywować dopalacza profilu.';
+        try {
+          const errData = await res.json();
+          if (errData?.error) errDesc = errData.error;
+        } catch {}
+        throw new Error(errDesc);
+      }
+
+      const data = await res.json();
+      const updatedProfile: UserProfile = data.profile || {
+        ...profile,
+        isBoosted: true,
+        boostExpiresAt: data.boostExpiresAt
+      };
+
+      // 2. Dual-write to Firebase Firestore if logged in
+      const currentFbUser = auth.currentUser;
+      const targetUid = currentFbUser?.uid || profile.userId || profile.id;
+      if (targetUid) {
+        try {
+          await saveProfileToFirestore(targetUid, updatedProfile);
+        } catch (fbErr) {
+          console.warn('Notice syncing boost to Firestore:', fbErr);
+        }
+      }
+
+      // 3. Update local state & trigger cinematic overlay
+      setBoostExpiresAt(data.boostExpiresAt);
+      setIsBoostActive(true);
+      setShowBoostOverlay(true);
+      onProfileUpdated(updatedProfile);
+    } catch (err: any) {
+      console.error('Boost trigger error:', err);
+      setSaveError(err?.message || 'Błąd podczas aktywacji doładowania profilu.');
+    } finally {
+      setIsBoosting(false);
+    }
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     setSavedSuccess(false);
     setSaveError(null);
 
+    const payload: Partial<UserProfile> = {
+      displayName,
+      age,
+      identityRole,
+      location,
+      bio,
+      instagramHandle,
+      spotifyTopArtist,
+      interests,
+      lookingFor,
+      tribes,
+      photos,
+      // Verification and paid boost are controlled by the server.
+    };
+
     try {
-      const updates = {
-        displayName,
-        age,
-        identityRole,
-        location,
-        bio,
-        instagramHandle,
-        spotifyTopArtist,
-        interests,
-        lookingFor,
-        tribes,
-        photos
-      };
-      const markSaved = (savedProfile: UserProfile) => {
-        savedSnapshot.current = JSON.stringify(updates);
-        try { localStorage.removeItem(profileDraftKey(profile.userId)); } catch { /* Storage may be disabled. */ }
-        onProfileUpdated(savedProfile);
-        setSavedSuccess(true);
-        setTimeout(() => setSavedSuccess(false), 3000);
-      };
-      const firebaseUser = auth.currentUser?.uid === profile.userId ? auth.currentUser : null;
-      const bearerToken = firebaseUser ? await firebaseUser.getIdToken() : authToken;
-      const res = await fetch('/api/profile', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${bearerToken}`
-        },
-        body: JSON.stringify(updates)
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
-      // Discovery reads the server profile; login hydration reads Firestore.
-      // Confirm both writes before reporting success.
-      const savedProfile = firebaseUser
-        ? await saveProfileToFirestore(firebaseUser.uid, { ...profile, ...data.profile, ...updates })
-        : data.profile;
-      markSaved(savedProfile);
+      const persistedProfile = await syncProfile(payload);
+      onProfileUpdated(persistedProfile);
+
+      // Usuń kopię roboczą WYŁĄCZNIE po potwierdzonym sukcesie zapisu na serwerze
+      clearLocalProfileDraft(storageKey);
+      setHasDraftRestored(false);
+      setDraftSavedAt(null);
+
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 3500);
     } catch (err: any) {
       console.error('Save profile error:', err);
-      setSaveError(err?.message || 'Nie udało się zapisać profilu.');
+      setSaveError(err?.message || 'Nie udało się zapisać zmian. Spróbuj ponownie.');
     } finally {
       setSaving(false);
     }
   };
 
+  const handleOpenImport = async () => {
+    if (JSON.stringify(photos) !== JSON.stringify(profile.photos || [])) {
+      setSaving(true);
+      setSaveError(null);
+      try {
+        const persistedProfile = await syncProfile({ photos });
+        setPhotos(persistedProfile.photos);
+        onProfileUpdated(persistedProfile);
+      } catch (err: any) {
+        setSaveError(err?.message || 'Nie udało się zapisać galerii przed importem.');
+        setSaving(false);
+        return;
+      }
+      setSaving(false);
+    }
+    setShowImportModal(true);
+  };
+
   return (
     <div className="w-full max-w-md mx-auto space-y-4 pb-24 pt-1 px-3">
+      {/* Device Draft & Platform Backup Indicator */}
+      <div className="p-3 rounded-2xl bg-gradient-to-r from-purple-950/60 to-indigo-950/60 border border-purple-500/25 flex items-center justify-between text-xs shadow-md">
+        <div className="flex items-center gap-2 min-w-0 pr-2">
+          <HardDrive className="w-4 h-4 text-purple-400 shrink-0" />
+          <div className="truncate">
+            <div className="text-[11px] font-bold text-white truncate">
+              {backupHook.label}
+            </div>
+            <div className="text-[10px] text-slate-300">
+              {hasDraftRestored
+                ? 'Przywrócono roboczą wersję z urządzenia'
+                : draftSavedAt
+                ? 'Kopia robocza zapisywana automatycznie'
+                : 'Zmiany zapisywane na urządzeniu'}
+            </div>
+          </div>
+        </div>
+
+        {hasDraftRestored && (
+          <button
+            type="button"
+            onClick={handleDiscardDraft}
+            className="px-2.5 py-1 rounded-xl bg-white/10 hover:bg-white/20 text-[10px] font-bold text-rose-300 hover:text-rose-200 border border-white/10 transition shrink-0 flex items-center gap-1"
+            title="Odrzuć kopię roboczą i przywróć oryginał"
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span>Odrzuć</span>
+          </button>
+        )}
+      </div>
+
       <div className="flex items-center justify-between px-1">
-        <h2 className="text-base font-extrabold text-white tracking-wide">{t('Edit Profile')}</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-extrabold text-white tracking-wide">Edit Profile</h2>
+          {verified && (
+            <AuraVerifiedBadge size="sm" variant="pill" customLabel="Aura Verified" />
+          )}
+        </div>
         <div className="flex items-center gap-2">
           {savedSuccess && (
             <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 shadow-sm animate-pulse-green">
-              <Check className="w-3.5 h-3.5" /> {t('Saved!')}
+              <Check className="w-3.5 h-3.5" /> Zapisano
             </span>
           )}
-          {saveError && <span role="alert" className="text-xs text-rose-300">{saveError}</span>}
           {onOpenSettings && (
             <button
               type="button"
@@ -272,7 +485,102 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           )}
         </div>
       </div>
-      {restoredDraft && <p className="px-1 text-xs text-amber-200" role="status">Przywrócono niezapisaną wersję profilu. Naciśnij Zapisz, aby zachować zmiany na koncie.</p>}
+
+      {/* Aura Verified Badge Showcase Card */}
+      {verified && (
+        <AuraVerifiedBadge variant="card" />
+      )}
+
+      {/* Profile Boost: 1-Hour Visibility Accelerator Card */}
+      <div className="relative overflow-hidden rounded-[26px] border border-amber-500/35 bg-gradient-to-r from-amber-950/40 via-[#141224]/90 to-purple-950/40 p-4 shadow-[0_0_30px_rgba(245,158,11,0.18)] transition-all">
+        {/* Dynamic sweeping shimmer overlay */}
+        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-transparent -translate-x-full animate-shimmer-pass pointer-events-none" />
+
+        <div className="relative flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
+          <div className="flex items-center gap-3.5">
+            {/* Glowing animated rocket orb */}
+            <div className="relative flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400/25 via-rose-500/25 to-purple-600/30 border border-amber-400/60 shadow-[0_0_18px_rgba(245,158,11,0.5)] shrink-0">
+              <Rocket className="w-6 h-6 text-amber-300 stroke-[2.2] animate-bounce drop-shadow-[0_0_8px_rgba(245,158,11,0.8)]" />
+              {isBoostActive && (
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-400 shadow-[0_0_8px_#f59e0b]" />
+                </span>
+              )}
+            </div>
+
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-black tracking-wide bg-gradient-to-r from-amber-200 via-rose-200 to-purple-200 bg-clip-text text-transparent">
+                  Aura Profile Boost
+                </span>
+                {isBoostActive ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-[9.5px] font-black text-amber-300 uppercase tracking-wider shadow-[0_0_10px_rgba(245,158,11,0.4)]">
+                    <Radio className="w-3 h-3 text-amber-300 animate-pulse" />
+                    Aktywny (1 godz.)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-400/30 text-[9.5px] font-extrabold text-purple-300 uppercase tracking-wider">
+                    <Sparkles className="w-2.5 h-2.5 text-purple-300" />
+                    Zwiększ zasięg
+                  </span>
+                )}
+              </div>
+              <p className="text-[11.5px] text-slate-300 mt-0.5 leading-snug">
+                {isBoostActive
+                  ? 'Twój profil jest priorytetowo wyświetlany na samej górze siatki Discover oraz w radarze.'
+                  : 'Wystrzel swój profil na szczyt Discover i radaru w okolicy na 1 godzinę.'}
+              </p>
+            </div>
+          </div>
+
+          {/* Boost Trigger Button */}
+          <button
+            type="button"
+            onClick={handleTriggerBoost}
+            disabled={isBoosting}
+            className={`shrink-0 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider transition-all duration-300 flex items-center justify-center gap-2 shadow-lg active:scale-95 ${
+              isBoostActive
+                ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 shadow-[0_0_15px_rgba(245,158,11,0.3)]'
+                : 'bg-gradient-to-r from-amber-500 via-rose-500 to-purple-600 hover:from-amber-400 hover:via-rose-400 hover:to-purple-500 text-white shadow-[0_0_20px_rgba(245,158,11,0.4)]'
+            }`}
+          >
+            {isBoosting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
+                <span>Aktywacja...</span>
+              </>
+            ) : isBoostActive ? (
+              <>
+                <Rocket className="w-4 h-4 text-amber-300 animate-bounce" />
+                <span>Odśwież Boost</span>
+              </>
+            ) : (
+              <>
+                <Zap className="w-4 h-4 text-white fill-current" />
+                <span>Aktywuj Boost</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {saveError && (
+        <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5 text-xs text-rose-200 shadow-md animate-in fade-in">
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <span className="font-bold block text-rose-300">Błąd zapisu profilu:</span>
+            <span>{saveError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSaveError(null)}
+            className="text-rose-400 hover:text-white text-xs font-bold px-1"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Quick Settings Access Card */}
       {onOpenSettings && (
@@ -300,7 +608,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
       )}
 
       <form onSubmit={handleSave} className="space-y-3.5">
-        
+
         {/* Photo Gallery Editor */}
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <div className="flex items-center justify-between">
@@ -311,7 +619,8 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setShowImportModal(true)}
+                onClick={handleOpenImport}
+                disabled={saving || uploadingPhoto}
                 className="text-[11px] font-semibold text-purple-300 hover:text-white flex items-center gap-1 bg-purple-950/40 border border-purple-500/30 px-2.5 py-1 rounded-full transition active:scale-95 shadow-sm"
               >
                 <Link2 className="w-3.5 h-3.5 text-fuchsia-400" />
@@ -364,7 +673,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                         isAdded ? 'border-emerald-500/50 opacity-40 cursor-not-allowed' : 'border-white/20 hover:border-fuchsia-400 hover:scale-105 active:scale-95'
                       }`}
                     >
-                      <img src={url} alt={`Album photo ${idx}`} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+                      <img
+                        src={url}
+                        alt={`Album photo ${idx}`}
+                        referrerPolicy="no-referrer"
+                        draggable={false}
+                        className="w-full h-full object-cover protected-image select-none pointer-events-none"
+                        onContextMenu={(e) => e.preventDefault()}
+                      />
                       {isAdded && (
                         <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
                           <Check className="w-4 h-4 text-emerald-400" />
@@ -379,13 +695,24 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           <div className="grid grid-cols-3 gap-2">
             {photos.map(p => (
-              <div key={p.id} className={`relative aspect-square rounded-2xl overflow-hidden border bg-black group shadow-md transition-all ${
-                p.isPrivate ? 'border-amber-500/60 ring-1 ring-amber-500/40' : 'border-white/10'
-              }`}>
-                <img src={p.url} alt="Profile photo" referrerPolicy="no-referrer" className={`w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 ${
-                  p.isPrivate ? 'brightness-90' : ''
-                }`} />
-                
+              <div
+                key={p.id}
+                onContextMenu={(e) => e.preventDefault()}
+                className={`relative aspect-square rounded-2xl overflow-hidden border bg-black group shadow-md transition-all protected-media-container select-none ${
+                  p.isPrivate ? 'border-amber-500/60 ring-1 ring-amber-500/40' : 'border-white/10'
+                }`}
+              >
+                <img
+                  src={p.url}
+                  alt="Profile photo"
+                  referrerPolicy="no-referrer"
+                  draggable={false}
+                  className={`w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 protected-image select-none pointer-events-none ${
+                    p.isPrivate ? 'brightness-90' : ''
+                  }`}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+
                 {/* Private Vault Badge */}
                 {p.isPrivate && (
                   <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full bg-black/80 backdrop-blur-md border border-amber-500/40 flex items-center gap-1 text-[9px] font-bold text-amber-300 shadow-sm">
@@ -464,29 +791,33 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
             </button>
           </div>
 
-          <div className="flex gap-2 pt-1">
-            <input
-              type="text"
-              placeholder="Or paste an Image URL..."
-              value={newPhotoUrl}
-              onChange={e => setNewPhotoUrl(e.target.value)}
-              className="flex-1 aura-glass-input rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 outline-none transition"
-            />
-            <button
-              type="button"
-              onClick={handleAddPhoto}
-              className="aura-btn-primary px-4 py-2 rounded-xl text-xs font-bold text-white shadow-md shadow-purple-950/50 transition"
-            >
-              Add URL
-            </button>
-          </div>
+          <p className="text-[11px] text-slate-400">Dodaj własne zdjęcie przyciskiem Upload lub wybierz zdjęcie z AURA Album.</p>
         </div>
 
         {/* Basic Info */}
-        <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
+        <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3.5 shadow-xl">
+          <div className="flex items-center justify-between pb-1 border-b border-white/[0.06]">
+            <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+              Podstawowe Informacje
+            </span>
+            {verified && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-cyan-950/60 border border-cyan-400/40 text-[10px] font-bold text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.35)]">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                <span>Odznaka aktywna</span>
+              </span>
+            )}
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Name')}</label>
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>Name</span>
+                  {verified && (
+                    <AuraVerifiedBadge size="sm" variant="icon-only" />
+                  )}
+                </label>
+              </div>
               <input
                 type="text"
                 required
@@ -496,7 +827,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               />
             </div>
             <div className="space-y-1">
-              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Age (18+)')}</label>
+              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Age (18+)</label>
               <input
                 type="number"
                 min={18}
@@ -510,7 +841,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           </div>
 
           <div className="space-y-1">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Location')}</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Location</label>
             <input
               type="text"
               value={location}
@@ -521,7 +852,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           {/* Position Selector */}
           <div className="space-y-1.5">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Role / Position')}</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Role / Position</label>
             <div className="flex flex-wrap gap-1.5">
               {ROLES.map(r => (
                 <button
@@ -534,7 +865,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                       : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
                   }`}
                 >
-                  {labelRole(r)}
+                  {r}
                 </button>
               ))}
             </div>
@@ -542,7 +873,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           {/* Bio */}
           <div className="space-y-1">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Short Bio')}</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Short Bio</label>
             <textarea
               rows={3}
               value={bio}
@@ -557,7 +888,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
             <Tag className="w-4 h-4 text-purple-400" />
-            <span>{t('Interests & Tags')}</span>
+            <span>Interests & Tags</span>
           </label>
 
           <div className="flex flex-wrap gap-1.5">
@@ -592,14 +923,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               onClick={handleAddTag}
               className="px-3.5 py-2 rounded-xl bg-purple-600/80 hover:bg-purple-600 text-xs font-bold text-white shadow-md active:scale-95 transition"
             >
-              {t('Add')}
+              Add
             </button>
           </div>
         </div>
 
         {/* Tribes */}
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-2 shadow-xl">
-          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Tribes & Style')}</label>
+          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Tribes & Style</label>
           <div className="flex flex-wrap gap-1.5">
             {TRIBES.map(t => (
               <button
@@ -612,7 +943,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                     : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
                 }`}
               >
-                {labelTribe(t)}
+                {t}
               </button>
             ))}
           </div>
@@ -621,7 +952,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         {/* Looking For */}
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <div className="flex items-center justify-between">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Looking For')}</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Looking For</label>
             <button
               type="button"
               onClick={() => toggleLookingFor('Right Now')}
@@ -654,7 +985,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                   }`}
                 >
                   {isRightNow && <Zap className="w-3 h-3 text-amber-400" />}
-                  <span>{labelLookingFor(l)}</span>
+                  <span>{l}</span>
                 </button>
               );
             })}
@@ -666,7 +997,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           disabled={saving}
           className="w-full relative py-3.5 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 bg-[length:200%_auto] text-xs font-black uppercase tracking-wider text-white shadow-xl shadow-purple-950/60 hover:brightness-110 active:scale-[0.98] transition-all duration-300 disabled:opacity-50 animate-breathe-glow"
         >
-          {saving ? t('Saving Profile...') : t('Save Changes')}
+          {saving ? 'Saving Profile...' : 'Save Changes'}
         </button>
 
         {onOpenSettings && (
@@ -699,6 +1030,15 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           setShowImportModal(false);
         }}
       />
+
+      {/* Cinematic Profile Boost Animation Overlay */}
+      {showBoostOverlay && (
+        <ProfileBoostOverlay
+          onClose={() => setShowBoostOverlay(false)}
+          boostExpiresAt={boostExpiresAt}
+          durationMinutes={60}
+        />
+      )}
     </div>
   );
 };

@@ -75,6 +75,8 @@ export interface UserProfile {
   spotifyTopArtist?: string;
   isPremium?: boolean;
   premiumTier?: string;
+  isBoosted?: boolean;
+  boostExpiresAt?: string;
 }
 
 export type VenueCategory = 'cruising' | 'sauna' | 'bar' | 'club' | 'cafe' | 'wellness' | 'community';
@@ -255,6 +257,7 @@ export interface Message {
   deliveryStatus?: DeliveryStatus;
   readStatus?: boolean;
   readAt?: string;
+  deliveredAt?: string;
   deletedStatus?: DeletedStatus;
   deletedForUserIds?: string[];
 

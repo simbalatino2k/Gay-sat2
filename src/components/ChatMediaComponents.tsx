@@ -1,11 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Message, MessageMediaInfo, LocationInfo, LinkPreviewInfo } from '../types';
-import { 
-  Image as ImageIcon, 
-  Link as LinkIcon, 
-  MapPin, 
-  Sticker, 
-  Mic, 
+import {
+  Image as ImageIcon,
+  Link as LinkIcon,
+  MapPin,
+  Sticker,
+  Mic,
   Star,
   Play,
   Pause,
@@ -13,10 +13,37 @@ import {
   Send,
   Loader2,
   ExternalLink,
-  Map
+  Map,
+  AlertCircle,
+  ShieldCheck,
+  Lock,
+  Maximize2
 } from 'lucide-react';
 import { formatDistance } from '../utils/formatDistance';
 import { AURA_STICKERS } from '../data/auraStickers';
+import { useScreenshotProtection } from '../hooks/useScreenshotProtection';
+import { ScreenshotShield } from './common/ScreenshotShield';
+
+// ----------------------------------------
+// Media URL Resolver (handles auth tokens for secure endpoints)
+// ----------------------------------------
+export function resolveMediaUrl(url?: string): string {
+  if (!url) return '';
+  if (url.startsWith('/api/media/') && !url.includes('token=')) {
+    try {
+      const token = typeof window !== 'undefined'
+        ? (localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token'))
+        : null;
+      if (token) {
+        const sep = url.includes('?') ? '&' : '?';
+        return `${url}${sep}token=${encodeURIComponent(token)}`;
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+  }
+  return url;
+}
 
 // ----------------------------------------
 // Chat Media Menu
@@ -66,22 +93,92 @@ export const ChatMediaMenu: React.FC<ChatMediaMenuProps> = ({ onSelectAction, is
 };
 
 // ----------------------------------------
-// Photo Message
+// Photo Message (Protected against screenshots, drag, right-click saving)
 // ----------------------------------------
 export const PhotoMessage: React.FC<{ media?: MessageMediaInfo; text?: string; isMe: boolean }> = ({ media, text, isMe }) => {
+  const [showFullView, setShowFullView] = useState(false);
+  const { isScreenshotAttempted, isWindowBlurred, dismissWarning } = useScreenshotProtection({
+    enabled: showFullView,
+    featureName: 'Zdjęcie AURA',
+    protectOnBlur: true
+  });
+
   if (!media?.url) return null;
+  const resolvedUrl = resolveMediaUrl(media.url);
+
   return (
     <div className="space-y-1.5">
-      <div className="overflow-hidden rounded-xl border border-white/10 bg-black/50 cursor-pointer active:opacity-80 transition-opacity">
-        <img 
-          src={media.url} 
-          alt="Shared Photo" 
-          className="w-full max-w-[220px] object-cover max-h-[300px]" 
-          loading="lazy" 
+      <div
+        onClick={() => setShowFullView(true)}
+        onContextMenu={(e) => e.preventDefault()}
+        className="overflow-hidden rounded-xl border border-white/10 bg-black/50 cursor-pointer active:opacity-80 transition-opacity protected-media-container select-none relative group"
+        title="Kliknij, aby otworzyć chronione zdjęcie"
+      >
+        <img
+          src={resolvedUrl}
+          alt="Shared Photo"
+          className="w-full max-w-[220px] object-cover max-h-[300px] protected-image select-none pointer-events-none"
+          loading="lazy"
           referrerPolicy="no-referrer"
+          draggable={false}
+          onContextMenu={(e) => e.preventDefault()}
         />
+        {/* Anti-screenshot mini watermark badge */}
+        <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md border border-white/10 text-[8.5px] font-mono text-cyan-300 pointer-events-none select-none flex items-center gap-1">
+          <ShieldCheck className="w-2.5 h-2.5 text-cyan-400" />
+          <span>AURA SECURE</span>
+        </div>
       </div>
-      {text && <p className="px-1">{text}</p>}
+      {text && <p className="px-1 select-none">{text}</p>}
+
+      {/* Protected Fullscreen Photo Viewer */}
+      {showFullView && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-2xl p-4 animate-in fade-in duration-200"
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <ScreenshotShield
+            isBlocked={isScreenshotAttempted}
+            isWindowBlurred={isWindowBlurred}
+            featureTitle="Chronione Zdjęcie AURA"
+            onDismiss={dismissWarning}
+            showWatermark={true}
+            watermarkText="AURA 18+ NO SCREENSHOT"
+          >
+            <div className="relative max-w-lg w-full max-h-[85vh] flex flex-col items-center justify-center">
+              {/* Close Button */}
+              <button
+                type="button"
+                onClick={() => setShowFullView(false)}
+                className="absolute -top-12 right-0 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition active:scale-90 z-30"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              {/* Security Pill */}
+              <div className="absolute -top-12 left-0 flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-950/80 border border-cyan-500/40 text-[11px] text-cyan-200 font-semibold z-30">
+                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Zrzuty ekranu zablokowane</span>
+              </div>
+
+              {/* Full Image Container */}
+              <div
+                className="relative rounded-2xl overflow-hidden border border-white/15 bg-black/80 shadow-[0_20px_60px_rgba(0,0,0,0.9)] max-h-[75vh]"
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <img
+                  src={resolvedUrl}
+                  alt="Full view"
+                  referrerPolicy="no-referrer"
+                  draggable={false}
+                  className="w-full h-full object-contain max-h-[75vh] protected-image select-none pointer-events-none"
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+              </div>
+            </div>
+          </ScreenshotShield>
+        </div>
+      )}
     </div>
   );
 };
@@ -91,14 +188,14 @@ export const PhotoMessage: React.FC<{ media?: MessageMediaInfo; text?: string; i
 // ----------------------------------------
 export const LinkMessage: React.FC<{ preview?: LinkPreviewInfo; text?: string }> = ({ preview, text }) => {
   if (!preview) return <p>{text}</p>;
-  
+
   return (
     <div className="space-y-1.5 w-[220px]">
       {text && <p className="px-1">{text}</p>}
-      <a 
-        href={preview.url} 
-        target="_blank" 
-        rel="noopener noreferrer" 
+      <a
+        href={preview.url}
+        target="_blank"
+        rel="noopener noreferrer"
         className="block bg-black/40 hover:bg-black/60 border border-white/10 hover:border-white/20 rounded-xl overflow-hidden transition-all duration-300 active:scale-[0.98] group shadow-sm hover:shadow-lg hover:shadow-black/50"
       >
         {preview.thumbnailUrl && (
@@ -124,7 +221,7 @@ export const LinkMessage: React.FC<{ preview?: LinkPreviewInfo; text?: string }>
 // ----------------------------------------
 export const LocationMessage: React.FC<{ location?: LocationInfo; text?: string }> = ({ location, text }) => {
   if (!location) return null;
-  
+
   const mapUrl = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
   const staticMapUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${location.lat},${location.lng}&zoom=14&size=400x200&maptype=roadmap&markers=color:red%7C${location.lat},${location.lng}&key=YOUR_API_KEY_PLACEHOLDER`; // In a real app we'd use a real key or a map component
 
@@ -141,7 +238,7 @@ export const LocationMessage: React.FC<{ location?: LocationInfo; text?: string 
             </div>
           </div>
         </div>
-        
+
         <div className="p-2.5 flex items-center justify-between gap-2 relative bg-black/40 backdrop-blur-sm group-hover:bg-black/60 transition-colors">
           <div className="flex-1 truncate">
             <p className="text-[11px] font-bold text-slate-200 truncate group-hover:text-rose-100 transition-colors">{location.approximateArea || 'Current Location'}</p>
@@ -149,10 +246,10 @@ export const LocationMessage: React.FC<{ location?: LocationInfo; text?: string 
               <p className="text-[10px] text-slate-400 mt-0.5 group-hover:text-rose-300/70 transition-colors">{formatDistance(location.distanceKm)} away</p>
             )}
           </div>
-          
-          <a 
-            href={mapUrl} 
-            target="_blank" 
+
+          <a
+            href={mapUrl}
+            target="_blank"
             rel="noopener noreferrer"
             className="shrink-0 p-2 rounded-lg bg-white/5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition-all active:scale-95 border border-transparent hover:border-rose-500/30"
             title="Open in Maps"
@@ -181,7 +278,7 @@ export const StickerPicker: React.FC<{ isOpen: boolean; onClose: () => void; onS
             <X className="w-4 h-4" />
           </button>
         </div>
-        
+
         <div className="overflow-y-auto pr-2 -mr-2 custom-scrollbar">
           <div className="grid grid-cols-3 gap-3 pb-2">
             {AURA_STICKERS.map((sticker) => (
@@ -193,10 +290,10 @@ export const StickerPicker: React.FC<{ isOpen: boolean; onClose: () => void; onS
                 }}
                 className="relative aspect-square flex items-center justify-center p-2 rounded-2xl bg-white/5 border border-white/5 hover:border-white/20 hover:bg-white/10 transition-all duration-200 active:scale-90 group"
               >
-                <img 
-                  src={sticker.url} 
-                  alt={sticker.name} 
-                  className="w-full h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] group-hover:scale-110 transition-transform duration-300 ease-out" 
+                <img
+                  src={sticker.url}
+                  alt={sticker.name}
+                  className="w-full h-full object-contain drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)] group-hover:scale-110 transition-transform duration-300 ease-out"
                   loading="lazy"
                 />
               </button>
@@ -228,12 +325,12 @@ export const StickerMessage: React.FC<{ stickerId?: string; stickerUrl?: string;
       </div>
     );
   }
-  
+
   return (
     <div className="flex items-center justify-center p-1">
-      <img 
-        src={finalUrl} 
-        alt={stickerName || 'Sticker'} 
+      <img
+        src={finalUrl}
+        alt={stickerName || 'Sticker'}
         className="w-[140px] h-[140px] sm:w-[160px] sm:h-[160px] object-contain drop-shadow-[0_8px_16px_rgba(0,0,0,0.6)] animate-in zoom-in-75 duration-500 spring-bounce"
         loading="lazy"
       />
@@ -251,7 +348,8 @@ export const VoiceMessage: React.FC<{ media?: MessageMediaInfo; isMe: boolean }>
 
   useEffect(() => {
     if (media?.url) {
-      audioRef.current = new Audio(media.url);
+      const resolved = resolveMediaUrl(media.url);
+      audioRef.current = new Audio(resolved);
       audioRef.current.onended = () => {
         setIsPlaying(false);
         setProgress(0);
@@ -260,6 +358,10 @@ export const VoiceMessage: React.FC<{ media?: MessageMediaInfo; isMe: boolean }>
         if (audioRef.current && audioRef.current.duration) {
           setProgress((audioRef.current.currentTime / audioRef.current.duration) * 100);
         }
+      };
+      audioRef.current.onerror = () => {
+        console.warn('Audio playback notice: source failed to load');
+        setIsPlaying(false);
       };
     }
     return () => {
@@ -274,10 +376,15 @@ export const VoiceMessage: React.FC<{ media?: MessageMediaInfo; isMe: boolean }>
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.pause();
+      setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(e => console.error("Audio play failed:", e));
+      audioRef.current.play().then(() => {
+        setIsPlaying(true);
+      }).catch(e => {
+        console.warn("Audio play notice:", e?.message || e);
+        setIsPlaying(false);
+      });
     }
-    setIsPlaying(!isPlaying);
   };
 
   const formatDuration = (secs: number = 0) => {
@@ -290,16 +397,16 @@ export const VoiceMessage: React.FC<{ media?: MessageMediaInfo; isMe: boolean }>
 
   return (
     <div className={`flex items-center gap-3 w-[180px] p-1`}>
-      <button 
+      <button
         onClick={togglePlay}
         className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all active:scale-90 ${isMe ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30'}`}
       >
         {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
       </button>
-      
+
       <div className="flex-1 space-y-1.5">
         <div className="h-1.5 w-full bg-black/20 rounded-full overflow-hidden relative">
-          <div 
+          <div
             className={`absolute left-0 top-0 bottom-0 transition-all ease-linear ${isMe ? 'bg-white' : 'bg-indigo-400'}`}
             style={{ width: `${progress}%` }}
           />
@@ -317,28 +424,88 @@ export const VoiceMessage: React.FC<{ media?: MessageMediaInfo; isMe: boolean }>
 // ----------------------------------------
 export const StarVideoMessage: React.FC<{ media?: MessageMediaInfo }> = ({ media }) => {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [isReady, setIsReady] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  if (!media?.url) return null;
+  const rawUrl = media?.url;
+  const resolvedUrl = useMemo(() => resolveMediaUrl(rawUrl), [rawUrl]);
 
-  const togglePlay = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!videoRef.current) return;
-    if (isPlaying) {
-      videoRef.current.pause();
-    } else {
-      videoRef.current.play().catch(e => console.error("Video play error:", e));
+  // Reset states when the URL changes
+  useEffect(() => {
+    setIsPlaying(false);
+    setHasError(false);
+    setIsBuffering(false);
+    setIsReady(false);
+    if (videoRef.current) {
+      videoRef.current.load();
     }
-    setIsPlaying(!isPlaying);
+  }, [resolvedUrl]);
+
+  if (!rawUrl) return null;
+
+  const togglePlay = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (hasError) {
+      // If previously had error, retry loading
+      setHasError(false);
+      video.load();
+      return;
+    }
+
+    if (isPlaying) {
+      video.pause();
+      setIsPlaying(false);
+    } else {
+      try {
+        setIsBuffering(true);
+        if (video.readyState === 0) {
+          video.load();
+        }
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+        }
+        setIsPlaying(true);
+        setHasError(false);
+      } catch (err: any) {
+        console.warn("Video playback notice:", err?.message || err);
+        setIsPlaying(false);
+        // If browser autoplay policy blocked unmuted playback, try muted
+        if (err?.name === 'NotAllowedError') {
+          try {
+            video.muted = true;
+            await video.play();
+            setIsPlaying(true);
+            return;
+          } catch {
+            // Muted playback also failed
+          }
+        }
+        // If element has no supported sources or network error occurred
+        if (err?.name === 'NotSupportedError' || video.error) {
+          setHasError(true);
+        }
+      } finally {
+        setIsBuffering(false);
+      }
+    }
   };
 
   return (
-    <div className="relative w-[160px] h-[160px] mx-auto animate-in zoom-in-95 duration-400">
+    <div className="relative w-[160px] h-[160px] mx-auto animate-in zoom-in-95 duration-400 select-none">
       {/* Glow effect with pulse */}
-      <div className="absolute inset-[-4px] bg-gradient-to-tr from-purple-600 via-fuchsia-500 to-pink-500 rounded-full blur-[10px] opacity-50 mix-blend-screen animate-pulse" style={{ animationDuration: '3s' }} />
-      
+      <div
+        className="absolute inset-[-4px] bg-gradient-to-tr from-purple-600 via-fuchsia-500 to-pink-500 rounded-full blur-[10px] opacity-50 mix-blend-screen animate-pulse pointer-events-none"
+        style={{ animationDuration: '3s' }}
+      />
+
       {/* The Star Clip Path Container */}
-      <div 
+      <div
         className="relative w-full h-full bg-[#0a0c16] overflow-hidden cursor-pointer group flex items-center justify-center transition-all duration-300"
         style={{
           clipPath: 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%)'
@@ -347,19 +514,62 @@ export const StarVideoMessage: React.FC<{ media?: MessageMediaInfo }> = ({ media
       >
         <video
           ref={videoRef}
-          src={media.url}
-          className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
+          src={resolvedUrl}
+          className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 pointer-events-none"
           loop
           playsInline
           poster={media.thumbnailUrl}
-        />
-        
-        {/* Play overlay / Luminous edge simulation */}
-        <div className={`absolute inset-0 bg-black/30 flex items-center justify-center transition-opacity duration-300 ${isPlaying ? 'opacity-0' : 'opacity-100 group-hover:bg-black/40'}`}>
-          <div className="w-12 h-12 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20 text-white shadow-xl shadow-fuchsia-900/20 group-hover:scale-110 transition-transform duration-300">
-            <Play className="w-5 h-5 fill-current ml-1" />
+          preload="metadata"
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+          onEnded={() => setIsPlaying(false)}
+          onLoadedData={() => {
+            setIsReady(true);
+            setHasError(false);
+          }}
+          onCanPlay={() => {
+            setIsReady(true);
+            setHasError(false);
+          }}
+          onWaiting={() => setIsBuffering(true)}
+          onPlaying={() => {
+            setIsBuffering(false);
+            setIsPlaying(true);
+          }}
+          onError={() => {
+            console.warn("Video failed to load source:", resolvedUrl);
+            setHasError(true);
+            setIsPlaying(false);
+            setIsBuffering(false);
+          }}
+        >
+          {resolvedUrl && (
+            <source
+              src={resolvedUrl}
+              type={media.mimeType || (resolvedUrl.includes('.webm') ? 'video/webm' : 'video/mp4')}
+            />
+          )}
+        </video>
+
+        {/* State Overlays */}
+        {hasError ? (
+          <div className="absolute inset-0 bg-slate-950/85 flex flex-col items-center justify-center p-3 text-center z-10 pointer-events-none">
+            <AlertCircle className="w-5 h-5 text-fuchsia-400 mb-1" />
+            <span className="text-[10px] font-bold text-slate-200">Wideo niedostępne</span>
+            <span className="text-[8px] text-slate-400 mt-0.5">Dotknij, aby ponowić</span>
           </div>
-        </div>
+        ) : isBuffering ? (
+          <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-10 pointer-events-none">
+            <Loader2 className="w-7 h-7 text-fuchsia-400 animate-spin" />
+          </div>
+        ) : (
+          /* Play overlay / Luminous edge simulation */
+          <div className={`absolute inset-0 bg-black/30 flex items-center justify-center transition-opacity duration-300 ${isPlaying ? 'opacity-0' : 'opacity-100 group-hover:bg-black/40'}`}>
+            <div className="w-12 h-12 rounded-full bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20 text-white shadow-xl shadow-fuchsia-900/20 group-hover:scale-110 transition-transform duration-300">
+              <Play className="w-5 h-5 fill-current ml-1" />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -420,7 +630,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({ type, data, onCancel
           {type === 'PHOTO' && data.url && (
             <img src={data.url} alt="Preview" className="max-w-full max-h-[250px] rounded-xl object-contain shadow-lg" />
           )}
-          
+
           {type === 'STAR_VIDEO' && data.url && (
             <div className="scale-125">
               <StarVideoMessage media={{ url: data.url }} />
@@ -447,7 +657,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({ type, data, onCancel
           )}
         </div>
 
-        <button 
+        <button
           onClick={simulateUpload}
           disabled={loading}
           className="w-full aura-btn-primary py-4 rounded-2xl flex items-center justify-center gap-2 text-sm disabled:opacity-50 transition-all active:scale-[0.98]"

@@ -11,6 +11,7 @@ import { AdSlot, AdConsentModal } from './ads';
 import { ADS_CONFIG } from '../config/adsConfig';
 import { SwipeCardDeck } from './SwipeCardDeck';
 import { SwipableGridCard } from './SwipableGridCard';
+import { useTranslation } from '../context/LanguageContext';
 
 interface DiscoverFeedProps {
   authToken: string;
@@ -39,6 +40,7 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
   onOpenFilters,
   onCloseFilters
 }) => {
+  const { t } = useTranslation();
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -212,7 +214,16 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
     setDismissedProfileIds(prev => new Set(prev).add(profile.id));
   };
 
-  const visibleGridProfiles = filteredProfiles.filter(p => !dismissedProfileIds.has(p.id));
+  const visibleGridProfiles = filteredProfiles
+    .filter(p => !dismissedProfileIds.has(p.id))
+    .sort((a, b) => {
+      const now = Date.now();
+      const aBoostActive = Boolean(a.isBoosted && a.boostExpiresAt && new Date(a.boostExpiresAt).getTime() > now);
+      const bBoostActive = Boolean(b.isBoosted && b.boostExpiresAt && new Date(b.boostExpiresAt).getTime() > now);
+      if (aBoostActive && !bBoostActive) return -1;
+      if (!aBoostActive && bBoostActive) return 1;
+      return 0;
+    });
 
   const gridClassMap = {
     'auto': 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6',
@@ -224,55 +235,57 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
   };
 
   return (
-    <div className="w-full max-w-[1400px] mx-auto space-y-4 pb-40 pt-1 px-3 sm:px-6 relative">
+    <div className="w-full max-w-[1400px] mx-auto space-y-3 pb-20 pt-0.5 px-2 sm:px-5 relative">
       
       {/* Top Header with Tactile Mode Switcher */}
-      <div className="flex flex-wrap items-center justify-between px-1 gap-2.5">
+      <div className="flex flex-wrap items-center justify-between px-1 gap-1.5">
         <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-base sm:text-lg font-extrabold text-white tracking-wide">
-              {viewMode === 'swipe' ? 'Swipe Match' : 'Odkrywaj w pobliżu'}
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-xs sm:text-sm font-extrabold text-white tracking-wide flex items-center gap-1.5">
+              <span className="bg-gradient-to-r from-purple-200 via-fuchsia-200 to-cyan-200 bg-clip-text text-transparent drop-shadow-[0_0_6px_rgba(217,70,239,0.35)]">
+                {viewMode === 'swipe' ? 'Swipe Match' : t('radar_title', 'Nearby Radar')}
+              </span>
             </h2>
-            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[10px] font-black tracking-wider">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="flex items-center gap-1 px-1.5 py-0.2 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 text-[8.5px] font-black tracking-wider shadow-[0_0_6px_rgba(16,185,129,0.3)]">
+              <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.9)]" />
               LIVE
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 font-medium">
-            {filteredProfiles.length} {filteredProfiles.length === 1 ? 'aktywny profil' : 'aktywnych profili'} w Twojej okolicy
+          <p className="text-[10px] text-cyan-300/80 font-medium leading-tight">
+            {filteredProfiles.length} {filteredProfiles.length === 1 ? 'profile' : 'profiles'}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* View Mode Switcher: Swipe Cards vs Grid */}
-          <div className="flex items-center gap-1 bg-black/60 border border-white/15 p-1 rounded-2xl backdrop-blur-md shadow-md">
+        <div className="flex items-center gap-1.5">
+          {/* View Mode Switcher: Swipe Cards vs Grid with Neon Accents */}
+          <div className="flex items-center gap-0.5 bg-black/70 border border-cyan-500/30 p-0.5 rounded-xl backdrop-blur-md shadow-[0_0_10px_rgba(6,182,212,0.12)]">
             <button
               type="button"
               id="btn-switch-swipe"
               onClick={() => setViewMode('swipe')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all active:scale-95 ${
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-black transition-all active:scale-95 ${
                 viewMode === 'swipe'
-                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.5)]'
+                  ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white shadow-[0_0_10px_rgba(217,70,239,0.5)] border border-fuchsia-400/50'
                   : 'text-slate-400 hover:text-white'
               }`}
-              title="Przełącz na karty do swipe-owania"
+              title="Cards"
             >
-              <Flame className="w-3.5 h-3.5 fill-current" />
-              <span>Karty</span>
+              <Flame className="w-3 h-3 fill-current text-amber-300" />
+              <span>Cards</span>
             </button>
             <button
               type="button"
               id="btn-switch-grid"
               onClick={() => setViewMode('grid')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all active:scale-95 ${
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-black transition-all active:scale-95 ${
                 viewMode === 'grid'
-                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_12px_rgba(217,70,239,0.5)]'
+                  ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-[0_0_10px_rgba(6,182,212,0.5)] border border-cyan-400/50'
                   : 'text-slate-400 hover:text-white'
               }`}
-              title="Przełącz na siatkę profili"
+              title="Grid"
             >
-              <Grid className="w-3.5 h-3.5" />
-              <span>Siatka</span>
+              <Grid className="w-3 h-3 text-cyan-200" />
+              <span>Grid</span>
             </button>
           </div>
 
@@ -289,9 +302,9 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
                 onlineOnly: false,
                 hasPhotosOnly: false
               })}
-              className="text-[10px] font-bold text-fuchsia-300 hover:text-white px-2.5 py-1 rounded-full bg-fuchsia-500/15 border border-fuchsia-500/30 transition-all active:scale-95"
+              className="text-[10px] font-bold text-fuchsia-300 hover:text-white px-2.5 py-1 rounded-full bg-fuchsia-500/20 border border-fuchsia-400/50 transition-all active:scale-95 shadow-[0_0_10px_rgba(217,70,239,0.3)]"
             >
-              Resetuj ({activeFilterCount})
+              {t('radar_reset_filters', 'Reset')} ({activeFilterCount})
             </button>
           )}
         </div>
@@ -301,21 +314,21 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
       {loading ? (
         <Shimmer />
       ) : loadError ? (
-        <div role="alert" className="p-8 text-center space-y-3">
-          <p>Nie udało się pobrać profili. Sprawdź połączenie i spróbuj ponownie.</p>
-          <button onClick={() => void fetchProfiles()} className="rounded-xl bg-purple-600 px-5 py-3">
+        <div role="alert" className="p-8 text-center space-y-3 aura-glass-card rounded-[28px] border border-red-500/30 bg-[#0d0f1b]/80 backdrop-blur-xl max-w-md mx-auto my-8">
+          <p className="text-xs font-bold text-red-200">Nie udało się pobrać profili. Sprawdź połączenie i spróbuj ponownie.</p>
+          <button onClick={() => void fetchProfiles()} className="rounded-xl bg-purple-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-purple-500 active:scale-95 transition shadow-lg shadow-purple-950/50">
             Spróbuj ponownie
           </button>
         </div>
       ) : filteredProfiles.length === 0 ? (
-        <div className="rounded-[28px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-8 text-center space-y-3 my-8 shadow-xl max-w-md mx-auto">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600/20 to-fuchsia-600/20 border border-fuchsia-500/30 flex items-center justify-center mx-auto">
-            <Sparkles className="w-6 h-6 text-fuchsia-400" />
+        <div className="rounded-[28px] border border-cyan-500/20 bg-[#0d0f1b]/80 backdrop-blur-xl p-8 text-center space-y-3 my-8 shadow-xl max-w-md mx-auto">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-cyan-600/30 to-fuchsia-600/30 border border-cyan-400/40 flex items-center justify-center mx-auto shadow-[0_0_15px_rgba(6,182,212,0.4)]">
+            <Sparkles className="w-6 h-6 text-cyan-300 animate-pulse" />
           </div>
           <div className="space-y-1">
-            <p className="text-xs font-bold text-slate-200">Brak profili pasujących do filtrów</p>
+            <p className="text-xs font-bold text-white">{t('radar_no_profiles', 'No profiles found nearby with your filters.')}</p>
             <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
-              Spróbuj zwiększyć promień wyszukiwania lub zresetować filtry wieku i preferencji.
+              Try adjusting your distance radius, age range, or search criteria.
             </p>
           </div>
           <button
@@ -330,9 +343,9 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
               onlineOnly: false,
               hasPhotosOnly: false
             })}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-fuchsia-600 text-xs font-bold text-white shadow-md shadow-purple-950/40 hover:brightness-110 active:scale-95 transition"
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 via-fuchsia-500 to-pink-500 text-xs font-bold text-white shadow-lg shadow-fuchsia-950/60 hover:brightness-110 active:scale-95 transition"
           >
-            Resetuj filtry
+            {t('radar_reset_filters', 'Reset Filters')}
           </button>
         </div>
       ) : viewMode === 'swipe' ? (
@@ -404,34 +417,34 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
         </motion.div>
       )}
 
-      {/* Floating Bottom Quick Action Panel / Glass Frame */}
-      {/* Positioned right above the bottom navigation bar (paskiem kontrolnym), allowing the profile grid to scroll smoothly behind it */}
-      <div className="fixed bottom-[64px] sm:bottom-[70px] inset-x-0 z-30 pointer-events-none px-3 sm:px-4">
-        <div className="w-full max-w-md sm:max-w-xl md:max-w-2xl mx-auto pointer-events-auto">
-          <div className="aura-glass-card rounded-[22px] sm:rounded-[26px] border border-white/15 bg-[#070914]/85 backdrop-blur-2xl shadow-[0_12px_36px_rgba(0,0,0,0.85),0_0_24px_rgba(217,70,239,0.18)_inset] p-2 sm:p-2.5 transition-all duration-300">
-            <div className="flex items-center justify-between gap-1.5 sm:gap-2">
+      {/* Floating Bottom Quick Action Panel / Glass Frame - Ultra-Compact & Slim */}
+      {/* Positioned right above the bottom navigation bar, taking minimal vertical space */}
+      <div className="fixed bottom-[42px] sm:bottom-[46px] inset-x-0 z-30 pointer-events-none px-2 sm:px-3">
+        <div className="w-full max-w-xs sm:max-w-sm md:max-w-md mx-auto pointer-events-auto">
+          <div className="aura-glass-card rounded-[14px] sm:rounded-[16px] border border-white/10 bg-[#070914]/90 backdrop-blur-2xl shadow-[0_4px_16px_rgba(0,0,0,0.85),0_0_12px_rgba(217,70,239,0.1)_inset] px-1.5 py-0.5 transition-all duration-300">
+            <div className="flex items-center justify-between gap-1">
               
               {/* Left: Quick Filter Toggles & Mode */}
-              <div className="flex items-center gap-1 sm:gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              <div className="flex items-center gap-0.5 overflow-x-auto no-scrollbar py-0.5">
                 {/* Mode Switcher Button */}
                 <button
                   type="button"
                   onClick={() => setViewMode(prev => prev === 'swipe' ? 'grid' : 'swipe')}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] font-extrabold transition-all shrink-0 active:scale-95 ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold transition-all shrink-0 active:scale-95 ${
                     viewMode === 'swipe'
-                      ? 'bg-gradient-to-r from-purple-600/30 to-fuchsia-600/30 border border-fuchsia-500/50 text-fuchsia-300 shadow-[0_0_12px_rgba(217,70,239,0.35)]'
+                      ? 'bg-gradient-to-r from-purple-600/30 to-fuchsia-600/30 border border-fuchsia-500/50 text-fuchsia-300 shadow-[0_0_6px_rgba(217,70,239,0.3)]'
                       : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white'
                   }`}
                   title={viewMode === 'swipe' ? 'Przełącz na widok siatki' : 'Przełącz na karty do swipe-owania'}
                 >
                   {viewMode === 'swipe' ? (
                     <>
-                      <Grid className="w-3.5 h-3.5 text-fuchsia-300" />
+                      <Grid className="w-2.5 h-2.5 text-fuchsia-300" />
                       <span>Siatka</span>
                     </>
                   ) : (
                     <>
-                      <Flame className="w-3.5 h-3.5 text-fuchsia-400 fill-current" />
+                      <Flame className="w-2.5 h-2.5 text-fuchsia-400 fill-current" />
                       <span>Karty</span>
                     </>
                   )}
@@ -440,48 +453,45 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
                 {/* Online Filter Toggle */}
                 <button
                   onClick={() => setFilter(prev => ({ ...prev, onlineOnly: !prev.onlineOnly }))}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] font-bold transition-all shrink-0 active:scale-95 ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold transition-all shrink-0 active:scale-95 ${
                     filter.onlineOnly
-                      ? 'bg-emerald-500/25 border border-emerald-500/50 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.35)]'
-                      : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white hover:bg-white/[0.08]'
+                      ? 'bg-emerald-500/25 border border-emerald-500/50 text-emerald-300 shadow-[0_0_6px_rgba(16,185,129,0.3)]'
+                      : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white'
                   }`}
                   title="Pokaż tylko użytkowników online"
                 >
-                  <span className={`w-1.5 h-1.5 rounded-full ${filter.onlineOnly ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)] animate-pulse' : 'bg-slate-500'}`} />
+                  <span className={`w-1 h-1 rounded-full ${filter.onlineOnly ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.9)] animate-pulse' : 'bg-slate-500'}`} />
                   <span>Online</span>
                 </button>
 
                 {/* Verified 18+ Toggle */}
                 <button
                   onClick={() => setFilter(prev => ({ ...prev, verifiedOnly: !prev.verifiedOnly }))}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] font-bold transition-all shrink-0 active:scale-95 ${
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold transition-all shrink-0 active:scale-95 ${
                     filter.verifiedOnly
-                      ? 'bg-cyan-500/25 border border-cyan-500/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.35)]'
-                      : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white hover:bg-white/[0.08]'
+                      ? 'bg-cyan-500/25 border border-cyan-500/50 text-cyan-300 shadow-[0_0_6px_rgba(6,182,212,0.3)]'
+                      : 'bg-white/[0.05] border border-white/10 text-slate-300 hover:text-white'
                   }`}
                   title="Pokaż tylko zweryfikowane profile 18+"
                 >
-                  <ShieldCheck className={`w-3.5 h-3.5 ${filter.verifiedOnly ? 'text-cyan-300' : 'text-slate-400'}`} />
-                  <span className="hidden xs:inline">18+</span>
+                  <ShieldCheck className={`w-2.5 h-2.5 ${filter.verifiedOnly ? 'text-cyan-300' : 'text-slate-400'}`} />
+                  <span>18+</span>
                 </button>
 
                 {/* Columns Density Switcher (Visible in grid mode) */}
                 {viewMode === 'grid' && (
                   <div className="flex items-center gap-0.5 bg-black/40 border border-white/10 rounded-full p-0.5 shrink-0">
-                    <div className="px-1.5 opacity-50">
-                      <Grid className="w-3 h-3 text-slate-300" />
-                    </div>
-                    {(['auto', 2, 3, 4, 5, 6] as const).map(opt => (
+                    {(['auto', 2, 3, 4] as const).map(opt => (
                       <button
                         key={opt}
                         onClick={() => setColumns(opt)}
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition-all ${
+                        className={`px-1 py-0.2 rounded-full text-[8.5px] font-bold transition-all ${
                           columns === opt
-                            ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_10px_rgba(217,70,239,0.4)]'
+                            ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-[0_0_6px_rgba(217,70,239,0.4)]'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                       >
-                        {opt === 'auto' ? 'Auto' : opt}
+                        {opt === 'auto' ? 'A' : opt}
                       </button>
                     ))}
                   </div>
@@ -489,31 +499,31 @@ export const DiscoverFeed: React.FC<DiscoverFeedProps> = ({
               </div>
 
               {/* Right: Actions (Radar Map & Filters) */}
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center gap-1 shrink-0">
                 {onSwitchToMap && (
                   <button
                     onClick={onSwitchToMap}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-fuchsia-500/35 bg-fuchsia-500/15 text-xs font-bold text-fuchsia-300 hover:bg-fuchsia-500/25 active:scale-95 transition-all shadow-sm"
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-fuchsia-500/35 bg-fuchsia-500/15 text-[9px] font-bold text-fuchsia-300 hover:bg-fuchsia-500/25 active:scale-95 transition-all"
                     title="Przełącz na Google Maps Radar"
                   >
-                    <MapPin className="w-3.5 h-3.5 text-fuchsia-400 animate-pulse" />
+                    <MapPin className="w-2.5 h-2.5 text-fuchsia-400 animate-pulse" />
                     <span>Radar</span>
                   </button>
                 )}
 
                 <button
                   onClick={() => setShowFilter(true)}
-                  className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-bold transition-all active:scale-95 shadow-sm ${
+                  className={`relative flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[9px] font-bold transition-all active:scale-95 ${
                     activeFilterCount > 0
-                      ? 'border-fuchsia-500/50 bg-fuchsia-500/20 text-white shadow-[0_0_12px_rgba(217,70,239,0.3)]'
+                      ? 'border-fuchsia-500/50 bg-fuchsia-500/20 text-white shadow-[0_0_6px_rgba(217,70,239,0.3)]'
                       : 'border-white/15 bg-white/[0.07] hover:bg-white/[0.12] text-slate-200'
                   }`}
                   title="Otwórz wszystkie filtry"
                 >
-                  <SlidersHorizontal className="w-3.5 h-3.5 text-fuchsia-400" />
+                  <SlidersHorizontal className="w-2.5 h-2.5 text-fuchsia-400" />
                   <span>Filtry</span>
                   {activeFilterCount > 0 && (
-                    <span className="w-4 h-4 rounded-full bg-gradient-to-r from-purple-500 to-fuchsia-500 text-white text-[9px] font-black flex items-center justify-center shadow-md">
+                    <span className="w-3 h-3 rounded-full bg-gradient-to-r from-purple-500 to-fuchsia-500 text-white text-[7.5px] font-black flex items-center justify-center shadow-md">
                       {activeFilterCount}
                     </span>
                   )}

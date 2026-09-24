@@ -1,16 +1,16 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { 
-  getAuth, 
-  GoogleAuthProvider, 
-  OAuthProvider, 
-  TwitterAuthProvider, 
-  FacebookAuthProvider 
+import {
+  getAuth,
+  GoogleAuthProvider,
+  OAuthProvider,
+  TwitterAuthProvider,
+  FacebookAuthProvider
 } from 'firebase/auth';
-import { 
-  initializeFirestore, 
-  getFirestore, 
-  doc, 
-  getDocFromServer 
+import {
+  initializeFirestore,
+  getFirestore,
+  doc,
+  getDocFromServer
 } from 'firebase/firestore';
 import firebaseConfigJson from '../../firebase-applet-config.json';
 
@@ -112,10 +112,16 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 // Test connection on boot per Firebase skill guidelines
 export async function testConnection() {
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    // Add timeout race so getDocFromServer does not block or emit uncaught 10-second backend timeouts if the network/proxy blocks WebChannel
+    const connectionCheckPromise = getDocFromServer(doc(db, 'test', 'connection'));
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Firestore connection timeout: client operates in offline mode')), 4000)
+    );
+    await Promise.race([connectionCheckPromise, timeoutPromise]);
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase notice: Client operating in offline mode or waiting for connection.');
+    // Suppress offline / backend timeout warnings cleanly
+    if (error instanceof Error) {
+      console.warn('Firebase notice: Client operating in offline mode or waiting for connection:', error.message);
     }
   }
 }

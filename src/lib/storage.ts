@@ -69,8 +69,50 @@ let bucketName: string | null = null;
 // In-memory media registry and upload sessions
 const mediaRegistry = new Map<string, MediaRecord>();
 const uploadSessions = new Map<string, UploadSession>();
+const activeDownloads = new Map<string, Promise<{ path: string; mimeType: string } | null>>();
 
 const REGISTRY_FILE = path.join(process.cwd(), 'uploads', 'media_registry.json');
+const MEDIA_ID_PATTERN = /^aura_(?:pho|pro|sta|voi)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requiresDurableMedia(): boolean {
+  return process.env.NODE_ENV === 'production' || Boolean(process.env.K_SERVICE);
+}
+
+function durableBucket() {
+  return gcsStorage && bucketName ? gcsStorage.bucket(bucketName) : null;
+}
+
+function durableRecordPath(mediaId: string): string {
+  return `media/records/${mediaId}.json`;
+}
+
+function isSafeMediaFilename(mediaId: string, filename: string): boolean {
+  return typeof filename === 'string' && filename === path.basename(filename) &&
+    (filename.startsWith(`${mediaId}.`) || filename === `thumb_${mediaId}.webp`);
+}
+
+function parseDurableRecord(mediaId: string, bytes: Buffer): MediaRecord | null {
+  const record = JSON.parse(bytes.toString('utf-8')) as MediaRecord;
+  if (!record || record.id !== mediaId || !record.ownerId ||
+      !['photo', 'profile_photo', 'voice', 'star_video'].includes(record.category) ||
+      !isSafeMediaFilename(mediaId, record.filename) ||
+      (record.thumbnailFilename && !isSafeMediaFilename(mediaId, record.thumbnailFilename))) {
+    return null;
+  }
+  return record;
+}
+
+async function readDurableRecord(mediaId: string): Promise<MediaRecord | null> {
+  const bucket = durableBucket();
+  if (!bucket || !MEDIA_ID_PATTERN.test(mediaId)) return null;
+  try {
+    const [bytes] = await bucket.file(durableRecordPath(mediaId)).download();
+    return parseDurableRecord(mediaId, bytes);
+  } catch (err: any) {
+    if (err?.code !== 404) console.warn('[Storage] Durable metadata read failed:', err?.message || err);
+    return null;
+  }
+}
 
 function loadRegistryFromDisk() {
   try {
@@ -194,6 +236,10 @@ export interface ProcessAndSaveMediaOptions {
 export async function processAndSaveMedia(opts: ProcessAndSaveMediaOptions): Promise<MediaRecord> {
   const { buffer, clientMime, category, userId, conversationId, caption, clientDuration } = opts;
 
+  if (requiresDurableMedia() && (!durableBucket() || !getPostgresPool())) {
+    throw new Error('Durable media storage is unavailable. Upload rejected to prevent data loss.');
+  }
+
   // 1. Binary validation
   const validation = validateMediaBuffer(buffer, category, clientMime);
   if (!validation.valid) {
@@ -258,27 +304,6 @@ export async function processAndSaveMedia(opts: ProcessAndSaveMediaOptions): Pro
 
   fs.writeFileSync(targetPath, finalBuffer);
 
-  // If GCS is configured, upload copy to private GCS
-  if (gcsStorage && bucketName) {
-    try {
-      const bucket = gcsStorage.bucket(bucketName);
-      const file = bucket.file(`media/${mainFilename}`);
-      await file.save(finalBuffer, {
-        metadata: {
-          contentType: finalMime,
-          metadata: {
-            uploadedBy: userId,
-            mediaId,
-            category
-          }
-        },
-        resumable: false
-      });
-    } catch (err: any) {
-      console.warn(`[Storage] GCS backup sync notice: ${err.message}`);
-    }
-  }
-
   // 4. Record metadata
   const record: MediaRecord = {
     id: mediaId,
@@ -295,13 +320,37 @@ export async function processAndSaveMedia(opts: ProcessAndSaveMediaOptions): Pro
     caption: caption ? caption.trim().slice(0, 500) : undefined,
     createdAt: new Date().toISOString()
   };
-
-  mediaRegistry.set(mediaId, record);
-  persistRegistryToDisk();
-
   const pool = getPostgresPool();
-  if (pool) {
-    pool.query(
+  const bucket = durableBucket();
+  const uploadedObjects: string[] = [];
+  try {
+    if (bucket) {
+      const mainObject = `media/${mainFilename}`;
+      await bucket.file(mainObject).save(finalBuffer, {
+        metadata: { contentType: finalMime, cacheControl: 'private, no-store' },
+        resumable: false
+      });
+      uploadedObjects.push(mainObject);
+
+      if (thumbnailFilename) {
+        const thumbObject = `media/${thumbnailFilename}`;
+        await bucket.file(thumbObject).save(fs.readFileSync(path.join(localUploadDir, thumbnailFilename)), {
+          metadata: { contentType: 'image/webp', cacheControl: 'private, no-store' },
+          resumable: false
+        });
+        uploadedObjects.push(thumbObject);
+      }
+
+      const recordObject = durableRecordPath(mediaId);
+      await bucket.file(recordObject).save(JSON.stringify(record), {
+        metadata: { contentType: 'application/json', cacheControl: 'private, no-store' },
+        resumable: false
+      });
+      uploadedObjects.push(recordObject);
+    }
+
+    if (pool) {
+      await pool.query(
       `INSERT INTO media_records (id, owner_id, category, moderation_status, moderation_reason, mime_type, size, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
@@ -317,8 +366,24 @@ export async function processAndSaveMedia(opts: ProcessAndSaveMediaOptions): Pro
         record.size,
         new Date(record.createdAt)
       ]
-    ).catch(e => console.error('[Storage PG] Error inserting media record:', e.message));
+      );
+    }
+  } catch (err: any) {
+    if (requiresDurableMedia()) {
+      if (bucket) {
+        await Promise.allSettled(uploadedObjects.map(objectName => bucket.file(objectName).delete()));
+      }
+      try { fs.unlinkSync(targetPath); } catch {}
+      if (thumbnailFilename) {
+        try { fs.unlinkSync(path.join(localUploadDir, thumbnailFilename)); } catch {}
+      }
+      throw new Error('Durable media write failed. Upload rejected to prevent data loss.');
+    }
+    console.warn('[Storage] Durable media sync notice:', err?.message || err);
   }
+
+  mediaRegistry.set(mediaId, record);
+  persistRegistryToDisk();
 
   return record;
 }
@@ -330,19 +395,245 @@ export function getMediaRecord(mediaId: string): MediaRecord | null {
 }
 
 export function getMediaFileForServing(mediaId: string, thumb = false): { path: string; mimeType: string } | null {
-  const record = mediaRegistry.get(mediaId);
-  if (!record || record.deletedAt) return null;
-
   const localUploadDir = path.join(process.cwd(), 'uploads');
-  const filename = thumb && record.thumbnailFilename ? record.thumbnailFilename : record.filename;
-  const fullPath = path.join(localUploadDir, filename);
+  const record = mediaRegistry.get(mediaId);
 
-  if (!fs.existsSync(fullPath)) {
-    return null;
+  if (record && !record.deletedAt) {
+    const filename = thumb && record.thumbnailFilename ? record.thumbnailFilename : record.filename;
+    const fullPath = path.join(localUploadDir, filename);
+
+    if (fs.existsSync(fullPath)) {
+      const mimeType = thumb ? 'image/webp' : record.mimeType;
+      return { path: fullPath, mimeType };
+    }
   }
 
-  const mimeType = thumb ? 'image/webp' : record.mimeType;
-  return { path: fullPath, mimeType };
+  // Fallback: check if media binary exists on disk matching mediaId
+  const cleanId = path.basename(mediaId);
+  const possibleExts = ['.mp4', '.webm', '.webp', '.jpg', '.jpeg', '.png', '.mp3', '.m4a', '.ogg'];
+  for (const ext of possibleExts) {
+    const candidate = path.join(localUploadDir, `${cleanId}${ext}`);
+    if (fs.existsSync(candidate)) {
+      let mimeType = 'application/octet-stream';
+      if (ext === '.mp4') mimeType = 'video/mp4';
+      else if (ext === '.webm') mimeType = 'video/webm';
+      else if (ext === '.webp') mimeType = 'image/webp';
+      else if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+      else if (ext === '.png') mimeType = 'image/png';
+      else if (ext === '.mp3') mimeType = 'audio/mpeg';
+      else if (ext === '.m4a') mimeType = 'audio/mp4';
+      else if (ext === '.ogg') mimeType = 'audio/ogg';
+      return { path: candidate, mimeType };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Production reads require both a live database row and the durable GCS record.
+ * Local registry entries alone cannot prove that a media file survived a restart.
+ */
+export async function getMediaRecordDurable(mediaId: string): Promise<MediaRecord | null> {
+  if (!requiresDurableMedia()) return getMediaRecord(mediaId);
+  if (!MEDIA_ID_PATTERN.test(mediaId) || !durableBucket()) return null;
+  const pool = getPostgresPool();
+  if (!pool) return null;
+
+  try {
+    const result = await pool.query(
+      'SELECT owner_id, category, moderation_status, moderation_reason FROM media_records WHERE id = $1',
+      [mediaId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    // Always check GCS. A cached record on another Cloud Run instance must not
+    // remain readable after its owner deletes the media or a purge tombstones it.
+    const record = await readDurableRecord(mediaId);
+    if (!record || record.deletedAt || record.ownerId !== row.owner_id || record.category !== row.category) {
+      return null;
+    }
+
+    record.moderationStatus = row.moderation_status || undefined;
+    record.moderationReason = row.moderation_reason || undefined;
+    mediaRegistry.set(mediaId, record);
+    return record;
+  } catch (err: any) {
+    console.warn('[Storage] Durable media lookup failed:', err?.message || err);
+    return null;
+  }
+}
+
+/** Bind an uploaded message attachment to one conversation, across instances. */
+export async function bindMediaToConversationDurable(
+  mediaId: string,
+  ownerId: string,
+  conversationId: string
+): Promise<boolean> {
+  if (!MEDIA_ID_PATTERN.test(mediaId) || !ownerId || !conversationId) return false;
+  if (!requiresDurableMedia()) {
+    const record = getMediaRecord(mediaId);
+    if (!record || record.ownerId !== ownerId ||
+        (record.conversationId && record.conversationId !== conversationId)) return false;
+    record.conversationId = conversationId;
+    persistRegistryToDisk();
+    return true;
+  }
+
+  const pool = getPostgresPool();
+  const bucket = durableBucket();
+  if (!pool || !bucket) throw new Error('Durable media storage is unavailable.');
+  const result = await pool.query('SELECT owner_id, category FROM media_records WHERE id = $1', [mediaId]);
+  const row = result.rows[0];
+  if (!row || row.owner_id !== ownerId) return false;
+
+  const objectName = durableRecordPath(mediaId);
+  const file = bucket.file(objectName);
+  let generation: string | number;
+  let record: MediaRecord | null;
+  try {
+    const [metadata] = await file.getMetadata();
+    if (!metadata.generation) return false;
+    generation = metadata.generation;
+    const [bytes] = await bucket.file(objectName, { generation }).download();
+    record = parseDurableRecord(mediaId, bytes);
+  } catch (err: any) {
+    if (err?.code === 404) return false;
+    throw err;
+  }
+  if (!record || record.deletedAt || record.ownerId !== ownerId || record.category !== row.category ||
+      (record.conversationId && record.conversationId !== conversationId)) return false;
+  if (record.conversationId === conversationId) return true;
+
+  record.conversationId = conversationId;
+  try {
+    await file.save(JSON.stringify(record), {
+      metadata: { contentType: 'application/json', cacheControl: 'private, no-store' },
+      resumable: false,
+      preconditionOpts: { ifGenerationMatch: generation }
+    });
+  } catch (err: any) {
+    // A simultaneous bind or deletion changed the GCS generation. Re-read it;
+    // only the same conversation may count as a successful idempotent bind.
+    if (err?.code === 412) {
+      const current = await getMediaRecordDurable(mediaId);
+      return current?.ownerId === ownerId && current.conversationId === conversationId;
+    }
+    throw err;
+  }
+  mediaRegistry.set(mediaId, record);
+  persistRegistryToDisk();
+  return true;
+}
+
+/** Download on first use per Cloud Run instance, then serve from its local cache. */
+export async function getMediaFileForServingDurable(
+  mediaId: string,
+  thumb = false
+): Promise<{ path: string; mimeType: string } | null> {
+  if (!requiresDurableMedia()) return getMediaFileForServing(mediaId, thumb);
+  const record = await getMediaRecordDurable(mediaId);
+  const bucket = durableBucket();
+  if (!record || !bucket) return null;
+
+  const filename = thumb && record.thumbnailFilename ? record.thumbnailFilename : record.filename;
+  const mimeType = thumb && record.thumbnailFilename ? 'image/webp' : record.mimeType;
+  if (!isSafeMediaFilename(mediaId, filename)) return null;
+  const localPath = path.join(process.cwd(), 'uploads', filename);
+  if (fs.existsSync(localPath)) return { path: localPath, mimeType };
+
+  const key = `${mediaId}:${filename}`;
+  const existing = activeDownloads.get(key);
+  if (existing) return existing;
+  const download = (async () => {
+    const temporaryPath = `${localPath}.${crypto.randomUUID()}.tmp`;
+    try {
+      await bucket.file(`media/${filename}`).download({ destination: temporaryPath });
+      fs.renameSync(temporaryPath, localPath);
+      return { path: localPath, mimeType };
+    } catch (err: any) {
+      try { fs.unlinkSync(temporaryPath); } catch {}
+      if (err?.code !== 404) console.warn('[Storage] Durable media download failed:', err?.message || err);
+      return null;
+    }
+  })();
+  activeDownloads.set(key, download);
+  try {
+    return await download;
+  } finally {
+    activeDownloads.delete(key);
+  }
+}
+
+/** Revoke in PostgreSQL and GCS before reporting deletion as complete. */
+export async function deleteMediaRecordDurable(mediaId: string, requestingUserId: string): Promise<boolean> {
+  if (!requiresDurableMedia()) return deleteMediaRecord(mediaId, requestingUserId);
+  if (!MEDIA_ID_PATTERN.test(mediaId)) return false;
+  const pool = getPostgresPool();
+  const bucket = durableBucket();
+  if (!pool || !bucket) throw new Error('Durable media storage is unavailable.');
+
+  const result = await pool.query('SELECT owner_id FROM media_records WHERE id = $1', [mediaId]);
+  const row = result.rows[0];
+  if (!row) return false;
+  if (row.owner_id !== requestingUserId) throw new Error('Unauthorized to delete this media item.');
+
+  const record = await readDurableRecord(mediaId);
+  if (record && record.ownerId !== requestingUserId) throw new Error('Media ownership mismatch.');
+  if (record) {
+    record.deletedAt = record.deletedAt || new Date().toISOString();
+    record.deletedBy = requestingUserId;
+    await bucket.file(durableRecordPath(mediaId)).save(JSON.stringify(record), {
+      metadata: { contentType: 'application/json', cacheControl: 'private, no-store' },
+      resumable: false
+    });
+  }
+  mediaRegistry.delete(mediaId);
+
+  // Older GCS copies predate durable JSON records. They remain unreadable but
+  // must still be removable for account erasure.
+  const legacyFiles = record ? [] : (await bucket.getFiles({ prefix: `media/${mediaId}.`, maxResults: 20 }))[0];
+  const objects = record
+    ? [record.filename, record.thumbnailFilename].filter((filename): filename is string => Boolean(filename))
+    : [...legacyFiles.map(file => path.basename(file.name)), `thumb_${mediaId}.webp`];
+  for (const filename of objects) {
+    if (!isSafeMediaFilename(mediaId, filename)) throw new Error('Invalid durable media filename.');
+    try {
+      await bucket.file(`media/${filename}`).delete();
+    } catch (err: any) {
+      if (err?.code !== 404) throw err;
+    }
+  }
+  // Keep the database row until GCS cleanup is complete. If any step fails,
+  // the tombstone (or missing JSON) blocks reads and the row allows a retry.
+  if (record) {
+    try {
+      await bucket.file(durableRecordPath(mediaId)).delete();
+    } catch (err: any) {
+      if (err?.code !== 404) throw err;
+    }
+  }
+  await pool.query('DELETE FROM media_records WHERE id = $1 AND owner_id = $2', [mediaId, requestingUserId]);
+
+  const localUploadDir = path.join(process.cwd(), 'uploads');
+  for (const filename of objects) {
+    try { fs.unlinkSync(path.join(localUploadDir, filename)); } catch {}
+  }
+  persistRegistryToDisk();
+  return true;
+}
+
+export async function purgeAllUserMediaDurable(userId: string): Promise<number> {
+  if (!requiresDurableMedia()) return purgeAllUserMedia(userId);
+  const pool = getPostgresPool();
+  if (!pool) throw new Error('PostgreSQL is unavailable for media erasure.');
+  const result = await pool.query('SELECT id FROM media_records WHERE owner_id = $1', [userId]);
+  let purged = 0;
+  for (const row of result.rows) {
+    if (await deleteMediaRecordDurable(row.id, userId)) purged += 1;
+  }
+  return purged;
 }
 
 export function deleteMediaRecord(mediaId: string, requestingUserId: string): boolean {

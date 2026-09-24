@@ -233,8 +233,14 @@ export const StarVideoRecorderModal: React.FC<StarVideoRecorderModalProps> = ({
       videoPreviewRef.current.pause();
       setIsPlayingPreview(false);
     } else {
-      videoPreviewRef.current.play();
-      setIsPlayingPreview(true);
+      videoPreviewRef.current.play()
+        .then(() => {
+          setIsPlayingPreview(true);
+        })
+        .catch(err => {
+          console.warn('Preview video play notice:', err?.message || err);
+          setIsPlayingPreview(false);
+        });
     }
   };
 
@@ -434,8 +440,13 @@ export const StarVideoRecorderModal: React.FC<StarVideoRecorderModalProps> = ({
                 src={previewUrl}
                 autoPlay
                 loop
+                muted
                 playsInline
                 className="w-full h-full object-cover"
+                onError={() => {
+                  console.warn('Preview video failed to load source');
+                  setIsPlayingPreview(false);
+                }}
               />
 
               <div

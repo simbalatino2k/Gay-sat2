@@ -13,7 +13,6 @@ import {
   saveProfileToFirestore 
 } from '../services/firebaseService';
 import { auth } from '../lib/firebase';
-import { t, labelRole } from '../i18n';
 
 interface OnboardingFlowProps {
   onComplete: (session: { token: string; user: any }) => void;
@@ -22,6 +21,13 @@ interface OnboardingFlowProps {
 const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bottom', 'Side', 'Unspecified'];
 const TRIBES: Tribe[] = ['Bear', 'Otter', 'Cub', 'Jock', 'Twink', 'Geek', 'Daddy', 'Leather', 'Clean Cut', 'Muscle', 'Trans', 'Queer', 'Pup'];
 const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking', 'Relationship', 'Right Now', 'Chat'];
+const PHOTO_PRESETS = [
+  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=800'
+];
 
 export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) => {
   const [step, setStep] = useState<'auth' | 'profile'>('auth');
@@ -37,7 +43,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
   const [bio, setBio] = useState('');
   const [selectedTribes, setSelectedTribes] = useState<Tribe[]>(['Jock']);
   const [selectedLookingFor, setSelectedLookingFor] = useState<LookingFor[]>(['Dating', 'Friends']);
-  const [photoUrl, setPhotoUrl] = useState('https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800');
+  const [photoUrl, setPhotoUrl] = useState(PHOTO_PRESETS[0]);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -216,11 +222,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     e.preventDefault();
     setLoading(true);
     setError(null);
+    const token = localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
+
     try {
-      const token = auth.currentUser
-        ? await auth.currentUser.getIdToken()
-        : localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
-      if (!token) throw new Error('Zaloguj się ponownie, aby zapisać profil.');
+      if (!token) throw new Error('Sesja wygasła. Zaloguj się ponownie.');
       const profileUpdates = {
         displayName,
         age,
@@ -240,18 +245,33 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         },
         body: JSON.stringify(profileUpdates)
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
-      if (auth.currentUser) {
-        await saveProfileToFirestore(auth.currentUser.uid, data.profile);
+      const data = await res.json();
+      if (!res.ok || !data?.profile) {
+        throw new Error(data?.error || 'Nie udało się zapisać profilu.');
       }
-      const accountRes = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
-      const account = await accountRes.json().catch(() => ({}));
-      if (!accountRes.ok || !account.user) throw new Error(account.error || 'Nie udało się odczytać konta.');
-      localStorage.setItem('aura_auth_token', token!);
-      localStorage.setItem('aura_token', token!);
+
+      const meRes = await fetch('/api/auth/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const meData = await meRes.json();
+      if (!meRes.ok || !meData?.user) {
+        throw new Error(meData?.error || 'Nie udało się odczytać zapisanego profilu.');
+      }
+
+      if (auth.currentUser) {
+        try {
+          await saveProfileToFirestore(auth.currentUser.uid, data.profile);
+        } catch (fsErr) {
+          console.warn('Firestore profile save notice:', fsErr);
+        }
+      }
+
       setSuccess(true);
-      onComplete({ token: token!, user: account.user });
+      setTimeout(() => {
+        localStorage.setItem('aura_auth_token', token);
+        localStorage.setItem('aura_token', token);
+        onComplete({ token, user: meData.user });
+      }, 500);
     } catch (err: any) {
       setError(err.message || 'Error updating profile');
     } finally {
@@ -711,20 +731,20 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300">{t('Role / Position')}</label>
+                    <label className="text-[11px] font-bold text-slate-300">Sexual Role / Position</label>
                     <select
                       value={identityRole}
                       onChange={e => setIdentityRole(e.target.value as SexualRole)}
                       className="w-full aura-glass-input rounded-xl px-3 py-2.5 text-xs text-white outline-none"
                     >
                       {ROLES.map(r => (
-                        <option key={r} value={r} className="bg-slate-900 text-white">{labelRole(r)}</option>
+                        <option key={r} value={r} className="bg-slate-900 text-white">{r}</option>
                       ))}
                     </select>
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300">{t('Location')}</label>
+                    <label className="text-[11px] font-bold text-slate-300">Location</label>
                     <input
                       type="text"
                       required
@@ -739,15 +759,22 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
                 <div>
                   <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5 mb-1">
                     <Camera className="w-3.5 h-3.5 text-fuchsia-400" />
-                    <span>Primary Photo Image URL</span>
+                    <span>Choose a profile photo</span>
                   </label>
-                  <input
-                    type="text"
-                    required
-                    value={photoUrl}
-                    onChange={e => setPhotoUrl(e.target.value)}
-                    className="w-full aura-glass-input rounded-xl px-3 py-2.5 text-xs text-white outline-none"
-                  />
+                  <div className="flex gap-2 overflow-x-auto py-1">
+                    {PHOTO_PRESETS.map((preset, idx) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setPhotoUrl(preset)}
+                        aria-label={`Choose profile photo ${idx + 1}`}
+                        aria-pressed={photoUrl === preset}
+                        className={`w-14 h-14 shrink-0 rounded-xl overflow-hidden border-2 ${photoUrl === preset ? 'border-fuchsia-400' : 'border-white/10'}`}
+                      >
+                        <img src={preset} alt="" className="w-full h-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <button
@@ -783,4 +810,3 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     </div>
   );
 };
-

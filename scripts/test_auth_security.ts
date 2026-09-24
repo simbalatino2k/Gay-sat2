@@ -174,11 +174,7 @@ async function runAuthSecurityTests() {
   console.log(`TOTAL PASSED: ${passed}, FAILED: ${failed}`);
   console.log("==================================================");
 
-  if (failed > 0) {
-    process.exit(1);
-  } else {
-    process.exit(0);
-  }
+  process.exitCode = failed > 0 ? 1 : 0;
 }
 
 runAuthSecurityTests();

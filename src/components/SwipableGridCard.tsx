@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { ShieldCheck, Zap, Heart, X } from 'lucide-react';
+import { ShieldCheck, Zap, Heart, X, Rocket } from 'lucide-react';
 import { UserProfile, TapType } from '../types';
 import { ProfileAuraFrame } from './ProfileAuraFrame';
 import { formatDistance } from '../utils/formatDistance';
+import { AuraVerifiedBadge } from './common/AuraVerifiedBadge';
 
 interface SwipableGridCardProps {
   profile: UserProfile;
@@ -58,31 +59,44 @@ export const SwipableGridCard: React.FC<SwipableGridCardProps> = ({
             onSelect();
           }
         }}
-        className="aspect-[3/4] rounded-[24px] group transition-all duration-300 ease-out hover:scale-[1.015] active:scale-[0.985] shadow-xl shadow-black/70 h-full w-full relative overflow-hidden"
-        innerClassName="aura-glass-card border border-white/[0.08]"
+        className="aspect-[3/4] rounded-[24px] group transition-all duration-300 ease-out hover:scale-[1.02] active:scale-[0.985] shadow-2xl shadow-black/80 h-full w-full relative overflow-hidden hover:shadow-[0_0_24px_rgba(6,182,212,0.35)] protected-media-container select-none"
+        innerClassName="aura-glass-card border border-white/15 hover:border-cyan-400/70 transition-colors"
+        onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
       >
         <img
-          src={p.photos[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
+          src={p.photos?.[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
           alt={p.displayName}
           referrerPolicy="no-referrer"
           loading="lazy"
-          className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-105 pointer-events-none"
+          draggable={false}
+          className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-105 pointer-events-none protected-image select-none"
+          onContextMenu={(e) => e.preventDefault()}
         />
 
         {/* Soft Top Vignette */}
-        <div className="absolute inset-x-0 top-0 h-14 bg-gradient-to-b from-black/60 to-transparent pointer-events-none" />
+        <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/75 to-transparent pointer-events-none" />
 
         {/* Top Bar Indicators */}
         <div className="absolute top-2.5 inset-x-2.5 flex items-center justify-between pointer-events-none z-10">
-          {/* Role Badge */}
-          <span className="bg-black/65 backdrop-blur-md text-fuchsia-300 text-[9px] font-black px-2.5 py-0.5 rounded-full border border-fuchsia-500/35 shadow-md tracking-wider uppercase">
-            {p.identityRole}
-          </span>
+          <div className="flex items-center gap-1.5">
+            {/* Role Badge with Vivid Neon Glow */}
+            <span className="bg-black/80 backdrop-blur-md text-fuchsia-300 text-[9px] font-black px-2.5 py-0.5 rounded-full border border-fuchsia-400/60 shadow-[0_0_10px_rgba(217,70,239,0.45)] tracking-wider uppercase">
+              {p.identityRole}
+            </span>
 
-          {/* Online Indicator */}
-          <div className="flex items-center gap-1.5 bg-black/65 backdrop-blur-md px-2 py-0.5 rounded-full border border-white/10 shadow-md">
-            <span className={`w-1.5 h-1.5 rounded-full ${p.isOnline ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)] animate-pulse' : 'bg-slate-500'}`} />
-            <span className="text-[8.5px] font-extrabold text-slate-200 tracking-wider">
+            {/* Profile Boost Active Pill */}
+            {p.isBoosted && (!p.boostExpiresAt || new Date(p.boostExpiresAt).getTime() > Date.now()) && (
+              <span className="inline-flex items-center gap-1 bg-amber-500/90 text-slate-950 text-[8.5px] font-black px-2 py-0.5 rounded-full shadow-[0_0_12px_rgba(245,158,11,0.8)] border border-amber-300 animate-pulse tracking-wider">
+                <Rocket className="w-2.5 h-2.5 fill-current" />
+                <span>BOOST</span>
+              </span>
+            )}
+          </div>
+
+          {/* Online Indicator with Glowing Neon Dot */}
+          <div className="flex items-center gap-1.5 bg-black/80 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-white/15 shadow-md">
+            <span className={`w-2 h-2 rounded-full ${p.isOnline ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,1)] animate-pulse' : 'bg-slate-500'}`} />
+            <span className="text-[8.5px] font-black text-white tracking-wider">
               {p.isOnline ? 'LIVE' : `${p.lastActiveMinutesAgo || 12}m`}
             </span>
           </div>
@@ -124,20 +138,18 @@ export const SwipableGridCard: React.FC<SwipableGridCardProps> = ({
         )}
 
         {/* Cinematic Bottom Fade Overlay */}
-        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#06070c] via-[#06070c]/80 via-45% to-transparent p-3 pt-12 space-y-1 z-10">
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[#06070c] via-[#06070c]/85 via-45% to-transparent p-3 pt-12 space-y-1 z-10">
           <div className="flex items-center justify-between gap-1 overflow-hidden">
             <div className="flex items-center gap-1.5 overflow-hidden">
-              <span className="text-sm font-black text-white tracking-tight drop-shadow-sm truncate">
+              <span className="text-sm font-black text-white tracking-tight drop-shadow-[0_0_8px_rgba(255,255,255,0.4)] truncate">
                 {p.displayName}, {p.age}
               </span>
               {p.verified && (
-                <span className="inline-flex items-center justify-center p-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.35)] shrink-0" title="Verified">
-                  <ShieldCheck className="w-3 h-3 stroke-[2.4]" />
-                </span>
+                <AuraVerifiedBadge size="sm" variant="icon-only" />
               )}
             </div>
 
-            {/* Quick Tap Trigger Button */}
+            {/* Quick Tap Trigger Button with Neon Glow */}
             <button
               type="button"
               onClick={e => {
@@ -146,8 +158,8 @@ export const SwipableGridCard: React.FC<SwipableGridCardProps> = ({
               }}
               className={`w-7 h-7 rounded-full flex items-center justify-center border transition-all active:scale-90 shrink-0 ${
                 activeTapMenuUserId === p.userId
-                  ? 'bg-fuchsia-500 border-white text-white shadow-[0_0_12px_rgba(217,70,239,0.8)]'
-                  : 'bg-black/60 border-white/20 text-fuchsia-300 hover:bg-fuchsia-500/30 hover:border-fuchsia-400'
+                  ? 'bg-fuchsia-500 border-white text-white shadow-[0_0_16px_rgba(217,70,239,1)]'
+                  : 'bg-black/70 border-fuchsia-500/40 text-fuchsia-300 hover:bg-fuchsia-500/30 hover:border-fuchsia-400 shadow-[0_0_8px_rgba(217,70,239,0.3)]'
               }`}
               title="Szybka zaczepka (Quick Tap)"
             >
@@ -156,8 +168,8 @@ export const SwipableGridCard: React.FC<SwipableGridCardProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[10px] text-slate-300 font-medium">
-            <span className="truncate max-w-[95px] text-slate-300/90">{p.location || 'Nearby'}</span>
-            <span className="text-fuchsia-300 font-bold bg-fuchsia-950/50 px-1.5 py-0.5 rounded-md border border-fuchsia-500/25 text-[9.5px] shrink-0">
+            <span className="truncate max-w-[95px] text-slate-200">{p.location || 'Nearby'}</span>
+            <span className="text-cyan-300 font-black bg-cyan-950/70 px-1.5 py-0.5 rounded-md border border-cyan-400/50 text-[9.5px] shrink-0 shadow-[0_0_8px_rgba(6,182,212,0.35)]">
               {formatDistance(p.distanceKm)}
             </span>
           </div>

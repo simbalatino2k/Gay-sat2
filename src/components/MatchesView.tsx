@@ -90,7 +90,7 @@ export const MatchesView: React.FC<MatchesViewProps> = ({ authToken, onOpenChat 
                       className="w-12 h-12 rounded-full"
                     >
                       <img
-                        src={p.photos[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
+                        src={p.photos?.[0]?.url || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'}
                         alt={p.displayName}
                         referrerPolicy="no-referrer"
                         loading="lazy"
