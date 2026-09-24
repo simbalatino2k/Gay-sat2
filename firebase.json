@@ -1,0 +1,16 @@
+{
+  "hosting": {
+    "site": "aura-dating-gay-mab",
+    "public": "hosting-empty",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "aura",
+          "region": "europe-west2"
+        }
+      }
+    ]
+  }
+}

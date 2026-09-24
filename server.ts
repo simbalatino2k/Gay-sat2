@@ -52,6 +52,7 @@ import {
 } from './src/lib/mediaSecurity';
 import { cloudBackupService } from './src/services/cloudBackupService';
 import { WebSocketServer, WebSocket } from 'ws';
+import { MEDIA_SESSION_COOKIE, LEGACY_MEDIA_SESSION_COOKIES, mediaSessionTokens } from './src/lib/mediaSessionCookies.js';
 import {
   verifyGooglePlayPurchase,
   verifyAppleStoreKitTransaction,
@@ -239,6 +240,42 @@ async function optionalAuthenticateToken(req: AuthenticatedRequest, res: Respons
     }
   }
   next();
+}
+
+const MEDIA_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function setMediaSessionCookie(res: Response, token: string) {
+  let maxAge = MEDIA_SESSION_MAX_AGE_MS;
+  if (token.split('.').length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+      const expiresAt = Number(payload.exp) * 1000;
+      maxAge = Number.isFinite(expiresAt)
+        ? Math.max(0, Math.min(maxAge, expiresAt - Date.now()))
+        : 0;
+    } catch {
+      maxAge = 0;
+    }
+  }
+
+  // Remove any cookie left by an earlier account before activating this one.
+  for (const name of LEGACY_MEDIA_SESSION_COOKIES) {
+    res.clearCookie(name, { path: '/', secure: true, sameSite: 'none' });
+  }
+  res.cookie(MEDIA_SESSION_COOKIE, token, {
+    path: '/',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge
+  });
+}
+
+function clearMediaSessionCookies(res: Response) {
+  res.clearCookie(MEDIA_SESSION_COOKIE, { path: '/', secure: true, sameSite: 'none', httpOnly: true });
+  for (const name of LEGACY_MEDIA_SESSION_COOKIES) {
+    res.clearCookie(name, { path: '/', secure: true, sameSite: 'none' });
+  }
 }
 
 // Admin Role Guard
@@ -467,12 +504,7 @@ app.post('/api/auth/register', authRateLimiter, async (req: Request, res: Respon
 
     const result = await store.registerUser(email, cleanName, numAge, 'USER', password);
     if (result && result.token) {
-      res.cookie('aura_token', result.token, {
-        path: '/',
-        secure: true,
-        sameSite: 'none',
-        maxAge: 30 * 24 * 3600 * 1000
-      });
+      setMediaSessionCookie(res, result.token);
     }
     res.status(201).json(result);
   } catch (err: any) {
@@ -494,12 +526,7 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
     }
 
     if (result && result.token) {
-      res.cookie('aura_token', result.token, {
-        path: '/',
-        secure: true,
-        sameSite: 'none',
-        maxAge: 30 * 24 * 3600 * 1000
-      });
+      setMediaSessionCookie(res, result.token);
     }
 
     res.json(result);
@@ -509,6 +536,14 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
     }
     res.status(400).json({ error: err.message || 'Login failed' });
   }
+});
+
+// Keep media requests from native <img>/<video> elements authenticated after
+// Firebase refreshes its short-lived ID token. This requires a valid Bearer token.
+app.post('/api/auth/session', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  setMediaSessionCookie(res, req.token!);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ success: true });
 });
 
 // Auth: Social Fallback / Sandbox Login - PERMANENTLY DISABLED FOR SECURITY
@@ -851,6 +886,7 @@ app.post('/api/media/upload', authenticateToken, upload.single('media'), async (
 
 // 4. Secure Media Access & Delivery Endpoint with Strict Headers
 app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-store');
   try {
     const mediaId = String(req.params.mediaId);
     const isThumb = req.query.thumb === 'true';
@@ -882,13 +918,14 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       }
     }
 
-    // Also inspect cookies sent by native HTML5 media elements (<video>, <audio>, <img>)
-    if (!requestingUserId && req.headers.cookie) {
-      const match = req.headers.cookie.match(/(?:^|;\s*)(?:aura_auth_token|aura_token)=([^;]+)/);
-      if (match) {
-        const user = await store.getUserByToken(decodeURIComponent(match[1]));
+    // Native media elements cannot attach Authorization headers. Firebase Hosting
+    // forwards __session; direct-origin users can still have legacy cookie names.
+    if (!requestingUserId) {
+      for (const cookieToken of mediaSessionTokens(req.headers.cookie)) {
+        const user = await store.getUserByToken(cookieToken);
         if (user && user.status === 'ACTIVE') {
           requestingUserId = user.id;
+          break;
         }
       }
     }
@@ -1143,10 +1180,19 @@ app.get('/api/auth/me', authenticateToken, (req: AuthenticatedRequest, res: Resp
   res.json({ user: req.user });
 });
 
-// Auth: Logout
-app.post('/api/auth/logout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
-  if (req.token) {
-    await store.invalidateToken(req.token);
+// Auth: Logout. Clear cookies even if the Bearer token has expired; require
+// the Authorization header so a cross-site form cannot log out the user.
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !/^Bearer\s+\S+/i.test(authHeader)) {
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  clearMediaSessionCookies(res);
+  res.setHeader('Cache-Control', 'no-store');
+  const user = await store.getUserByToken(token);
+  if (user && user.status === 'ACTIVE') {
+    await store.invalidateToken(token);
   }
   res.json({ success: true, message: 'Logged out successfully' });
 });

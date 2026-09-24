@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { videoEffectsService, APPROVED_EFFECTS, VideoEffect } from '../services/videoEffectsService';
 import { MediaPermissionModal } from './MediaPermissionModal';
+import { auraWebSocketUrl } from '../lib/websocketEndpoint';
 
 export type CallState = 
   | 'IDLE'
@@ -464,8 +465,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/webrtc`;
+    const wsUrl = auraWebSocketUrl(window.location);
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

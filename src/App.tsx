@@ -15,7 +15,8 @@ import { MapView } from './components/MapView';
 import { Shield, ShieldCheck, Sparkles, SlidersHorizontal, Compass, Heart, MessageSquare, User, Settings, Lock, Radio, MapPin, Flame } from 'lucide-react';
 import { AuraLogo, AuraLogoIcon } from './components/AuraLogo';
 import { motion, AnimatePresence } from 'motion/react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onIdTokenChanged } from 'firebase/auth';
+import { auraWebSocketUrl } from './lib/websocketEndpoint';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
 import { formatUserAccount, logoutFirebase } from './services/firebaseService';
@@ -104,8 +105,7 @@ export default function App() {
 
     const connectGlobalSignal = () => {
       if (isCancelled) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws/webrtc`;
+      const wsUrl = auraWebSocketUrl(window.location);
 
       try {
         ws = new WebSocket(wsUrl);
@@ -195,7 +195,7 @@ export default function App() {
 
   // Fetch current user details on load & listen to Firebase Auth
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+    const unsubscribe = onIdTokenChanged(auth, async (fbUser) => {
       if (fbUser) {
         try {
           const idToken = await fbUser.getIdToken();
@@ -257,6 +257,20 @@ export default function App() {
     });
 
     return () => unsubscribe();
+  }, [token]);
+
+  // Refresh the HttpOnly media cookie when the Firebase ID token rotates.
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    fetch('/api/auth/session', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: controller.signal
+    }).catch(() => {});
+    return () => controller.abort();
   }, [token]);
 
   const handleAgeVerify = () => {

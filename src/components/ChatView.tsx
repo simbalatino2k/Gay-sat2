@@ -20,6 +20,7 @@ import { useTranslation } from '../context/LanguageContext';
 import { setTypingStatus, subscribeToTypingStatus, clearTypingStatus } from '../services/firebaseService';
 import { useScreenshotProtection } from '../hooks/useScreenshotProtection';
 import { ScreenshotShield } from './common/ScreenshotShield';
+import { auraWebSocketUrl } from '../lib/websocketEndpoint';
 
 interface ChatViewProps {
   authToken: string;
@@ -269,8 +270,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Local incoming call listener fallback if onStartCall is not provided by parent
   useEffect(() => {
     if (onStartCall || !authToken) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/webrtc`;
+    const wsUrl = auraWebSocketUrl(window.location);
     let ws: WebSocket;
 
     try {
