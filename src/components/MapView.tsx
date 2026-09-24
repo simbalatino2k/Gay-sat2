@@ -3,6 +3,8 @@ import * as maplibregl from 'maplibre-gl';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { UserAccount, UserProfile, LocationPrivacyMode, QueerVenue } from '../types';
+import { auth } from '../lib/firebase';
+import { saveProfileToFirestore } from '../services/firebaseService';
 import {
   LocateFixed,
   Shield,
@@ -132,8 +134,9 @@ export const MapView: React.FC<MapViewProps> = ({
   const fetchProfiles = useCallback(async () => {
     try {
       const headers: Record<string, string> = {};
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
+      const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
+      if (bearerToken) {
+        headers['Authorization'] = `Bearer ${bearerToken}`;
       }
       const res = await fetch('/api/discover', { headers });
       if (!res.ok) throw new Error('Błąd ładowania profili');
@@ -145,8 +148,9 @@ export const MapView: React.FC<MapViewProps> = ({
       setProfiles(list);
     } catch (err: any) {
       console.warn('[MapView] Nie udało się pobrać profili:', err.message || err);
+      showNotice('Nie udało się pobrać profili. Spróbuj odświeżyć mapę.', 'warning');
     }
-  }, [authToken]);
+  }, [authToken, showNotice]);
 
   // Fetch LGBTQ+ venues & cruising spots from backend
   const fetchVenues = useCallback(async (customCoords?: { lat: number; lng: number }, queryOverride?: string) => {
@@ -452,29 +456,34 @@ export const MapView: React.FC<MapViewProps> = ({
       el.className =
         'aura-profile-marker group relative cursor-pointer transform hover:scale-110 active:scale-95 transition-all duration-200';
 
-      const photoUrl = prof.photos && prof.photos.length > 0 ? prof.photos[0].url : '';
+      const photoUrl = prof.photos?.find(photo => !photo.isPrivate && !photo.isLocked)?.url || '';
       const isOnline = prof.isOnline;
       const isExact = prof.locationPrivacy === 'EXACT';
-
-      el.innerHTML = `
-        <div class="relative w-10 h-10 rounded-2xl overflow-hidden border-2 ${
-          isExact ? 'border-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]' : 'border-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]'
-        } bg-[#0b0d14] flex items-center justify-center">
-          ${
-            photoUrl
-              ? `<img src="${photoUrl}" alt="${prof.displayName}" class="w-full h-full object-cover" />`
-              : `<div class="w-full h-full bg-gradient-to-br from-purple-900 to-indigo-900 flex items-center justify-center text-white text-xs font-bold">${prof.displayName.charAt(0)}</div>`
-          }
-          ${
-            isOnline
-              ? `<span class="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0b0d14]"></span>`
-              : ''
-          }
-        </div>
-        <div class="absolute -bottom-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-full bg-[#070810]/95 border border-white/15 text-[9px] font-semibold text-slate-200 whitespace-nowrap shadow-md pointer-events-none group-hover:border-purple-400">
-          ${prof.displayName}, ${prof.age}
-        </div>
-      `;
+      const avatar = document.createElement('div');
+      avatar.className = `relative w-10 h-10 rounded-full overflow-hidden border-2 bg-[#0b0d14] flex items-center justify-center ${
+        isExact ? 'border-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]' : 'border-purple-500 shadow-[0_0_10px_rgba(168,85,247,0.5)]'
+      }`;
+      if (photoUrl) {
+        const img = document.createElement('img');
+        img.src = photoUrl;
+        img.alt = prof.displayName;
+        img.className = 'w-full h-full object-cover';
+        avatar.appendChild(img);
+      } else {
+        const initial = document.createElement('div');
+        initial.className = 'w-full h-full bg-gradient-to-br from-purple-900 to-indigo-900 flex items-center justify-center text-white text-xs font-bold';
+        initial.textContent = prof.displayName.charAt(0);
+        avatar.appendChild(initial);
+      }
+      if (isOnline) {
+        const online = document.createElement('span');
+        online.className = 'absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#0b0d14]';
+        avatar.appendChild(online);
+      }
+      const label = document.createElement('div');
+      label.className = 'absolute -bottom-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded-full bg-[#070810]/95 border border-white/15 text-[9px] font-semibold text-slate-200 whitespace-nowrap shadow-md pointer-events-none group-hover:border-purple-400';
+      label.textContent = `${prof.displayName}, ${prof.age}`;
+      el.append(avatar, label);
 
       el.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -596,13 +605,14 @@ export const MapView: React.FC<MapViewProps> = ({
         }
 
         // Persist coordinates to user's profile on backend
-        if (authToken) {
+        if (authToken || auth.currentUser) {
           try {
+            const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
             const res = await fetch('/api/profile', {
               method: 'PUT',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${authToken}`
+                Authorization: `Bearer ${bearerToken}`
               },
               body: JSON.stringify({
                 lat: latitude,
@@ -612,6 +622,10 @@ export const MapView: React.FC<MapViewProps> = ({
             });
             if (res.ok) {
               const data = await res.json();
+              const firebaseUser = auth.currentUser;
+              if (data.profile && firebaseUser && firebaseUser.uid === currentUser?.id) {
+                await saveProfileToFirestore(firebaseUser.uid, data.profile);
+              }
               if (data.profile && currentUser) onUpdateUser({ ...currentUser, profile: data.profile });
             } else {
               throw new Error('Location update failed');
@@ -644,17 +658,21 @@ export const MapView: React.FC<MapViewProps> = ({
   const handleChangePrivacy = async (mode: LocationPrivacyMode) => {
     setIsUpdatingPrivacy(true);
     try {
+      const bearerToken = auth.currentUser ? await auth.currentUser.getIdToken() : authToken;
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+          ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {})
         },
         body: JSON.stringify({ locationPrivacy: mode })
       });
       if (res.ok) {
         const data = await res.json();
         if (data.profile && currentUser) {
+          if (auth.currentUser?.uid === currentUser.id) {
+            await saveProfileToFirestore(auth.currentUser.uid, data.profile);
+          }
           onUpdateUser({ ...currentUser, profile: data.profile });
         }
         showNotice(`Zmieniono tryb prywatności na: ${mode}`, 'success');
@@ -675,6 +693,11 @@ export const MapView: React.FC<MapViewProps> = ({
     initMap();
     fetchProfiles();
   };
+
+  const unmappedProfiles = profiles.filter(p =>
+    p.userId !== currentUser?.id && p.id !== currentUser?.id &&
+    (typeof p.lat !== 'number' || typeof p.lng !== 'number' || p.locationPrivacy === 'HIDDEN')
+  );
 
   return (
     <div className="relative w-full h-[calc(100vh-8.5rem)] md:h-[calc(100vh-7rem)] rounded-3xl overflow-hidden border border-white/[0.08] shadow-2xl flex flex-col bg-[#05060a]">
@@ -860,6 +883,25 @@ export const MapView: React.FC<MapViewProps> = ({
       {/* Map Canvas Container */}
       <div ref={mapContainerRef} className="w-full h-full flex-1 bg-[#05060a]" />
 
+      {!selectedProfile && unmappedProfiles.length > 0 && (
+        <div className="absolute bottom-20 left-3 right-24 z-20 max-w-md rounded-2xl border border-white/15 bg-[#070810]/95 p-2 shadow-xl">
+          <p className="px-1 pb-1 text-[10px] text-slate-300">Profile bez udostępnionej pozycji na mapie</p>
+          <div className="flex gap-2 overflow-x-auto">
+            {unmappedProfiles.map(person => {
+              const photo = person.photos?.find(p => !p.isPrivate && !p.isLocked);
+              return (
+                <button key={person.userId || person.id} type="button" onClick={() => setSelectedProfile(person)}
+                  className="flex shrink-0 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-2 py-1 text-left text-xs text-white">
+                  {photo ? <img src={photo.url} alt="" className="h-7 w-7 rounded-full object-cover" />
+                    : <span className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-700 font-bold">{person.displayName.charAt(0)}</span>}
+                  <span>{person.displayName}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Loading Overlay */}
       {mapLoading && (
         <div className="absolute inset-0 z-20 bg-[#05060a]/80 backdrop-blur-sm flex flex-col items-center justify-center p-6">
@@ -1037,9 +1079,9 @@ export const MapView: React.FC<MapViewProps> = ({
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="relative w-12 h-12 rounded-2xl overflow-hidden border border-white/15 bg-purple-950/40 shrink-0">
-                  {selectedProfile.photos && selectedProfile.photos.length > 0 ? (
+                  {selectedProfile.photos?.some(photo => !photo.isPrivate && !photo.isLocked) ? (
                     <img
-                      src={selectedProfile.photos[0].url}
+                      src={selectedProfile.photos.find(photo => !photo.isPrivate && !photo.isLocked)!.url}
                       alt={selectedProfile.displayName}
                       className="w-full h-full object-cover"
                     />
@@ -1067,7 +1109,9 @@ export const MapView: React.FC<MapViewProps> = ({
                     <span>
                       {selectedProfile.locationPrivacy === 'EXACT'
                         ? 'Dokładna pozycja'
-                        : '~1.5 km w okolicy'}
+                        : selectedProfile.locationPrivacy === 'HIDDEN' || selectedProfile.lat === undefined
+                        ? 'Pozycja nieudostępniona'
+                        : 'Przybliżona pozycja'}
                     </span>
                     {selectedProfile.identityRole && (
                       <span className="px-1.5 py-0.2 rounded-md bg-white/5 text-purple-300 text-[10px]">

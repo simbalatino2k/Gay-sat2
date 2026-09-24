@@ -2,6 +2,7 @@ import React from 'react';
 import { FilterState, SexualRole, Tribe, LookingFor } from '../types';
 import { X, Check, MapPin } from 'lucide-react';
 import { formatDistance } from '../utils/formatDistance';
+import { t, labelRole, labelTribe, labelLookingFor } from '../i18n';
 
 interface FilterSheetProps {
   isOpen: boolean;
@@ -50,11 +51,11 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
       <div className="aura-glass-modal animate-modal-enter w-full max-w-md rounded-[32px] border border-white/[0.12] bg-[#0c0e18]/95 p-6 shadow-[0_30px_90px_rgba(0,0,0,0.9),0_0_1px_1px_rgba(255,255,255,0.08)_inset] flex flex-col justify-between space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
         <div className="space-y-4">
           <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
-            <h3 className="text-sm font-black text-white tracking-wide">Discovery Filters</h3>
+            <h3 className="text-sm font-black text-white tracking-wide">{t('Discovery Filters')}</h3>
             <button
               onClick={onClose}
               className="p-2 rounded-full text-slate-300 hover:text-white bg-white/[0.06] hover:bg-white/[0.14] border border-white/10 transition-all duration-200 active:scale-90 shadow-md"
-              title="Close"
+              title={t('Close')}
             >
               <X className="w-4 h-4 stroke-[2.4]" />
             </button>
@@ -65,21 +66,21 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
             <div className="flex justify-between text-xs font-semibold text-slate-300">
               <span className="flex items-center gap-1">
                 <MapPin className="w-3.5 h-3.5 text-fuchsia-400" />
-                <span>Maximum Distance</span>
+                <span>{t('Maximum Distance')}</span>
               </span>
               <span className="text-fuchsia-400 font-bold">
-                {local.maxDistanceKm ? formatDistance(local.maxDistanceKm) : 'All distances'}
+                {local.maxDistanceKm ? formatDistance(local.maxDistanceKm) : t('All distances')}
               </span>
             </div>
             <div className="flex flex-wrap gap-1.5 pt-0.5">
               {[
-                { label: '15m far', val: 0.02 },
-                { label: '30m far', val: 0.045 },
+                { label: `15m ${t('far')}`, val: 0.02 },
+                { label: `30m ${t('far')}`, val: 0.045 },
                 { label: '150m', val: 0.2 },
                 { label: '500m', val: 0.5 },
                 { label: '5 km', val: 5 },
                 { label: '25 km', val: 25 },
-                { label: 'All', val: 0 }
+                { label: t('All'), val: 0 }
               ].map(preset => {
                 const isSelected = (!local.maxDistanceKm && preset.val === 0) || (local.maxDistanceKm === preset.val);
                 return (
@@ -103,8 +104,8 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
           {/* Age Range */}
           <div className="space-y-2">
             <div className="flex justify-between text-xs font-semibold text-slate-300">
-              <span>Age Range</span>
-              <span className="text-purple-400">{local.minAge} - {local.maxAge} yrs</span>
+              <span>{t('Age Range')}</span>
+              <span className="text-purple-400">{local.minAge} - {local.maxAge} {t('yrs')}</span>
             </div>
             <div className="flex gap-3">
               <input
@@ -128,7 +129,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
 
           {/* Sexual Role */}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-300">Position / Sexual Role</label>
+            <label className="text-xs font-semibold text-slate-300">{t('Position / Sexual Role')}</label>
             <div className="flex flex-wrap gap-1.5">
               {ROLES.map(r => (
                 <button
@@ -140,7 +141,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
                       : 'border-white/10 bg-white/5 text-slate-400'
                   }`}
                 >
-                  {r}
+                  {labelRole(r)}
                 </button>
               ))}
             </div>
@@ -148,7 +149,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
 
           {/* Tribes */}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-300">Tribes</label>
+            <label className="text-xs font-semibold text-slate-300">{t('Tribes')}</label>
             <div className="flex flex-wrap gap-1.5">
               {TRIBES.map(t => (
                 <button
@@ -160,7 +161,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
                       : 'border-white/10 bg-white/5 text-slate-400'
                   }`}
                 >
-                  {t}
+                  {labelTribe(t)}
                 </button>
               ))}
             </div>
@@ -168,7 +169,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
 
           {/* Looking For */}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-slate-300">Looking For</label>
+            <label className="text-xs font-semibold text-slate-300">{t('Looking For')}</label>
             <div className="flex flex-wrap gap-1.5">
               {LOOKING_FOR.map(l => (
                 <button
@@ -180,7 +181,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
                       : 'border-white/10 bg-white/5 text-slate-400'
                   }`}
                 >
-                  {l}
+                  {labelLookingFor(l)}
                 </button>
               ))}
             </div>
@@ -189,7 +190,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
           {/* Toggles */}
           <div className="space-y-2 pt-2 border-t border-white/10">
             <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
-              <span>Online Now Only</span>
+              <span>{t('Online Now Only')}</span>
               <input
                 type="checkbox"
                 checked={local.onlineOnly}
@@ -198,7 +199,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
               />
             </label>
             <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
-              <span>Verified Profiles Only</span>
+              <span>{t('Verified Profiles Only')}</span>
               <input
                 type="checkbox"
                 checked={local.verifiedOnly}
@@ -216,7 +217,7 @@ export const FilterSheet: React.FC<FilterSheetProps> = ({
           }}
           className="aura-btn-primary w-full py-3.5 rounded-2xl text-xs font-bold text-white shadow-xl shadow-fuchsia-950/50 flex items-center justify-center transition-all duration-200"
         >
-          Apply Filters
+          {t('Apply Filters')}
         </button>
       </div>
     </div>

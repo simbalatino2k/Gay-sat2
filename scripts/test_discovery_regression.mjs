@@ -82,5 +82,20 @@ restored = await reader.getUserById(user.id);
 assert.equal(restored.role, 'USER');
 assert.equal(restored.profile.verified, false);
 assert.equal(restored.profile.lat, 0);
-console.log('PASS: registration serialization, location persistence, discovery without cache, privacy, GPS validation and protected fields.');
+await store.updateProfile(user.id, {
+  age: 29,
+  photos: [
+    { id: 'public', url: 'https://example.invalid/public.jpg', isPrimary: true },
+    { id: 'private', url: 'https://example.invalid/private.jpg', isPrivate: true }
+  ]
+});
+restored = await reader.getUserById(user.id);
+assert.equal(restored.profile.age, 29);
+assert.equal(restored.profile.photos.length, 2);
+feed = await store.getDiscoverFeed('account-a');
+assert.equal(feed[0].photos.length, 1, 'Private photos are omitted from discovery');
+assert.equal(feed[0].photos[0].url, 'https://example.invalid/public.jpg');
+await assert.rejects(() => store.updateProfile(user.id, { age: 17 }));
+await assert.rejects(() => store.updateProfile(user.id, { photos: [{ id: 'bad', url: 'javascript:alert(1)' }] }));
+console.log('PASS: registration serialization, location and profile persistence, discovery without cache, privacy and input validation.');
 console.log('SQL is inspected using a test transport; a live PostgreSQL integration test is still required.');

@@ -1,8 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
 import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2 } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
 import { ImportAlbumModal } from './ImportAlbumModal';
+import { auth } from '../lib/firebase';
+import { saveProfileToFirestore } from '../services/firebaseService';
+import { t, labelRole, labelTribe, labelLookingFor } from '../i18n';
 
 interface ProfileEditorProps {
   profile: UserProfile;
@@ -15,36 +18,72 @@ const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bot
 const TRIBES: Tribe[] = ['Bear', 'Otter', 'Cub', 'Jock', 'Twink', 'Geek', 'Daddy', 'Leather', 'Clean Cut', 'Muscle', 'Trans', 'Queer', 'Pup'];
 const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking', 'Relationship', 'Right Now', 'Chat'];
 
+type ProfileDraft = Pick<UserProfile, 'displayName' | 'age' | 'identityRole' | 'location' | 'bio' | 'interests' | 'lookingFor' | 'tribes' | 'photos'> & Pick<UserProfile, 'instagramHandle' | 'spotifyTopArtist'>;
+
+const profileDraftKey = (userId: string) => `aura:profile-draft:${userId}`;
+
+const readProfileDraft = (userId: string): Partial<ProfileDraft> | null => {
+  try {
+    const raw = localStorage.getItem(profileDraftKey(userId));
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
 export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   profile,
   authToken,
   onProfileUpdated,
   onOpenSettings
 }) => {
-  const [displayName, setDisplayName] = useState(profile.displayName);
-  const [age, setAge] = useState(profile.age);
-  const [identityRole, setIdentityRole] = useState<SexualRole>(profile.identityRole);
-  const [location, setLocation] = useState(profile.location);
-  const [bio, setBio] = useState(profile.bio);
-  const [instagramHandle, setInstagramHandle] = useState(profile.instagramHandle || '');
-  const [spotifyTopArtist, setSpotifyTopArtist] = useState(profile.spotifyTopArtist || '');
+  const [restoredDraft] = useState(() => readProfileDraft(profile.userId));
+  const [displayName, setDisplayName] = useState(restoredDraft?.displayName ?? profile.displayName);
+  const [age, setAge] = useState(restoredDraft?.age ?? profile.age);
+  const [identityRole, setIdentityRole] = useState<SexualRole>(restoredDraft?.identityRole ?? profile.identityRole);
+  const [location, setLocation] = useState(restoredDraft?.location ?? profile.location);
+  const [bio, setBio] = useState(restoredDraft?.bio ?? profile.bio);
+  const [instagramHandle, setInstagramHandle] = useState(restoredDraft?.instagramHandle ?? profile.instagramHandle ?? '');
+  const [spotifyTopArtist, setSpotifyTopArtist] = useState(restoredDraft?.spotifyTopArtist ?? profile.spotifyTopArtist ?? '');
 
   // Enhanced Customization
-  const [interests, setInterests] = useState<string[]>(profile.interests || []);
+  const [interests, setInterests] = useState<string[]>(restoredDraft?.interests ?? profile.interests ?? []);
   const [newTagInput, setNewTagInput] = useState('');
-  const [lookingFor, setLookingFor] = useState<LookingFor[]>(profile.lookingFor || []);
-  const [tribes, setTribes] = useState<Tribe[]>(profile.tribes || []);
+  const [lookingFor, setLookingFor] = useState<LookingFor[]>(restoredDraft?.lookingFor ?? profile.lookingFor ?? []);
+  const [tribes, setTribes] = useState<Tribe[]>(restoredDraft?.tribes ?? profile.tribes ?? []);
 
-  const [photos, setPhotos] = useState(profile.photos || []);
+  const [photos, setPhotos] = useState(restoredDraft?.photos ?? profile.photos ?? []);
   const [newPhotoUrl, setNewPhotoUrl] = useState('');
   const [showAlbumPicker, setShowAlbumPicker] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const savedSnapshot = useRef(JSON.stringify({
+    displayName: profile.displayName, age: profile.age, identityRole: profile.identityRole,
+    location: profile.location, bio: profile.bio, instagramHandle: profile.instagramHandle || '',
+    spotifyTopArtist: profile.spotifyTopArtist || '', interests: profile.interests || [],
+    lookingFor: profile.lookingFor || [], tribes: profile.tribes || [], photos: profile.photos || []
+  }));
+
+  useEffect(() => {
+    const draft: ProfileDraft = {
+      displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist,
+      interests, lookingFor, tribes, photos
+    };
+    const snapshot = JSON.stringify(draft);
+    if (snapshot === savedSnapshot.current) return;
+    const timeout = window.setTimeout(() => {
+      if (snapshot === savedSnapshot.current) return;
+      try { localStorage.setItem(profileDraftKey(profile.userId), snapshot); } catch { /* Storage may be disabled. */ }
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [profile.userId, displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist, interests, lookingFor, tribes, photos]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -73,11 +112,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     try {
       const formData = new FormData();
       formData.append('media', file);
+      const bearerToken = auth.currentUser?.uid === profile.userId
+        ? await auth.currentUser.getIdToken()
+        : authToken;
 
       const res = await fetch('/api/media/upload', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${authToken}`
+          Authorization: `Bearer ${bearerToken}`
         },
         body: formData
       });
@@ -157,36 +199,50 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     e.preventDefault();
     setSaving(true);
     setSavedSuccess(false);
+    setSaveError(null);
 
     try {
+      const updates = {
+        displayName,
+        age,
+        identityRole,
+        location,
+        bio,
+        instagramHandle,
+        spotifyTopArtist,
+        interests,
+        lookingFor,
+        tribes,
+        photos
+      };
+      const markSaved = (savedProfile: UserProfile) => {
+        savedSnapshot.current = JSON.stringify(updates);
+        try { localStorage.removeItem(profileDraftKey(profile.userId)); } catch { /* Storage may be disabled. */ }
+        onProfileUpdated(savedProfile);
+        setSavedSuccess(true);
+        setTimeout(() => setSavedSuccess(false), 3000);
+      };
+      const firebaseUser = auth.currentUser?.uid === profile.userId ? auth.currentUser : null;
+      const bearerToken = firebaseUser ? await firebaseUser.getIdToken() : authToken;
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${authToken}`
+          'Authorization': `Bearer ${bearerToken}`
         },
-        body: JSON.stringify({
-          displayName,
-          age,
-          identityRole,
-          location,
-          bio,
-          instagramHandle,
-          spotifyTopArtist,
-          interests,
-          lookingFor,
-          tribes,
-          photos
-        })
+        body: JSON.stringify(updates)
       });
-      const data = await res.json();
-      if (data.profile) {
-        onProfileUpdated(data.profile);
-        setSavedSuccess(true);
-        setTimeout(() => setSavedSuccess(false), 3000);
-      }
-    } catch (err) {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
+      // Discovery reads the server profile; login hydration reads Firestore.
+      // Confirm both writes before reporting success.
+      const savedProfile = firebaseUser
+        ? await saveProfileToFirestore(firebaseUser.uid, { ...profile, ...data.profile, ...updates })
+        : data.profile;
+      markSaved(savedProfile);
+    } catch (err: any) {
       console.error('Save profile error:', err);
+      setSaveError(err?.message || 'Nie udało się zapisać profilu.');
     } finally {
       setSaving(false);
     }
@@ -195,13 +251,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   return (
     <div className="w-full max-w-md mx-auto space-y-4 pb-24 pt-1 px-3">
       <div className="flex items-center justify-between px-1">
-        <h2 className="text-base font-extrabold text-white tracking-wide">Edit Profile</h2>
+        <h2 className="text-base font-extrabold text-white tracking-wide">{t('Edit Profile')}</h2>
         <div className="flex items-center gap-2">
           {savedSuccess && (
             <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20 shadow-sm animate-pulse-green">
-              <Check className="w-3.5 h-3.5" /> Saved!
+              <Check className="w-3.5 h-3.5" /> {t('Saved!')}
             </span>
           )}
+          {saveError && <span role="alert" className="text-xs text-rose-300">{saveError}</span>}
           {onOpenSettings && (
             <button
               type="button"
@@ -215,6 +272,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           )}
         </div>
       </div>
+      {restoredDraft && <p className="px-1 text-xs text-amber-200" role="status">Przywrócono niezapisaną wersję profilu. Naciśnij Zapisz, aby zachować zmiany na koncie.</p>}
 
       {/* Quick Settings Access Card */}
       {onOpenSettings && (
@@ -428,7 +486,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Name</label>
+              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Name')}</label>
               <input
                 type="text"
                 required
@@ -438,7 +496,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               />
             </div>
             <div className="space-y-1">
-              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Age (18+)</label>
+              <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Age (18+)')}</label>
               <input
                 type="number"
                 min={18}
@@ -452,7 +510,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           </div>
 
           <div className="space-y-1">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Location</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Location')}</label>
             <input
               type="text"
               value={location}
@@ -463,7 +521,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           {/* Position Selector */}
           <div className="space-y-1.5">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Role / Position</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Role / Position')}</label>
             <div className="flex flex-wrap gap-1.5">
               {ROLES.map(r => (
                 <button
@@ -476,7 +534,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                       : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
                   }`}
                 >
-                  {r}
+                  {labelRole(r)}
                 </button>
               ))}
             </div>
@@ -484,7 +542,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
           {/* Bio */}
           <div className="space-y-1">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Short Bio</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Short Bio')}</label>
             <textarea
               rows={3}
               value={bio}
@@ -499,7 +557,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
             <Tag className="w-4 h-4 text-purple-400" />
-            <span>Interests & Tags</span>
+            <span>{t('Interests & Tags')}</span>
           </label>
 
           <div className="flex flex-wrap gap-1.5">
@@ -534,14 +592,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               onClick={handleAddTag}
               className="px-3.5 py-2 rounded-xl bg-purple-600/80 hover:bg-purple-600 text-xs font-bold text-white shadow-md active:scale-95 transition"
             >
-              Add
+              {t('Add')}
             </button>
           </div>
         </div>
 
         {/* Tribes */}
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-2 shadow-xl">
-          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Tribes & Style</label>
+          <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Tribes & Style')}</label>
           <div className="flex flex-wrap gap-1.5">
             {TRIBES.map(t => (
               <button
@@ -554,7 +612,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                     : 'border-white/[0.08] bg-white/[0.03] text-slate-400 hover:text-white'
                 }`}
               >
-                {t}
+                {labelTribe(t)}
               </button>
             ))}
           </div>
@@ -563,7 +621,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         {/* Looking For */}
         <div className="aura-glass-card rounded-[26px] border border-white/[0.08] bg-[#0d0f1b]/70 backdrop-blur-xl p-4.5 space-y-3 shadow-xl">
           <div className="flex items-center justify-between">
-            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">Looking For</label>
+            <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">{t('Looking For')}</label>
             <button
               type="button"
               onClick={() => toggleLookingFor('Right Now')}
@@ -596,7 +654,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                   }`}
                 >
                   {isRightNow && <Zap className="w-3 h-3 text-amber-400" />}
-                  <span>{l}</span>
+                  <span>{labelLookingFor(l)}</span>
                 </button>
               );
             })}
@@ -608,7 +666,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           disabled={saving}
           className="w-full relative py-3.5 rounded-2xl bg-gradient-to-r from-purple-600 via-fuchsia-500 to-cyan-500 bg-[length:200%_auto] text-xs font-black uppercase tracking-wider text-white shadow-xl shadow-purple-950/60 hover:brightness-110 active:scale-[0.98] transition-all duration-300 disabled:opacity-50 animate-breathe-glow"
         >
-          {saving ? 'Saving Profile...' : 'Save Changes'}
+          {saving ? t('Saving Profile...') : t('Save Changes')}
         </button>
 
         {onOpenSettings && (

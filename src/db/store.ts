@@ -1173,6 +1173,7 @@ export class DataStore {
     // Whitelist allowed fields ONLY. Prevent role/verified/status/id tampering.
     const allowedKeys: (keyof UserProfile)[] = [
       'displayName',
+      'age',
       'bio',
       'heightCm',
       'weightKg',
@@ -1191,6 +1192,25 @@ export class DataStore {
     ];
 
     const safeProfileUpdates: Partial<UserProfile> = {};
+    if (updates.age !== undefined && (!Number.isInteger(updates.age) || updates.age < 18 || updates.age > 99)) {
+      throw new Error('Age must be between 18 and 99');
+    }
+    if (updates.photos !== undefined) {
+      if (!Array.isArray(updates.photos) || updates.photos.length > 6 || updates.photos.some(photo =>
+        !photo || typeof photo.id !== 'string' || photo.id.length > 100 ||
+        typeof photo.url !== 'string' || photo.url.length > 2048 ||
+        !(photo.url.startsWith('https://') || photo.url.startsWith('/api/media/')) ||
+        (photo.isPrivate !== undefined && typeof photo.isPrivate !== 'boolean')
+      )) {
+        throw new Error('Invalid profile photos');
+      }
+      safeProfileUpdates.photos = updates.photos.map(photo => ({
+        id: photo.id,
+        url: photo.url,
+        isPrimary: Boolean(photo.isPrimary),
+        isPrivate: Boolean(photo.isPrivate)
+      }));
+    }
     if (updates.lat !== undefined || updates.lng !== undefined) {
       if (typeof updates.lat !== 'number' || !Number.isFinite(updates.lat) || Math.abs(updates.lat) > 90 ||
           typeof updates.lng !== 'number' || !Number.isFinite(updates.lng) || Math.abs(updates.lng) > 180) {
@@ -1889,20 +1909,8 @@ export class DataStore {
     const isOwner = viewerUserId && (viewerUserId === profile.userId || viewerUserId === profile.id);
     const hasVault = isOwner || (viewerUserId ? this.hasVaultAccess(profile.userId, viewerUserId) : false);
 
-    const sanitizePhotos = (photos: any[]) => {
-      return (photos || []).map(p => {
-        if (p.isPrivate && !hasVault) {
-          return {
-            ...p,
-            isLocked: true
-          };
-        }
-        return {
-          ...p,
-          isLocked: false
-        };
-      });
-    };
+    const sanitizePhotos = (photos: any[]) =>
+      (photos || []).filter(p => !p.isPrivate || hasVault).map(p => ({ ...p, isLocked: false }));
 
     if (privacy === 'HIDDEN') {
       const copy = { ...profile };

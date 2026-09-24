@@ -17,9 +17,10 @@ service cloud.firestore {
       allow read: if true;
     }
 
-    // Users collection (public dating profiles discovery)
+    // User documents contain private account data. Public discovery uses the
+    // server API, which strips sensitive fields and enforces blocks.
     match /users/{userId} {
-      allow read: if true;
+      allow read: if isOwner(userId);
       allow create, update: if isAuthenticated() && request.auth.uid == userId;
       allow delete: if isOwner(userId);
     }

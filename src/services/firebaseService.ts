@@ -38,27 +38,33 @@ export function formatUserAccount(
   fbUser: FirebaseUser, 
   firestoreData?: any
 ): UserAccount {
+  const savedProfile = firestoreData?.profile || firestoreData || {};
   const defaultProfile: UserProfile = {
     id: `prof-${fbUser.uid}`,
     userId: fbUser.uid,
-    displayName: firestoreData?.displayName || fbUser.displayName || 'AURA Member',
-    age: firestoreData?.age || 25,
-    identityRole: firestoreData?.identityRole || 'Versatile',
-    location: firestoreData?.location || 'Los Angeles, CA',
-    distanceKm: firestoreData?.distanceKm || 0.8,
-    bio: firestoreData?.bio || 'Passionate about life, good energy, and authentic connections.',
-    relationshipStatus: firestoreData?.relationshipStatus || 'Single',
-    lookingFor: firestoreData?.lookingFor || ['Dating', 'Friends'],
-    tribes: firestoreData?.tribes || ['Clean Cut'],
-    interests: firestoreData?.interests || ['Coffee', 'Travel', 'Art'],
-    photos: firestoreData?.photos || [
+    displayName: savedProfile.displayName || fbUser.displayName || 'AURA Member',
+    age: savedProfile.age || 25,
+    identityRole: savedProfile.identityRole || 'Versatile',
+    location: savedProfile.location || 'Los Angeles, CA',
+    lat: typeof savedProfile.lat === 'number' ? savedProfile.lat : undefined,
+    lng: typeof savedProfile.lng === 'number' ? savedProfile.lng : undefined,
+    locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(savedProfile.locationPrivacy)
+      ? savedProfile.locationPrivacy : 'APPROXIMATE',
+    approximateArea: savedProfile.approximateArea,
+    distanceKm: savedProfile.distanceKm ?? 0.8,
+    bio: savedProfile.bio ?? 'Passionate about life, good energy, and authentic connections.',
+    relationshipStatus: savedProfile.relationshipStatus || 'Single',
+    lookingFor: savedProfile.lookingFor || ['Dating', 'Friends'],
+    tribes: savedProfile.tribes || ['Clean Cut'],
+    interests: savedProfile.interests || ['Coffee', 'Travel', 'Art'],
+    photos: savedProfile.photos || [
       {
         id: `ph-${fbUser.uid}`,
         url: fbUser.photoURL || AURA_ALBUM_PHOTOS[0] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
         isPrimary: true
       }
     ],
-    verified: firestoreData?.verified ?? true,
+    verified: savedProfile.verified ?? true,
     isOnline: true,
     lastActiveMinutesAgo: 0
   };
@@ -66,7 +72,8 @@ export function formatUserAccount(
   return {
     id: fbUser.uid,
     email: fbUser.email || '',
-    role: firestoreData?.role || 'USER',
+    // Firestore user documents are owner-writable, so they cannot grant privileges.
+    role: 'USER',
     status: firestoreData?.status || 'ACTIVE',
     isAgeVerified18Plus: true,
     createdAt: firestoreData?.createdAt || new Date().toISOString(),
@@ -279,27 +286,28 @@ export async function loginWithFirebaseEmail(
 export async function saveProfileToFirestore(
   uid: string, 
   updates: Partial<UserProfile>
-): Promise<void> {
+): Promise<UserProfile> {
   const userDocRef = doc(db, 'users', uid);
   try {
     const userDocSnap = await getDoc(userDocRef);
-    if (userDocSnap.exists()) {
-      const existing = userDocSnap.data();
-      const updatedProfile = {
-        ...(existing.profile || {}),
-        ...updates
-      };
-      await updateDoc(userDocRef, {
-        profile: updatedProfile,
-        displayName: updates.displayName || existing.displayName,
-        updatedAt: new Date().toISOString()
-      });
-    }
+    const existing = userDocSnap.exists() ? userDocSnap.data() : {};
+    const updatedProfile = {
+      ...(existing.profile || {}),
+      id: existing.profile?.id || `prof-${uid}`,
+      userId: uid,
+      ...updates
+    } as UserProfile;
+    await setDoc(userDocRef, {
+      profile: updatedProfile,
+      displayName: updatedProfile.displayName,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    return updatedProfile;
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
     }
-    console.warn('Notice updating profile in Firestore:', err);
+    throw err;
   }
 }
 

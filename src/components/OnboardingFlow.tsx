@@ -13,6 +13,7 @@ import {
   saveProfileToFirestore 
 } from '../services/firebaseService';
 import { auth } from '../lib/firebase';
+import { t, labelRole } from '../i18n';
 
 interface OnboardingFlowProps {
   onComplete: (session: { token: string; user: any }) => void;
@@ -215,9 +216,11 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const token = localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
-
     try {
+      const token = auth.currentUser
+        ? await auth.currentUser.getIdToken()
+        : localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
+      if (!token) throw new Error('Zaloguj się ponownie, aby zapisać profil.');
       const profileUpdates = {
         displayName,
         age,
@@ -229,16 +232,6 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         photos: [{ id: `ph-${Date.now()}`, url: photoUrl, isPrimary: true }]
       };
 
-      // Sync with Firestore if possible
-      try {
-        const currentUser = auth.currentUser;
-        if (currentUser) {
-          await saveProfileToFirestore(currentUser.uid, profileUpdates);
-        }
-      } catch (fsErr) {
-        console.warn('Firestore profile save notice:', fsErr);
-      }
-
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
@@ -247,24 +240,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         },
         body: JSON.stringify(profileUpdates)
       });
-      const data = await res.json();
-      if (data.user) {
-        setSuccess(true);
-        setTimeout(() => {
-          if (token) {
-            localStorage.setItem('aura_auth_token', token);
-            localStorage.setItem('aura_token', token);
-          }
-          onComplete({ token: token!, user: data.user });
-        }, 500);
-      } else {
-        // If local API didn't return user, use fallback or navigate
-        if (token) {
-          localStorage.setItem('aura_auth_token', token);
-          localStorage.setItem('aura_token', token);
-        }
-        onComplete({ token: token || 'aura_session', user: { id: auth.currentUser?.uid || 'user-new', profile: profileUpdates } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
+      if (auth.currentUser) {
+        await saveProfileToFirestore(auth.currentUser.uid, data.profile);
       }
+      const accountRes = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
+      const account = await accountRes.json().catch(() => ({}));
+      if (!accountRes.ok || !account.user) throw new Error(account.error || 'Nie udało się odczytać konta.');
+      localStorage.setItem('aura_auth_token', token!);
+      localStorage.setItem('aura_token', token!);
+      setSuccess(true);
+      onComplete({ token: token!, user: account.user });
     } catch (err: any) {
       setError(err.message || 'Error updating profile');
     } finally {
@@ -724,20 +711,20 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300">Sexual Role / Position</label>
+                    <label className="text-[11px] font-bold text-slate-300">{t('Role / Position')}</label>
                     <select
                       value={identityRole}
                       onChange={e => setIdentityRole(e.target.value as SexualRole)}
                       className="w-full aura-glass-input rounded-xl px-3 py-2.5 text-xs text-white outline-none"
                     >
                       {ROLES.map(r => (
-                        <option key={r} value={r} className="bg-slate-900 text-white">{r}</option>
+                        <option key={r} value={r} className="bg-slate-900 text-white">{labelRole(r)}</option>
                       ))}
                     </select>
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300">Location</label>
+                    <label className="text-[11px] font-bold text-slate-300">{t('Location')}</label>
                     <input
                       type="text"
                       required
