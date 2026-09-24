@@ -77,14 +77,14 @@ export function useBackgroundNotifications(token: string | null) {
             if (newMatchesCount > 0) {
               new Notification('New Match! 🔥', {
                 body: newMatchesCount === 1 ? `You matched with ${latestMatchName}!` : `You have ${newMatchesCount} new matches!`,
-                icon: '/icon.svg'
+                icon: '/icon-192.png'
               });
             }
 
             if (newMessagesCount > 0) {
               new Notification(`New message from ${senderName}`, {
                 body: newMessagesCount === 1 ? latestMessageText : `You have ${newMessagesCount} new messages!`,
-                icon: '/icon.svg'
+                icon: '/icon-192.png'
               });
             }
           }
