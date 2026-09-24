@@ -311,4 +311,3 @@ export async function saveProfileToFirestore(
 export async function logoutFirebase(): Promise<void> {
   await signOut(auth);
 }
-
