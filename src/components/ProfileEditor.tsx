@@ -3,6 +3,8 @@ import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
 import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2 } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
 import { ImportAlbumModal } from './ImportAlbumModal';
+import { auth } from '../lib/firebase';
+import { saveProfileToFirestore } from '../services/firebaseService';
 
 interface ProfileEditorProps {
   profile: UserProfile;
@@ -41,6 +43,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   const [showImportModal, setShowImportModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -157,36 +160,45 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     e.preventDefault();
     setSaving(true);
     setSavedSuccess(false);
+    setSaveError(null);
 
     try {
+      const updates = {
+        displayName,
+        age,
+        identityRole,
+        location,
+        bio,
+        instagramHandle,
+        spotifyTopArtist,
+        interests,
+        lookingFor,
+        tribes,
+        photos
+      };
+      if (auth.currentUser) {
+        const savedProfile = await saveProfileToFirestore(auth.currentUser.uid, updates);
+        onProfileUpdated(savedProfile);
+        setSavedSuccess(true);
+        setTimeout(() => setSavedSuccess(false), 3000);
+        return;
+      }
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${authToken}`
         },
-        body: JSON.stringify({
-          displayName,
-          age,
-          identityRole,
-          location,
-          bio,
-          instagramHandle,
-          spotifyTopArtist,
-          interests,
-          lookingFor,
-          tribes,
-          photos
-        })
+        body: JSON.stringify(updates)
       });
-      const data = await res.json();
-      if (data.profile) {
-        onProfileUpdated(data.profile);
-        setSavedSuccess(true);
-        setTimeout(() => setSavedSuccess(false), 3000);
-      }
-    } catch (err) {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
+      onProfileUpdated(data.profile);
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 3000);
+    } catch (err: any) {
       console.error('Save profile error:', err);
+      setSaveError(err?.message || 'Nie udało się zapisać profilu.');
     } finally {
       setSaving(false);
     }
@@ -202,6 +214,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               <Check className="w-3.5 h-3.5" /> Saved!
             </span>
           )}
+          {saveError && <span role="alert" className="text-xs text-rose-300">{saveError}</span>}
           {onOpenSettings && (
             <button
               type="button"
@@ -644,3 +657,4 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     </div>
   );
 };
+
