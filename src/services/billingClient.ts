@@ -288,7 +288,7 @@ class UnifiedBillingClient {
       };
       if (!Object.hasOwn(plans, productId)) throw new Error('Unknown subscription product');
       const planId = plans[productId];
-      const res = await fetch('/api/stripe/create-checkout-session', {
+      const res = await fetch('/api/payments/create-checkout-session', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
