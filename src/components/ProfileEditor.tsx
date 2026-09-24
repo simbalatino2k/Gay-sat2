@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { UserProfile, SexualRole, Tribe, LookingFor } from '../types';
 import { Camera, Plus, Trash2, Check, Image as ImageIcon, ExternalLink, ChevronDown, ChevronUp, Tag, Sparkles, Upload, Loader2, AlertCircle, Lock, Unlock, Zap, Shield, Settings, ChevronRight, Link2 } from 'lucide-react';
 import { AURA_ALBUM_PHOTOS, GOOGLE_PHOTOS_ALBUM_URL } from '../data/auraAlbum';
@@ -17,27 +17,42 @@ const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bot
 const TRIBES: Tribe[] = ['Bear', 'Otter', 'Cub', 'Jock', 'Twink', 'Geek', 'Daddy', 'Leather', 'Clean Cut', 'Muscle', 'Trans', 'Queer', 'Pup'];
 const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking', 'Relationship', 'Right Now', 'Chat'];
 
+type ProfileDraft = Pick<UserProfile, 'displayName' | 'age' | 'identityRole' | 'location' | 'bio' | 'interests' | 'lookingFor' | 'tribes' | 'photos'> & Pick<UserProfile, 'instagramHandle' | 'spotifyTopArtist'>;
+
+const profileDraftKey = (userId: string) => `aura:profile-draft:${userId}`;
+
+const readProfileDraft = (userId: string): Partial<ProfileDraft> | null => {
+  try {
+    const raw = localStorage.getItem(profileDraftKey(userId));
+    const parsed = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
 export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   profile,
   authToken,
   onProfileUpdated,
   onOpenSettings
 }) => {
-  const [displayName, setDisplayName] = useState(profile.displayName);
-  const [age, setAge] = useState(profile.age);
-  const [identityRole, setIdentityRole] = useState<SexualRole>(profile.identityRole);
-  const [location, setLocation] = useState(profile.location);
-  const [bio, setBio] = useState(profile.bio);
-  const [instagramHandle, setInstagramHandle] = useState(profile.instagramHandle || '');
-  const [spotifyTopArtist, setSpotifyTopArtist] = useState(profile.spotifyTopArtist || '');
+  const [restoredDraft] = useState(() => readProfileDraft(profile.userId));
+  const [displayName, setDisplayName] = useState(restoredDraft?.displayName ?? profile.displayName);
+  const [age, setAge] = useState(restoredDraft?.age ?? profile.age);
+  const [identityRole, setIdentityRole] = useState<SexualRole>(restoredDraft?.identityRole ?? profile.identityRole);
+  const [location, setLocation] = useState(restoredDraft?.location ?? profile.location);
+  const [bio, setBio] = useState(restoredDraft?.bio ?? profile.bio);
+  const [instagramHandle, setInstagramHandle] = useState(restoredDraft?.instagramHandle ?? profile.instagramHandle ?? '');
+  const [spotifyTopArtist, setSpotifyTopArtist] = useState(restoredDraft?.spotifyTopArtist ?? profile.spotifyTopArtist ?? '');
 
   // Enhanced Customization
-  const [interests, setInterests] = useState<string[]>(profile.interests || []);
+  const [interests, setInterests] = useState<string[]>(restoredDraft?.interests ?? profile.interests ?? []);
   const [newTagInput, setNewTagInput] = useState('');
-  const [lookingFor, setLookingFor] = useState<LookingFor[]>(profile.lookingFor || []);
-  const [tribes, setTribes] = useState<Tribe[]>(profile.tribes || []);
+  const [lookingFor, setLookingFor] = useState<LookingFor[]>(restoredDraft?.lookingFor ?? profile.lookingFor ?? []);
+  const [tribes, setTribes] = useState<Tribe[]>(restoredDraft?.tribes ?? profile.tribes ?? []);
 
-  const [photos, setPhotos] = useState(profile.photos || []);
+  const [photos, setPhotos] = useState(restoredDraft?.photos ?? profile.photos ?? []);
   const [newPhotoUrl, setNewPhotoUrl] = useState('');
   const [showAlbumPicker, setShowAlbumPicker] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -48,6 +63,26 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const savedSnapshot = useRef(JSON.stringify({
+    displayName: profile.displayName, age: profile.age, identityRole: profile.identityRole,
+    location: profile.location, bio: profile.bio, instagramHandle: profile.instagramHandle || '',
+    spotifyTopArtist: profile.spotifyTopArtist || '', interests: profile.interests || [],
+    lookingFor: profile.lookingFor || [], tribes: profile.tribes || [], photos: profile.photos || []
+  }));
+
+  useEffect(() => {
+    const draft: ProfileDraft = {
+      displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist,
+      interests, lookingFor, tribes, photos
+    };
+    const snapshot = JSON.stringify(draft);
+    if (snapshot === savedSnapshot.current) return;
+    const timeout = window.setTimeout(() => {
+      if (snapshot === savedSnapshot.current) return;
+      try { localStorage.setItem(profileDraftKey(profile.userId), snapshot); } catch { /* Storage may be disabled. */ }
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [profile.userId, displayName, age, identityRole, location, bio, instagramHandle, spotifyTopArtist, interests, lookingFor, tribes, photos]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -176,11 +211,16 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         tribes,
         photos
       };
-      if (auth.currentUser && auth.currentUser.uid === profile.userId) {
-        const savedProfile = await saveProfileToFirestore(auth.currentUser.uid, { ...profile, ...updates });
+      const markSaved = (savedProfile: UserProfile) => {
+        savedSnapshot.current = JSON.stringify(updates);
+        try { localStorage.removeItem(profileDraftKey(profile.userId)); } catch { /* Storage may be disabled. */ }
         onProfileUpdated(savedProfile);
         setSavedSuccess(true);
         setTimeout(() => setSavedSuccess(false), 3000);
+      };
+      if (auth.currentUser && auth.currentUser.uid === profile.userId) {
+        const savedProfile = await saveProfileToFirestore(auth.currentUser.uid, { ...profile, ...updates });
+        markSaved(savedProfile);
         return;
       }
       const res = await fetch('/api/profile', {
@@ -193,9 +233,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.profile) throw new Error(data.error || 'Nie udało się zapisać profilu.');
-      onProfileUpdated(data.profile);
-      setSavedSuccess(true);
-      setTimeout(() => setSavedSuccess(false), 3000);
+      markSaved(data.profile);
     } catch (err: any) {
       console.error('Save profile error:', err);
       setSaveError(err?.message || 'Nie udało się zapisać profilu.');
@@ -228,6 +266,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
           )}
         </div>
       </div>
+      {restoredDraft && <p className="px-1 text-xs text-amber-200" role="status">Przywrócono niezapisaną wersję profilu. Naciśnij Zapisz, aby zachować zmiany na koncie.</p>}
 
       {/* Quick Settings Access Card */}
       {onOpenSettings && (
@@ -657,3 +696,4 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
     </div>
   );
 };
+
