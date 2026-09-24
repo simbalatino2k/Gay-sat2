@@ -176,8 +176,8 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         tribes,
         photos
       };
-      if (auth.currentUser) {
-        const savedProfile = await saveProfileToFirestore(auth.currentUser.uid, updates);
+      if (auth.currentUser && auth.currentUser.uid === profile.userId) {
+        const savedProfile = await saveProfileToFirestore(auth.currentUser.uid, { ...profile, ...updates });
         onProfileUpdated(savedProfile);
         setSavedSuccess(true);
         setTimeout(() => setSavedSuccess(false), 3000);
