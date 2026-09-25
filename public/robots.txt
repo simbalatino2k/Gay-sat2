@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /api/
+Disallow: /payment/
+
+Sitemap: https://auragay.com/sitemap.xml
