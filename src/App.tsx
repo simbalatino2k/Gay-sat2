@@ -17,12 +17,13 @@ import { AuraLogo, AuraLogoIcon } from './components/AuraLogo';
 import { motion, AnimatePresence } from 'motion/react';
 import { onIdTokenChanged } from 'firebase/auth';
 import { auraWebSocketUrl } from './lib/websocketEndpoint';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
 import { formatUserAccount, logoutFirebase } from './services/firebaseService';
 import { useBackgroundNotifications } from './hooks/useBackgroundNotifications';
 import { PermissionsPromptModal } from './components/PermissionsPromptModal';
-import { requestAllPermissionsOnLogin, PermissionResults } from './services/permissionsService';
+import { PermissionResults } from './services/permissionsService';
+import { PERMISSIONS_PROMPTED_KEY, isPaymentReturnLocation, shouldOfferPermissionsPrompt } from './lib/permissionsPrompt';
 import { useTranslation, LanguagePickerButton } from './context/LanguageContext';
 import { VideoCallModal } from './components/VideoCallModal';
 import { ProfileSetupRequiredModal } from './components/common/ProfileSetupRequiredModal';
@@ -209,6 +210,10 @@ export default function App() {
             const userDocSnap = await Promise.race([docPromise, docTimeout]);
             if (userDocSnap && 'exists' in userDocSnap && userDocSnap.exists()) {
               firestoreData = userDocSnap.data();
+              if (firestoreData?.permissionsOnboardingHandled === true) {
+                localStorage.setItem(PERMISSIONS_PROMPTED_KEY, 'true');
+                setShowPermissionsModal(false);
+              }
             }
           } catch (docErr: any) {
             console.warn('Notice reading profile from Firestore (continuing with auth details):', docErr?.message || docErr);
@@ -277,59 +282,60 @@ export default function App() {
   const handleAgeVerify = () => {
     localStorage.setItem('aura_18plus_verified', 'true');
     setIsAgeVerified(true);
-    // Pytaj przy 1. uruchomieniu o zgody systemowe
-    if (!localStorage.getItem('aura_permissions_prompted_once')) {
-      setShowPermissionsModal(true);
+    setShowPermissionsModal(shouldOfferPermissionsPrompt(
+      localStorage.getItem(PERMISSIONS_PROMPTED_KEY) === 'true',
+      currentUser?.permissionsOnboardingHandled === true,
+      window.location.pathname,
+      window.location.search
+    ));
+  };
+
+  const markPermissionsHandled = () => {
+    localStorage.setItem(PERMISSIONS_PROMPTED_KEY, 'true');
+    setShowPermissionsModal(false);
+    const firebaseUser = auth.currentUser;
+    if (firebaseUser) {
+      updateDoc(doc(db, 'users', firebaseUser.uid), {
+        permissionsOnboardingHandled: true
+      }).catch((error) => console.warn('Could not sync permission choice:', error));
     }
   };
 
-  // Automatyczne zapytanie o zgody systemowe przy 1. uruchomieniu aplikacji
-  useEffect(() => {
-    if (isAgeVerified && !localStorage.getItem('aura_permissions_prompted_once')) {
-      setShowPermissionsModal(true);
+  const handlePermissionsCompleted = (results: PermissionResults) => {
+    markPermissionsHandled();
+    if (results.coords && currentUser?.profile) {
+      setCurrentUser({
+        ...currentUser,
+        profile: { ...currentUser.profile, lat: results.coords.lat, lng: results.coords.lng }
+      });
     }
-  }, [isAgeVerified]);
+  };
+
+  // Preserve an earlier choice when someone moves from the preview to the public app.
+  useEffect(() => {
+    if (!currentUser || !auth.currentUser || auth.currentUser.uid !== currentUser.id) return;
+    if (currentUser.permissionsOnboardingHandled) {
+      localStorage.setItem(PERMISSIONS_PROMPTED_KEY, 'true');
+      setShowPermissionsModal(false);
+    } else if (localStorage.getItem(PERMISSIONS_PROMPTED_KEY) === 'true') {
+      updateDoc(doc(db, 'users', currentUser.id), {
+        permissionsOnboardingHandled: true
+      }).catch((error) => console.warn('Could not sync permission choice:', error));
+    }
+  }, [currentUser?.id, currentUser?.permissionsOnboardingHandled]);
 
   const handleLoginSuccess = (newToken: string, user: UserAccount) => {
     localStorage.setItem('aura_auth_token', newToken);
     setToken(newToken);
     setCurrentUser(user);
 
-    // Zgodnie z wymaganiem: przy logowaniu odpytaj o zgody jeśli nie były jeszcze przyznane
-    if (!localStorage.getItem('aura_permissions_prompted_once')) {
-      setShowPermissionsModal(true);
-    }
-    sessionStorage.setItem('aura_permissions_prompted_session', 'true');
-    requestAllPermissionsOnLogin(newToken, (coords) => {
-      if (user.profile) {
-        user.profile.lat = coords.lat;
-        user.profile.lng = coords.lng;
-        setCurrentUser({ ...user });
-      }
-    }).then((results) => {
-      if (!results.locationGranted || !results.cameraGranted || !results.microphoneGranted) {
-        setShowPermissionsModal(true);
-      }
-    });
+    setShowPermissionsModal(shouldOfferPermissionsPrompt(
+      localStorage.getItem(PERMISSIONS_PROMPTED_KEY) === 'true',
+      user.permissionsOnboardingHandled === true,
+      window.location.pathname,
+      window.location.search
+    ));
   };
-
-  // Automatyczne zapytanie o uprawnienia przy starcie sesji dla zalogowanego użytkownika
-  useEffect(() => {
-    if (currentUser && token && !sessionStorage.getItem('aura_permissions_prompted_session')) {
-      sessionStorage.setItem('aura_permissions_prompted_session', 'true');
-      requestAllPermissionsOnLogin(token, (coords) => {
-        if (currentUser.profile) {
-          currentUser.profile.lat = coords.lat;
-          currentUser.profile.lng = coords.lng;
-          setCurrentUser({ ...currentUser });
-        }
-      }).then((results) => {
-        if (!results.locationGranted || !results.cameraGranted || !results.microphoneGranted) {
-          setShowPermissionsModal(true);
-        }
-      });
-    }
-  }, [currentUser, token]);
 
   const handleLogout = () => {
     logoutFirebase().catch(() => {});
@@ -388,16 +394,10 @@ export default function App() {
       <>
         <OnboardingFlow onComplete={({ token, user }) => handleLoginSuccess(token, user)} />
         <PermissionsPromptModal
-          isOpen={showPermissionsModal}
+          isOpen={showPermissionsModal && !isPaymentReturnLocation(window.location.pathname, window.location.search)}
           authToken={token}
-          onClose={() => {
-            localStorage.setItem('aura_permissions_prompted_once', 'true');
-            setShowPermissionsModal(false);
-          }}
-          onCompleted={() => {
-            localStorage.setItem('aura_permissions_prompted_once', 'true');
-            setShowPermissionsModal(false);
-          }}
+          onClose={markPermissionsHandled}
+          onCompleted={handlePermissionsCompleted}
         />
       </>
     );
@@ -757,21 +757,10 @@ export default function App() {
 
       {/* System Permissions Request Modal */}
       <PermissionsPromptModal
-        isOpen={showPermissionsModal}
+        isOpen={showPermissionsModal && !isPaymentReturnLocation(window.location.pathname, window.location.search)}
         authToken={token}
-        onClose={() => {
-          localStorage.setItem('aura_permissions_prompted_once', 'true');
-          setShowPermissionsModal(false);
-        }}
-        onCompleted={(results) => {
-          localStorage.setItem('aura_permissions_prompted_once', 'true');
-          setShowPermissionsModal(false);
-          if (results.coords && currentUser?.profile) {
-            currentUser.profile.lat = results.coords.lat;
-            currentUser.profile.lng = results.coords.lng;
-            setCurrentUser({ ...currentUser });
-          }
-        }}
+        onClose={markPermissionsHandled}
+        onCompleted={handlePermissionsCompleted}
       />
 
       {/* Mandatory First-Time Profile Info & Photo Setup Modal */}

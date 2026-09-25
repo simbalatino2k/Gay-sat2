@@ -1,7 +1,7 @@
 /**
  * permissionsService.ts
  * Manages runtime requests for Location (GPS), Camera (Wideo/Aparat), and Microphone (Audio).
- * Designed to execute immediately upon login and sync with user profile and radar map.
+ * Called only after a person selects the permissions they want to enable.
  */
 
 export interface PermissionResults {
@@ -65,7 +65,7 @@ export async function requestMediaPermissions(
 }
 
 /**
- * Requests all 3 permissions simultaneously upon login:
+ * Requests only the permissions selected in the onboarding dialog:
  * 1. Geolocation (GPS Radar & Cruising spots)
  * 2. Microphone (Voice notes & audio calls)
  * 3. Camera (Video verification & photos)
@@ -75,8 +75,6 @@ export async function requestAllPermissionsOnLogin(
   onLocationUpdate?: (coords: { lat: number; lng: number }) => void,
   selected = { location: false, camera: false, microphone: false }
 ): Promise<PermissionResults> {
-  localStorage.setItem('aura_permissions_prompted_once', 'true');
-
   // Request Location first
   const locResult = selected.location ? await requestLocationPermission() : { granted: false, coords: undefined };
 

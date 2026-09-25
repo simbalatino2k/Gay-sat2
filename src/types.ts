@@ -110,6 +110,7 @@ export interface UserAccount {
   profile: UserProfile;
   isPremium?: boolean;
   premiumExpiresAt?: string;
+  permissionsOnboardingHandled?: boolean;
 }
 
 export interface LikeRecord {
@@ -584,4 +585,3 @@ export interface StoreProduct {
   billingPeriod: 'P1M' | 'P3M' | 'P1Y';
   freeTrialPeriod?: string;
 }
-

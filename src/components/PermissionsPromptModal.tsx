@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MapPin, Camera, Mic, CheckCircle2, Shield, Flame, X, Sparkles } from 'lucide-react';
 import { requestAllPermissionsOnLogin, PermissionResults } from '../services/permissionsService';
+import { PERMISSIONS_PROMPTED_KEY } from '../lib/permissionsPrompt';
 
 interface PermissionsPromptModalProps {
   authToken: string | null;
@@ -18,14 +19,13 @@ export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
   const [isRequesting, setIsRequesting] = useState(false);
   const [results, setResults] = useState<PermissionResults | null>(null);
   const [selected, setSelected] = useState({ location: false, camera: false, microphone: false });
-  const dismiss = () => {
-    localStorage.setItem('aura_permissions_prompted_once', 'true');
-    onClose();
-  };
+  const dismiss = () => onClose();
 
   if (!isOpen) return null;
 
   const handleGrantAll = async () => {
+    // A selected permission is a user response even if the browser prompt is dismissed.
+    localStorage.setItem(PERMISSIONS_PROMPTED_KEY, 'true');
     setIsRequesting(true);
     try {
       const res = await requestAllPermissionsOnLogin(authToken, undefined, selected);

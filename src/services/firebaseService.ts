@@ -71,6 +71,7 @@ export function formatUserAccount(
     role: firestoreData?.role || 'USER',
     status: firestoreData?.status || 'ACTIVE',
     isAgeVerified18Plus: true,
+    permissionsOnboardingHandled: firestoreData?.permissionsOnboardingHandled === true,
     createdAt: firestoreData?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     profile: defaultProfile
