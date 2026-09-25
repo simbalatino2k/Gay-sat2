@@ -1,4 +1,4 @@
-import { buildStripeCheckout } from './src/lib/stripeCheckout';
+import { buildStripeCheckout, checkoutConfirmationRedirect, classifyCheckoutSession, isCheckoutSessionId } from './src/lib/stripeCheckout';
 import { moderateText } from './src/lib/moderation';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
@@ -2241,6 +2241,10 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
       buildStripeCheckout(req.user!.id, planId, process.env)
     );
 
+    // Firebase Hosting forwards this HttpOnly cookie to Cloud Run on the
+    // browser's return from Stripe, allowing the confirmation URL to be gated
+    // before the SPA (and any page-view conversion tag) is served.
+    setMediaSessionCookie(res, req.token!);
     res.json({ url: session.url, checkoutUrl: session.url });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Payment processing error' });
@@ -2248,6 +2252,59 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
 };
 app.post('/api/payments/create-checkout-session', authenticateToken, handleCheckout);
 app.post('/api/payments/checkout-session', authenticateToken, handleCheckout);
+
+async function getCheckoutConfirmationStatus(sessionId: string, userId: string) {
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) throw new Error('Stripe is not configured');
+  const Stripe = (await import('stripe')).default;
+  const stripe = new Stripe(stripeKey);
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  return classifyCheckoutSession(session, userId);
+}
+
+// A session ID in a URL never proves payment. Verify it against Stripe and the
+// signed-in account before serving the success page at all. Unverified visits
+// are redirected away, so URL-based conversion rules cannot count them.
+app.get('/payment/confirmation', async (req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.redirect(303, '/?payment=unverified');
+
+  let user: UserAccount | null = null;
+  for (const cookieToken of mediaSessionTokens(req.headers.cookie)) {
+    user = await store.getUserByToken(cookieToken);
+    if (user?.status === 'ACTIVE') break;
+    user = null;
+  }
+  if (!user) return res.redirect(303, checkoutConfirmationRedirect('unauthenticated')!);
+
+  try {
+    const status = await getCheckoutConfirmationStatus(sessionId, user.id);
+    const destination = checkoutConfirmationRedirect(status);
+    if (destination) return res.redirect(303, destination);
+    return next();
+  } catch (error) {
+    console.error('[Stripe Checkout] Return verification unavailable:', error);
+    return res.redirect(303, '/payment/pending');
+  }
+});
+
+app.get('/api/payments/checkout-confirmation', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.status(400).json({ status: 'not_found' });
+
+  try {
+    const status = await getCheckoutConfirmationStatus(sessionId, req.user!.id);
+    if (status === 'not_found') return res.status(404).json({ status });
+    const entitlement = status === 'paid' ? await store.getUserEntitlements(req.user!.id) : null;
+    return res.json({ status, vipActive: status === 'paid' && entitlement?.premium === true });
+  } catch (error) {
+    console.error('[Stripe Checkout] Confirmation check unavailable:', error);
+    return res.status(503).json({ status: 'unavailable' });
+  }
+});
 
 // Stripe Webhook Endpoint (Protected by cryptographic signature and idempotent processing)
 app.post('/api/payments/webhook', async (req: Request, res: Response) => {

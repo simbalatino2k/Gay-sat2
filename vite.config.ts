@@ -52,6 +52,9 @@ export default defineConfig(() => {
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          // These navigations must reach Cloud Run: it verifies Stripe before
+          // serving the confirmation page used for URL-based conversions.
+          navigateFallbackDenylist: [/^\/payment\/confirmation(?:\/|$)/],
         },
         devOptions: {
           enabled: false,

@@ -26,6 +26,7 @@ import { requestAllPermissionsOnLogin, PermissionResults } from './services/perm
 import { useTranslation, LanguagePickerButton } from './context/LanguageContext';
 import { VideoCallModal } from './components/VideoCallModal';
 import { ProfileSetupRequiredModal } from './components/common/ProfileSetupRequiredModal';
+import { CheckoutConfirmation } from './components/billing/CheckoutConfirmation';
 
 export default function App() {
   const { t } = useTranslation();
@@ -359,6 +360,10 @@ export default function App() {
     }
   };
 
+  if (window.location.pathname === '/payment/pending') {
+    return <CheckoutConfirmation pending />;
+  }
+
   // Age Gate Modal check
   if (!isAgeVerified) {
     return <AgeGateModal onVerifyAge={handleAgeVerify} />;
@@ -396,6 +401,10 @@ export default function App() {
         />
       </>
     );
+  }
+
+  if (window.location.pathname === '/payment/confirmation') {
+    return <CheckoutConfirmation token={token} />;
   }
 
   const isAdmin = currentUser?.role === 'SUPERADMIN' || currentUser?.role === 'MODERATOR';

@@ -22,7 +22,34 @@ export function buildStripeCheckout(userId: string, planId: unknown, env: Record
     metadata,
     subscription_data: { metadata },
     line_items: [{ price, quantity: 1 }],
-    success_url: `${base.origin}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
+    success_url: `${base.origin}/payment/confirmation?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${base.origin}/?payment=cancelled`
   };
+}
+
+export type CheckoutConfirmationStatus = 'paid' | 'pending' | 'failed' | 'not_found';
+
+export function checkoutConfirmationRedirect(status: CheckoutConfirmationStatus | 'unauthenticated'): string | null {
+  if (status === 'paid') return null;
+  if (status === 'pending') return '/payment/pending';
+  if (status === 'unauthenticated') return '/?payment=signin';
+  return '/?payment=unverified';
+}
+
+// Only Stripe's server-side Checkout Session response may authorize a paid result.
+// The return URL, including its session_id parameter, is never proof of payment.
+export function classifyCheckoutSession(
+  session: Pick<Stripe.Checkout.Session, 'client_reference_id' | 'metadata' | 'mode' | 'status' | 'payment_status' | 'subscription'>,
+  userId: string
+): CheckoutConfirmationStatus {
+  if (session.client_reference_id !== userId || session.metadata?.userId !== userId || session.mode !== 'subscription') {
+    return 'not_found';
+  }
+  if (session.status === 'expired') return 'failed';
+  if (session.status === 'complete' && session.payment_status === 'paid' && session.subscription) return 'paid';
+  return 'pending';
+}
+
+export function isCheckoutSessionId(value: unknown): value is string {
+  return typeof value === 'string' && /^cs_[A-Za-z0-9_]{8,255}$/.test(value);
 }
