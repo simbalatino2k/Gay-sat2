@@ -2238,7 +2238,7 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
     const stripe = new Stripe(stripeKey);
 
     const session = await stripe.checkout.sessions.create(
-      buildStripeCheckout(req.user!.id, planId, process.env)
+      buildStripeCheckout(req.user!.id, planId, process.env, req.headers.host, req.headers['x-forwarded-host'], req.headers.origin)
     );
 
     // Firebase Hosting forwards this HttpOnly cookie to Cloud Run on the

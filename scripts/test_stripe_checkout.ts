@@ -6,6 +6,23 @@ assert.deepEqual(monthly.line_items, [{ price: 'price_monthly', quantity: 1 }]);
 assert.equal(monthly.payment_method_types, undefined);
 assert.deepEqual(monthly.metadata, monthly.subscription_data?.metadata);
 assert.equal(monthly.success_url, 'https://auragay.com/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+const webAppEnv = { ...env, APP_BASE_URL: 'https://aura-dating-gay-mab.web.app' };
+assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv, 'auragay.com').success_url,
+  'https://auragay.com/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv, 'auragay.com').cancel_url,
+  'https://auragay.com/?payment=cancelled');
+assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', env, 'aura-dating-gay-mab.web.app').success_url,
+  'https://aura-dating-gay-mab.web.app/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv, 'aura-z6bppztrpa-nw.a.run.app', 'auragay.com').success_url,
+  'https://auragay.com/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv, 'auragay.com', 'aura-dating-gay-mab.web.app', 'https://auragay.com').success_url,
+  'https://auragay.com/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+assert.throws(() => buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv,
+  'aura-z6bppztrpa-nw.a.run.app', 'aura-dating-gay-mab.web.app', 'https://auragay.com'));
+for (const untrustedHost of ['auragay.com.evil.test', 'evil.test', 'auragay.com:444', 'auragay.com/path', 'auragay.com, evil.test']) {
+  assert.equal(buildStripeCheckout('u', 'aura_vip_monthly', webAppEnv, untrustedHost).success_url,
+    'https://aura-dating-gay-mab.web.app/payment/confirmation?session_id={CHECKOUT_SESSION_ID}');
+}
 assert.equal(buildStripeCheckout('user-test', 'aura_vip_annual', env).line_items?.[0].price, 'price_annual');
 for (const plan of ['bogus', 'toString', '__proto__', 1]) assert.throws(() => buildStripeCheckout('u', plan, env));
 for (const url of ['', 'http://auragay.com', 'https://user:password@auragay.com', 'https://auragay.com/path', 'https://auragay.com?redirect=evil']) {

@@ -1,6 +1,23 @@
 import type Stripe from 'stripe';
 
-export function buildStripeCheckout(userId: string, planId: unknown, env: Record<string, string | undefined>): Stripe.Checkout.SessionCreateParams {
+// The confirmation cookie belongs to the host that starts Checkout. Firebase
+// Hosting may forward its public host through X-Forwarded-Host to Cloud Run.
+const CHECKOUT_HOSTS = new Set(['auragay.com', 'aura-dating-gay-mab.web.app']);
+
+function checkoutOriginForHost(host: unknown): string | null {
+  if (typeof host !== 'string') return null;
+  const normalized = host.toLowerCase().replace(/:443$/, '');
+  return CHECKOUT_HOSTS.has(normalized) ? `https://${normalized}` : null;
+}
+
+export function buildStripeCheckout(
+  userId: string,
+  planId: unknown,
+  env: Record<string, string | undefined>,
+  requestHost?: unknown,
+  forwardedHost?: unknown,
+  requestOrigin?: unknown
+): Stripe.Checkout.SessionCreateParams {
   const plans: Record<string, string | undefined> = {
     aura_vip_monthly: env.STRIPE_PRICE_MONTHLY,
     aura_vip_three_month: env.STRIPE_PRICE_THREE_MONTH,
@@ -14,6 +31,13 @@ export function buildStripeCheckout(userId: string, planId: unknown, env: Record
   if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash || base.pathname !== '/') {
     throw new Error('APP_BASE_URL must be the HTTPS application origin');
   }
+  const returnOrigin = checkoutOriginForHost(requestHost) || checkoutOriginForHost(forwardedHost) || base.origin;
+  // A browser's POST Origin must agree with the selected host. This prevents
+  // a spoofed forwarding header from sending the customer to another domain
+  // where their host-only confirmation cookie does not exist.
+  if (requestOrigin !== undefined && requestOrigin !== returnOrigin) {
+    throw new Error('Checkout request origin does not match return host');
+  }
   const metadata = { userId, planId };
   return {
     mode: 'subscription',
@@ -22,8 +46,8 @@ export function buildStripeCheckout(userId: string, planId: unknown, env: Record
     metadata,
     subscription_data: { metadata },
     line_items: [{ price, quantity: 1 }],
-    success_url: `${base.origin}/payment/confirmation?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${base.origin}/?payment=cancelled`
+    success_url: `${returnOrigin}/payment/confirmation?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${returnOrigin}/?payment=cancelled`
   };
 }
 
