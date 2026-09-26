@@ -1,4 +1,4 @@
-import { buildStripeCheckout, checkoutConfirmationRedirect, classifyCheckoutSession, isCheckoutSessionId } from './src/lib/stripeCheckout';
+import { buildStripeCheckout, buildProfileBoostCheckout, checkoutConfirmationRedirect, classifyCheckoutSession, isCheckoutSessionId, isPaidProfileBoostSession, PROFILE_BOOST_PRODUCT_ID } from './src/lib/stripeCheckout';
 import { moderateText } from './src/lib/moderation';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
@@ -1250,25 +1250,23 @@ app.put('/api/users/status-mode', authenticateToken, async (req: AuthenticatedRe
   }
 });
 
-// Profile Boost endpoint: increases visibility in the Discover feed for 1 hour
-app.post('/api/profile/boost', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+// Legacy free activation is disabled. Only the signed paid webhook can grant a boost.
+app.post('/api/profile/boost', authenticateToken, (_req: AuthenticatedRequest, res: Response) => {
+  res.status(410).json({ error: 'Profile Booster now requires a paid Checkout purchase.' });
+});
+
+app.get('/api/profile/boost/status', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
   try {
-    const oneHourMs = 60 * 60 * 1000;
-    const boostExpiresAt = new Date(Date.now() + oneHourMs).toISOString();
-
-    const updated = await store.updateProfile(req.user!.id, {
-      isBoosted: true,
-      boostExpiresAt
-    }, { allowBoost: true });
-
-    res.json({
-      success: true,
-      message: 'Profile successfully boosted for 1 hour!',
-      boostExpiresAt,
-      profile: updated
+    const user = await store.getUserById(req.user!.id);
+    const boostExpiresAt = user?.profile.boostExpiresAt;
+    return res.json({
+      isBoosted: Boolean(boostExpiresAt && new Date(boostExpiresAt).getTime() > Date.now()),
+      boostExpiresAt: boostExpiresAt || null
     });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Failed to boost profile' });
+  } catch (error) {
+    console.error('[Profile Booster] Status unavailable:', error);
+    return res.status(503).json({ error: 'Profile Booster status unavailable' });
   }
 });
 
@@ -2253,6 +2251,53 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
 app.post('/api/payments/create-checkout-session', authenticateToken, handleCheckout);
 app.post('/api/payments/checkout-session', authenticateToken, handleCheckout);
 
+app.post('/api/profile/boost/checkout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(503).json({ error: 'Płatności Boosterem są teraz niedostępne.' });
+  try {
+    const Stripe = (await import('stripe')).default;
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.create(
+      buildProfileBoostCheckout(req.user!.id, process.env, req.headers.host, req.headers['x-forwarded-host'], req.headers.origin)
+    );
+    setMediaSessionCookie(res, req.token!);
+    return res.json({ url: session.url });
+  } catch (error: any) {
+    console.error('[Profile Booster] Checkout creation failed:', error);
+    return res.status(503).json({ error: 'Nie udało się rozpocząć płatności Boosterem.' });
+  }
+});
+
+app.get('/api/profile/boost/checkout-confirmation', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.status(400).json({ status: 'not_found' });
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(503).json({ status: 'unavailable' });
+  try {
+    const Stripe = (await import('stripe')).default;
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.client_reference_id !== req.user!.id || session.metadata?.userId !== req.user!.id ||
+        session.metadata?.productId !== PROFILE_BOOST_PRODUCT_ID || session.mode !== 'payment') {
+      return res.status(404).json({ status: 'not_found' });
+    }
+    if (session.status === 'expired') return res.json({ status: 'failed' });
+    if (session.status === 'complete' && session.payment_status === 'paid' && !isPaidProfileBoostSession(session)) {
+      return res.json({ status: 'failed' });
+    }
+    if (!isPaidProfileBoostSession(session)) return res.json({ status: 'payment_pending' });
+    const boostExpiresAt = await store.getProfileBoostPurchase(sessionId, req.user!.id);
+    if (boostExpiresAt && new Date(boostExpiresAt).getTime() <= Date.now()) {
+      return res.json({ status: 'expired', boostExpiresAt });
+    }
+    return res.json(boostExpiresAt ? { status: 'active', boostExpiresAt } : { status: 'activation_pending' });
+  } catch (error) {
+    console.error('[Profile Booster] Confirmation unavailable:', error);
+    return res.status(503).json({ status: 'unavailable' });
+  }
+});
+
 async function getCheckoutConfirmationStatus(sessionId: string, userId: string) {
   const stripeKey = process.env.STRIPE_SECRET_KEY;
   if (!stripeKey) throw new Error('Stripe is not configured');
@@ -2348,6 +2393,15 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
       case 'checkout.session.async_payment_succeeded':
       case 'checkout.session.completed': {
         const session = event.data.object;
+        if (session.mode === 'payment' && session.metadata?.productId === PROFILE_BOOST_PRODUCT_ID) {
+          if (isCheckoutSessionId(session.id) && isPaidProfileBoostSession(session)) {
+            const result = await store.fulfillProfileBoostPurchase(session.id, session.client_reference_id, event.id);
+            console.log(`[Stripe Webhook] Profile Booster ${result.activated ? 'activated' : 'already fulfilled'} for user ${session.client_reference_id}`);
+          } else {
+            console.warn('[Stripe Webhook] Rejected Profile Booster session with invalid identity, amount, currency, or payment status');
+          }
+          break;
+        }
         if (session.mode !== 'subscription' || session.payment_status !== 'paid') break;
         const customerId = session.customer as string;
         const subscriptionId = session.subscription as string;

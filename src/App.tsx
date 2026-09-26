@@ -28,6 +28,7 @@ import { useTranslation, LanguagePickerButton } from './context/LanguageContext'
 import { VideoCallModal } from './components/VideoCallModal';
 import { ProfileSetupRequiredModal } from './components/common/ProfileSetupRequiredModal';
 import { CheckoutConfirmation } from './components/billing/CheckoutConfirmation';
+import { BoostConfirmation } from './components/billing/BoostConfirmation';
 
 export default function App() {
   const { t } = useTranslation();
@@ -220,6 +221,22 @@ export default function App() {
           }
 
           const formattedUser = formatUserAccount(fbUser, firestoreData);
+          // Paid visibility is owned by the application server, not Firestore.
+          formattedUser.profile.isBoosted = false;
+          formattedUser.profile.boostExpiresAt = undefined;
+          try {
+            const boostResponse = await fetch('/api/profile/boost/status', {
+              headers: { Authorization: `Bearer ${idToken}` },
+              cache: 'no-store'
+            });
+            if (boostResponse.ok) {
+              const boost = await boostResponse.json();
+              formattedUser.profile.isBoosted = boost.isBoosted === true;
+              formattedUser.profile.boostExpiresAt = typeof boost.boostExpiresAt === 'string' ? boost.boostExpiresAt : undefined;
+            }
+          } catch (boostError) {
+            console.warn('Profile Booster status is temporarily unavailable:', boostError);
+          }
           setCurrentUser(formattedUser);
           setToken(idToken);
           localStorage.setItem('aura_auth_token', idToken);
@@ -405,6 +422,10 @@ export default function App() {
 
   if (window.location.pathname === '/payment/confirmation') {
     return <CheckoutConfirmation token={token} />;
+  }
+
+  if (window.location.pathname === '/boost/confirmation') {
+    return <BoostConfirmation token={token} />;
   }
 
   const isAdmin = currentUser?.role === 'SUPERADMIN' || currentUser?.role === 'MODERATOR';

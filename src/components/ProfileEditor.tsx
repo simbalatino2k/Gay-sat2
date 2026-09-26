@@ -12,8 +12,8 @@ import {
 } from '../services/platformBackupService';
 import { auth } from '../lib/firebase';
 import { saveProfileToFirestore } from '../services/firebaseService';
+import { Capacitor } from '@capacitor/core';
 import { AuraVerifiedBadge } from './common/AuraVerifiedBadge';
-import { ProfileBoostOverlay } from './common/ProfileBoostOverlay';
 
 interface ProfileEditorProps {
   profile: UserProfile;
@@ -58,12 +58,26 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
 
   // Profile Boost state
   const [isBoosting, setIsBoosting] = useState(false);
-  const [showBoostOverlay, setShowBoostOverlay] = useState(false);
+  const [boostError, setBoostError] = useState<string | null>(null);
   const [boostExpiresAt, setBoostExpiresAt] = useState<string | undefined>(profile.boostExpiresAt);
-  const [isBoostActive, setIsBoostActive] = useState<boolean>(() => {
-    if (!profile.boostExpiresAt) return Boolean(profile.isBoosted);
-    return new Date(profile.boostExpiresAt).getTime() > Date.now();
-  });
+  const [isBoostActive, setIsBoostActive] = useState<boolean>(() => Boolean(profile.boostExpiresAt && new Date(profile.boostExpiresAt).getTime() > Date.now()));
+  const isNativeApp = Capacitor.isNativePlatform();
+
+  useEffect(() => {
+    setBoostExpiresAt(profile.boostExpiresAt);
+    setIsBoostActive(Boolean(profile.boostExpiresAt && new Date(profile.boostExpiresAt).getTime() > Date.now()));
+  }, [profile.boostExpiresAt]);
+
+  useEffect(() => {
+    if (!boostExpiresAt) return;
+    const delay = new Date(boostExpiresAt).getTime() - Date.now();
+    if (delay <= 0) {
+      setIsBoostActive(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setIsBoostActive(false), Math.min(delay, 2147483647));
+    return () => window.clearTimeout(timer);
+  }, [boostExpiresAt]);
 
   // Platform Backup & Local Draft State
   const storageKey = getProfileDraftStorageKey(profile.userId || profile.id || 'current');
@@ -314,13 +328,12 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
   };
 
   const handleTriggerBoost = async () => {
-    if (isBoosting) return;
+    if (isBoosting || isNativeApp) return;
     setIsBoosting(true);
-    setSaveError(null);
+    setBoostError(null);
 
     try {
-      // 1. Call Profile Boost API (backed by PostgreSQL store and prioritized in Discover feed)
-      const res = await fetch('/api/profile/boost', {
+      const res = await fetch('/api/profile/boost/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -329,7 +342,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
       });
 
       if (!res.ok) {
-        let errDesc = 'Nie udało się aktywować dopalacza profilu.';
+        let errDesc = 'Nie udało się rozpocząć płatności Boosterem.';
         try {
           const errData = await res.json();
           if (errData?.error) errDesc = errData.error;
@@ -338,31 +351,13 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
       }
 
       const data = await res.json();
-      const updatedProfile: UserProfile = data.profile || {
-        ...profile,
-        isBoosted: true,
-        boostExpiresAt: data.boostExpiresAt
-      };
-
-      // 2. Dual-write to Firebase Firestore if logged in
-      const currentFbUser = auth.currentUser;
-      const targetUid = currentFbUser?.uid || profile.userId || profile.id;
-      if (targetUid) {
-        try {
-          await saveProfileToFirestore(targetUid, updatedProfile);
-        } catch (fbErr) {
-          console.warn('Notice syncing boost to Firestore:', fbErr);
-        }
+      if (typeof data.url !== 'string' || !data.url.startsWith('https://checkout.stripe.com/')) {
+        throw new Error('Serwer nie zwrócił bezpiecznego adresu płatności.');
       }
-
-      // 3. Update local state & trigger cinematic overlay
-      setBoostExpiresAt(data.boostExpiresAt);
-      setIsBoostActive(true);
-      setShowBoostOverlay(true);
-      onProfileUpdated(updatedProfile);
+      window.location.assign(data.url);
     } catch (err: any) {
       console.error('Boost trigger error:', err);
-      setSaveError(err?.message || 'Błąd podczas aktywacji doładowania profilu.');
+      setBoostError(err?.message || 'Nie udało się rozpocząć płatności Boosterem.');
     } finally {
       setIsBoosting(false);
     }
@@ -491,7 +486,8 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         <AuraVerifiedBadge variant="card" />
       )}
 
-      {/* Profile Boost: 1-Hour Visibility Accelerator Card */}
+      {/* Paid Profile Booster */}
+      {(!isNativeApp || isBoostActive) && (
       <div className="relative overflow-hidden rounded-[26px] border border-amber-500/35 bg-gradient-to-r from-amber-950/40 via-[#141224]/90 to-purple-950/40 p-4 shadow-[0_0_30px_rgba(245,158,11,0.18)] transition-all">
         {/* Dynamic sweeping shimmer overlay */}
         <div className="absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/10 to-transparent -translate-x-full animate-shimmer-pass pointer-events-none" />
@@ -517,7 +513,7 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
                 {isBoostActive ? (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/40 text-[9.5px] font-black text-amber-300 uppercase tracking-wider shadow-[0_0_10px_rgba(245,158,11,0.4)]">
                     <Radio className="w-3 h-3 text-amber-300 animate-pulse" />
-                    Aktywny (1 godz.)
+                    Aktywny do {boostExpiresAt ? new Date(boostExpiresAt).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'końca okresu'}
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-400/30 text-[9.5px] font-extrabold text-purple-300 uppercase tracking-wider">
@@ -528,13 +524,14 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
               </div>
               <p className="text-[11.5px] text-slate-300 mt-0.5 leading-snug">
                 {isBoostActive
-                  ? 'Twój profil jest priorytetowo wyświetlany na samej górze siatki Discover oraz w radarze.'
-                  : 'Wystrzel swój profil na szczyt Discover i radaru w okolicy na 1 godzinę.'}
+                  ? isNativeApp ? 'Twój profil jest priorytetowo wyświetlany w Discover.' : 'Twój profil jest priorytetowo wyświetlany w Discover. Kolejny zakup doda 12 godzin.'
+                  : 'Wyróżnij profil w Discover na 12 godzin. Jednorazowa płatność 1,99 €.'}
               </p>
             </div>
           </div>
 
           {/* Boost Trigger Button */}
+          {!isNativeApp && (
           <button
             type="button"
             onClick={handleTriggerBoost}
@@ -548,22 +545,25 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
             {isBoosting ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
-                <span>Aktywacja...</span>
+                <span>Przejście do płatności...</span>
               </>
             ) : isBoostActive ? (
               <>
                 <Rocket className="w-4 h-4 text-amber-300 animate-bounce" />
-                <span>Odśwież Boost</span>
+                <span>Dodaj 12 h — 1,99 €</span>
               </>
             ) : (
               <>
                 <Zap className="w-4 h-4 text-white fill-current" />
-                <span>Aktywuj Boost</span>
+                <span>Kup Booster — 1,99 €</span>
               </>
             )}
           </button>
+          )}
         </div>
+        {boostError && <p className="relative mt-3 text-xs text-rose-300" role="alert">{boostError}</p>}
       </div>
+      )}
 
       {saveError && (
         <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5 text-xs text-rose-200 shadow-md animate-in fade-in">
@@ -1031,14 +1031,6 @@ export const ProfileEditor: React.FC<ProfileEditorProps> = ({
         }}
       />
 
-      {/* Cinematic Profile Boost Animation Overlay */}
-      {showBoostOverlay && (
-        <ProfileBoostOverlay
-          onClose={() => setShowBoostOverlay(false)}
-          boostExpiresAt={boostExpiresAt}
-          durationMinutes={60}
-        />
-      )}
     </div>
   );
 };

@@ -2,6 +2,7 @@ import { Pool, PoolConfig } from 'pg';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { PROFILE_BOOST_DURATION_HOURS } from '../lib/stripeCheckout';
 import {
   UserAccount,
   UserProfile,
@@ -474,6 +475,7 @@ export async function initPostgresSchema(): Promise<boolean> {
         is_verified BOOLEAN DEFAULT FALSE,
         is_premium BOOLEAN DEFAULT FALSE,
         premium_tier VARCHAR(64),
+        boost_expires_at TIMESTAMPTZ,
         privacy JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -629,6 +631,16 @@ export async function initPostgresSchema(): Promise<boolean> {
         processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS profile_boost_purchases (
+        session_id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event_id VARCHAR(255) NOT NULL,
+        amount_cents INT NOT NULL CHECK (amount_cents = 199),
+        currency VARCHAR(3) NOT NULL CHECK (currency = 'eur'),
+        activated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS admin_audit_logs (
         id VARCHAR(128) PRIMARY KEY,
         admin_id VARCHAR(128) NOT NULL,
@@ -693,6 +705,7 @@ export async function initPostgresSchema(): Promise<boolean> {
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS mode_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS boost_expires_at TIMESTAMPTZ;
       ALTER TABLE sessions ALTER COLUMN token TYPE TEXT;
       ALTER TABLE users ALTER COLUMN tribe TYPE VARCHAR(128);
       ALTER TABLE users ALTER COLUMN looking_for TYPE VARCHAR(255);
@@ -1150,6 +1163,53 @@ export class PostgresStoreAdapter {
     );
   }
 
+  public async fulfillProfileBoostPurchase(sessionId: string, userId: string, eventId: string): Promise<{ activated: boolean; boostExpiresAt: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // The user lock serializes purchases for the same profile. The unique
+      // Checkout session key also deduplicates different Stripe event IDs.
+      const userResult = await client.query(
+        'SELECT boost_expires_at, CURRENT_TIMESTAMP AS database_now FROM users WHERE id = $1 FOR UPDATE',
+        [userId]
+      );
+      if (!userResult.rows.length) throw new Error('Profile boost customer not found');
+
+      const existing = userResult.rows[0].boost_expires_at as Date | null;
+      const databaseNow = userResult.rows[0].database_now as Date;
+      const expiresAt = new Date(Math.max(databaseNow.getTime(), existing?.getTime() || 0) + PROFILE_BOOST_DURATION_HOURS * 60 * 60 * 1000);
+      const inserted = await client.query(
+        `INSERT INTO profile_boost_purchases (session_id, user_id, event_id, amount_cents, currency, expires_at)
+         VALUES ($1, $2, $3, 199, 'eur', $4)
+         ON CONFLICT (session_id) DO NOTHING RETURNING expires_at`,
+        [sessionId, userId, eventId, expiresAt]
+      );
+      if (!inserted.rows.length) {
+        const prior = await client.query('SELECT user_id, expires_at FROM profile_boost_purchases WHERE session_id = $1', [sessionId]);
+        if (prior.rows[0]?.user_id !== userId) throw new Error('Profile boost purchase owner mismatch');
+        await client.query('COMMIT');
+        return { activated: false, boostExpiresAt: (prior.rows[0].expires_at as Date).toISOString() };
+      }
+
+      await client.query('UPDATE users SET boost_expires_at = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [userId, expiresAt]);
+      await client.query('COMMIT');
+      return { activated: true, boostExpiresAt: expiresAt.toISOString() };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getProfileBoostPurchase(sessionId: string, userId: string): Promise<string | null> {
+    const result = await this.pool.query(
+      'SELECT expires_at FROM profile_boost_purchases WHERE session_id = $1 AND user_id = $2',
+      [sessionId, userId]
+    );
+    return result.rows[0]?.expires_at?.toISOString() || null;
+  }
+
   public async upsertStoreSubscription(entitlement: UserEntitlement): Promise<void> {
     const client = await this.pool.connect();
     try {
@@ -1376,8 +1436,8 @@ export class PostgresStoreAdapter {
         relationshipStatus: typeof profileExtras.relationshipStatus === 'string' ? profileExtras.relationshipStatus : undefined,
         instagramHandle: typeof profileExtras.instagramHandle === 'string' ? profileExtras.instagramHandle : undefined,
         spotifyTopArtist: typeof profileExtras.spotifyTopArtist === 'string' ? profileExtras.spotifyTopArtist : undefined,
-        isBoosted: profileExtras.isBoosted === true,
-        boostExpiresAt: typeof profileExtras.boostExpiresAt === 'string' ? profileExtras.boostExpiresAt : undefined,
+        isBoosted: row.boost_expires_at instanceof Date && row.boost_expires_at.getTime() > Date.now(),
+        boostExpiresAt: row.boost_expires_at instanceof Date ? row.boost_expires_at.toISOString() : undefined,
         distanceKm: 0,
         photos,
         verified: !!row.is_verified,

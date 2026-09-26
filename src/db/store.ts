@@ -4,6 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
 import { getPostgresPool, initPostgresSchema, PostgresStoreAdapter } from './postgres';
+import { PROFILE_BOOST_DURATION_HOURS } from '../lib/stripeCheckout';
 import { purgeAllUserMediaDurable, deleteMediaRecordDurable, getMediaRecordDurable } from '../lib/storage';
 import {
   UserAccount,
@@ -164,6 +165,7 @@ export class DataStore {
   private userPasswords: Map<string, string> = new Map(); // userId -> salt:scryptHash
   private passwordResets: Map<string, { userId: string; expiresAt: string; used: boolean }> = new Map();
   private stripeEvents: Set<string> = new Set();
+  private profileBoostPurchases: Map<string, { userId: string; expiresAt: string }> = new Map();
   private stripeSubscriptions: Map<string, { customerId: string; subscriptionId: string; planId: string; status: string; currentPeriodEnd?: string }> = new Map();
   private localStoreSubscriptions: Map<string, UserEntitlement> = new Map(); // development fallback
   private localStoreEvents: Set<string> = new Set();
@@ -219,6 +221,7 @@ export class DataStore {
         userPasswords: Array.from(this.userPasswords.entries()),
         passwordResets: Array.from(this.passwordResets.entries()),
         stripeSubscriptions: Array.from(this.stripeSubscriptions.entries()),
+        profileBoostPurchases: Array.from(this.profileBoostPurchases.entries()),
         localStoreSubscriptions: Array.from(this.localStoreSubscriptions.entries()),
         localStoreEvents: Array.from(this.localStoreEvents),
         vaultAccess: Array.from(this.vaultAccess, ([ownerId, granted]) => [ownerId, Array.from(granted)]),
@@ -259,6 +262,7 @@ export class DataStore {
       this.userPasswords = new Map(data.userPasswords || []);
       this.passwordResets = new Map(data.passwordResets || []);
       this.stripeSubscriptions = new Map(data.stripeSubscriptions || []);
+      this.profileBoostPurchases = new Map(data.profileBoostPurchases || []);
       this.localStoreSubscriptions = new Map(data.localStoreSubscriptions || []);
       this.localStoreEvents = new Set(data.localStoreEvents || []);
       this.vaultAccess = new Map((data.vaultAccess || []).map(([ownerId, granted]: [string, string[]]) => [ownerId, new Set(granted)]));
@@ -953,6 +957,35 @@ export class DataStore {
     this.saveToDisk();
   }
 
+  public async fulfillProfileBoostPurchase(sessionId: string, userId: string, eventId: string): Promise<{ activated: boolean; boostExpiresAt: string }> {
+    this.ensureWriteAllowed();
+    if (this.pgAdapter) {
+      const result = await this.pgAdapter.fulfillProfileBoostPurchase(sessionId, userId, eventId);
+      await this.getUserById(userId); // Refresh this instance after the committed transaction.
+      return result;
+    }
+
+    const previous = this.profileBoostPurchases.get(sessionId);
+    if (previous) {
+      if (previous.userId !== userId) throw new Error('Profile boost purchase owner mismatch');
+      return { activated: false, boostExpiresAt: previous.expiresAt };
+    }
+    const user = this.users.get(userId);
+    if (!user) throw new Error('Profile boost customer not found');
+    const expiresAt = new Date(Math.max(Date.now(), Date.parse(user.profile.boostExpiresAt || '') || 0) + PROFILE_BOOST_DURATION_HOURS * 60 * 60 * 1000).toISOString();
+    user.profile.isBoosted = true;
+    user.profile.boostExpiresAt = expiresAt;
+    this.profileBoostPurchases.set(sessionId, { userId, expiresAt });
+    this.saveToDisk();
+    return { activated: true, boostExpiresAt: expiresAt };
+  }
+
+  public async getProfileBoostPurchase(sessionId: string, userId: string): Promise<string | null> {
+    if (this.pgAdapter) return this.pgAdapter.getProfileBoostPurchase(sessionId, userId);
+    const purchase = this.profileBoostPurchases.get(sessionId);
+    return purchase?.userId === userId ? purchase.expiresAt : null;
+  }
+
   public async recordStripeSubscription(
     userId: string,
     customerId: string,
@@ -1192,8 +1225,7 @@ export class DataStore {
   // --- Profile Methods ---
   public async updateProfile(
     userId: string,
-    updates: Partial<UserProfile>,
-    options: { allowBoost?: boolean } = {}
+    updates: Partial<UserProfile>
   ): Promise<UserProfile> {
     const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
@@ -1202,8 +1234,8 @@ export class DataStore {
     if (updates.verified !== undefined) {
       throw new Error('Verification status cannot be changed from profile settings');
     }
-    if (!options.allowBoost && (updates.isBoosted !== undefined || updates.boostExpiresAt !== undefined)) {
-      throw new Error('Profile boost must be activated through its dedicated endpoint');
+    if (updates.isBoosted !== undefined || updates.boostExpiresAt !== undefined) {
+      throw new Error('Profile boost is activated only after a paid purchase');
     }
 
     // Whitelist allowed fields ONLY. Prevent role/verified/status/id tampering.
@@ -1232,10 +1264,6 @@ export class DataStore {
         throw new Error('Age must be an integer between 18 and 99');
       }
       safeProfileUpdates.age = updates.age;
-    }
-    if (options.allowBoost) {
-      if (updates.isBoosted !== undefined) safeProfileUpdates.isBoosted = updates.isBoosted;
-      if (updates.boostExpiresAt !== undefined) safeProfileUpdates.boostExpiresAt = updates.boostExpiresAt;
     }
     if (updates.lat !== undefined || updates.lng !== undefined) {
       if (typeof updates.lat !== 'number' || !Number.isFinite(updates.lat) || Math.abs(updates.lat) > 90 ||
