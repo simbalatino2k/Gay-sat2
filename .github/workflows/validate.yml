@@ -1,0 +1,48 @@
+name: Validate AURA
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run build
+      - run: node scripts/test_discovery_regression.mjs
+      - run: npx tsx scripts/test_profile_visibility.ts
+      - run: npx tsx scripts/test_gdpr_rectification.ts
+      - run: npx tsx scripts/test_stripe_subscription_lifecycle.ts
+
+  android-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          log-accepted-android-sdk-licenses: false
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run build
+      - run: npx cap sync android
+      - run: bash ./gradlew --no-daemon bundleRelease
+        working-directory: android

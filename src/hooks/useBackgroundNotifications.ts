@@ -11,11 +11,6 @@ export function useBackgroundNotifications(token: string | null) {
     // Check if browser supports notifications
     if (!('Notification' in window)) return;
 
-    // Ask for permission if not already denied or granted
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-
     const checkNotifications = async () => {
       // Only proceed if notifications are granted
       if (Notification.permission !== 'granted') return;

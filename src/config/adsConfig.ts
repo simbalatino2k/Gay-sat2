@@ -12,26 +12,27 @@ export interface AdsConfiguration {
 }
 
 /**
- * Centralized Monetization Configuration for AURA 18+
- * Change frequency, provider, or monetization rules here without altering component code.
+ * Advertising placement configuration for AURA 18+.
+ * The current inventory contains only an unpaid, first-party AURA Black card.
+ * No external advertising network or revenue is active.
  */
 export const ADS_CONFIG: AdsConfiguration = {
-  ADS_ENABLED: true,
+  ADS_ENABLED: true, // Enables only the in-house membership card at present
   ADS_PROVIDER: 'direct',
-  AD_FREQUENCY_DISCOVER: 6, // 1 native ad card after every 6 profiles
-  AD_FREQUENCY_MOMENTS: 4,  // 1 native ad moment after every 4 moments
+  AD_FREQUENCY_DISCOVER: 6, // 1 in-house membership card after every 6 profiles
+  AD_FREQUENCY_MOMENTS: 4,  // Reserved; moments inventory is empty
   PREMIUM_AD_FREE: true,     // Premium users never see ads
   ALLOW_PERSONALIZED_DEFAULT: false, // Strict GDPR default: contextual until opt-in
   FALLBACK_TO_CONTEXTUAL: true,
-  TELEMETRY_SAMPLE_RATE: 1.0,
+  TELEMETRY_SAMPLE_RATE: 0, // No advertising telemetry until real inventory is approved
 };
 
 export const AD_CONSENT_STORAGE_KEY = 'aura_eprivacy_ad_consent';
 
 export const DEFAULT_AD_CONSENT: AdConsentState = {
-  consentGiven: true, // implicit basic consent for contextual ads under legitimate interest
+  consentGiven: false,
   allowPersonalizedAds: false, // strictly false until explicit GDPR opt-in
-  allowAnalytics: true,
+  allowAnalytics: false,
   updatedAt: new Date().toISOString(),
 };
 

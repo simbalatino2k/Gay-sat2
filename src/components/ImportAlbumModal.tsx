@@ -1,20 +1,24 @@
 import React, { useState } from 'react';
-import { 
-  X, 
-  Link2, 
-  Loader2, 
-  AlertCircle, 
-  Check, 
-  Star, 
-  ExternalLink, 
-  Download, 
-  ShieldAlert, 
+import {
+  X,
+  Link2,
+  Loader2,
+  AlertCircle,
+  Check,
+  Star,
+  ExternalLink,
+  Download,
+  ShieldAlert,
   HelpCircle,
   Sparkles,
   Info,
-  ArrowRight
+  ArrowRight,
+  ShieldCheck,
+  Lock
 } from 'lucide-react';
 import { AlbumImportCandidate } from '../lib/albumImporter';
+import { useScreenshotProtection } from '../hooks/useScreenshotProtection';
+import { ScreenshotShield } from './common/ScreenshotShield';
 
 interface ImportAlbumModalProps {
   isOpen: boolean;
@@ -50,6 +54,13 @@ export const ImportAlbumModal: React.FC<ImportAlbumModalProps> = ({
   const [importResults, setImportResults] = useState<Array<{ id: string; success: boolean; error?: string }>>([]);
 
   const maxAllowedToImport = Math.max(0, 6 - currentPhotoCount);
+
+  // Anti-Screenshot & Screen Capture Protection for Album Photos
+  const { isScreenshotAttempted, isWindowBlurred, dismissWarning } = useScreenshotProtection({
+    enabled: isOpen,
+    featureName: 'Album Zdjęć AURA',
+    protectOnBlur: true
+  });
 
   if (!isOpen) return null;
 
@@ -169,26 +180,40 @@ export const ImportAlbumModal: React.FC<ImportAlbumModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="relative w-full max-w-lg aura-glass-card rounded-[28px] border border-purple-500/30 bg-[#090b14]/95 p-5 sm:p-6 shadow-2xl text-white space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-fuchsia-600/30 to-purple-600/30 border border-purple-500/40 flex items-center justify-center text-fuchsia-400">
-              <Link2 className="w-4.5 h-4.5" />
+      <ScreenshotShield
+        isBlocked={isScreenshotAttempted}
+        isWindowBlurred={isWindowBlurred}
+        featureTitle="Album Zdjęć AURA"
+        onDismiss={dismissWarning}
+        showWatermark={true}
+        watermarkText="AURA 18+ ALBUM SECURE"
+      >
+        <div className="relative w-full max-w-lg aura-glass-card rounded-[28px] border border-purple-500/30 bg-[#090b14]/95 p-5 sm:p-6 shadow-2xl text-white space-y-4 max-h-[90vh] overflow-y-auto custom-scrollbar">
+
+          {/* Header */}
+          <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-fuchsia-600/30 to-purple-600/30 border border-purple-500/40 flex items-center justify-center text-fuchsia-400">
+                <Link2 className="w-4.5 h-4.5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-extrabold text-white tracking-wide">Importuj z linku</h3>
+                  <span className="text-[8.5px] font-mono text-cyan-400 bg-cyan-950/80 border border-cyan-500/30 px-1.5 py-0.5 rounded-full flex items-center gap-1 select-none">
+                    <Lock className="w-2.5 h-2.5 text-cyan-400" />
+                    <span>SECURE</span>
+                  </span>
+                </div>
+                <p className="text-[11px] text-fuchsia-300">Udostępnione albumy iCloud i Google Photos</p>
+              </div>
             </div>
-            <div>
-              <h3 className="text-sm font-extrabold text-white tracking-wide">Importuj z linku</h3>
-              <p className="text-[11px] text-fuchsia-300">Udostępnione albumy iCloud i Google Photos</p>
-            </div>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/[0.06] transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-white/[0.06] transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
 
         {/* URL Input Form */}
         <form onSubmit={handleInspect} className="space-y-2.5">
@@ -324,23 +349,26 @@ export const ImportAlbumModal: React.FC<ImportAlbumModalProps> = ({
                   <div
                     key={cand.id}
                     onClick={() => toggleSelect(cand.id)}
-                    className={`relative aspect-square rounded-xl overflow-hidden border cursor-pointer transition-all group ${
-                      isSelected 
-                        ? 'border-fuchsia-500 ring-2 ring-fuchsia-500/40 shadow-lg shadow-purple-950/60' 
+                    onContextMenu={(e) => e.preventDefault()}
+                    className={`relative aspect-square rounded-xl overflow-hidden border cursor-pointer transition-all group protected-media-container select-none ${
+                      isSelected
+                        ? 'border-fuchsia-500 ring-2 ring-fuchsia-500/40 shadow-lg shadow-purple-950/60'
                         : 'border-white/10 hover:border-white/30 opacity-75 hover:opacity-100'
                     }`}
                   >
-                    <img 
-                      src={cand.previewUrl} 
-                      alt="Thumbnail" 
+                    <img
+                      src={cand.previewUrl}
+                      alt="Thumbnail"
                       referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover" 
+                      draggable={false}
+                      className="w-full h-full object-cover protected-image select-none pointer-events-none"
+                      onContextMenu={(e) => e.preventDefault()}
                     />
 
                     {/* Selection Checkmark / Order Badge */}
                     <div className={`absolute top-1.5 right-1.5 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold transition-all ${
-                      isSelected 
-                        ? 'bg-fuchsia-600 text-white shadow-md' 
+                      isSelected
+                        ? 'bg-fuchsia-600 text-white shadow-md'
                         : 'bg-black/60 text-transparent border border-white/30 group-hover:border-white'
                     }`}>
                       {isSelected ? selectOrder : ''}
@@ -356,8 +384,8 @@ export const ImportAlbumModal: React.FC<ImportAlbumModalProps> = ({
                           setPrimaryId(cand.id);
                         }}
                         className={`absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold flex items-center gap-1 backdrop-blur-md transition ${
-                          isPrimary 
-                            ? 'bg-amber-500 text-black shadow-md' 
+                          isPrimary
+                            ? 'bg-amber-500 text-black shadow-md'
                             : 'bg-black/70 text-slate-300 hover:text-amber-300'
                         }`}
                       >
@@ -419,7 +447,8 @@ export const ImportAlbumModal: React.FC<ImportAlbumModalProps> = ({
           </div>
         )}
 
-      </div>
+        </div>
+      </ScreenshotShield>
     </div>
   );
 };

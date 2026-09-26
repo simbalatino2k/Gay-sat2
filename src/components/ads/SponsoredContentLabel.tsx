@@ -23,10 +23,10 @@ export const SponsoredContentLabel: React.FC<SponsoredContentLabelProps> = ({
           setShowInfo(!showInfo);
         }}
         className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-[9px] font-extrabold uppercase tracking-wider text-slate-300 hover:text-white hover:border-fuchsia-500/40 hover:bg-black/80 transition-all shadow-sm"
-        title="Informacje o treści sponsorowanej"
+        title="Informacje o ofercie AURA"
       >
         <span className="w-1 h-1 rounded-full bg-fuchsia-400" />
-        <span>Sponsorowane</span>
+        <span>Oferta AURA</span>
         <Info className="w-2.5 h-2.5 text-slate-400" />
       </button>
 
@@ -38,7 +38,7 @@ export const SponsoredContentLabel: React.FC<SponsoredContentLabelProps> = ({
           <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-white/10">
             <span className="flex items-center gap-1.5 text-[11px] font-black text-white">
               <ShieldCheck className="w-3.5 h-3.5 text-fuchsia-400" />
-              Treść sponsorowana AURA
+              Własna oferta AURA
             </span>
             <button
               onClick={() => setShowInfo(false)}
@@ -49,7 +49,7 @@ export const SponsoredContentLabel: React.FC<SponsoredContentLabelProps> = ({
           </div>
 
           <p className="text-[10px] text-slate-300 leading-relaxed">
-            Dyskretne reklamy natywne wspierają działanie i bezpieczeństwo AURA 18+ bez inwazyjnych bannerów i bez śledzenia Twoich prywatnych rozmów.
+            To promocja członkostwa AURA Black. Obecnie nie wyświetlamy tu reklam zewnętrznych ani nie otrzymujemy za tę kartę wynagrodzenia od reklamodawcy.
           </p>
 
           <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[10px]">
@@ -63,7 +63,7 @@ export const SponsoredContentLabel: React.FC<SponsoredContentLabelProps> = ({
                 className="flex items-center gap-1 text-fuchsia-400 hover:text-fuchsia-300 font-bold transition-colors"
               >
                 <Sparkles className="w-3 h-3" />
-                Usuń reklamy
+                Zobacz AURA Black
               </button>
             )}
 

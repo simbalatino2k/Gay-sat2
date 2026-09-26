@@ -1,9 +1,11 @@
+import { defaultUserConsents, validateConsentPreferences } from '../lib/consentPreferences';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
 import { getPostgresPool, initPostgresSchema, PostgresStoreAdapter } from './postgres';
-import { purgeAllUserMedia, deleteMediaRecord } from '../lib/storage';
+import { PROFILE_BOOST_DURATION_HOURS } from '../lib/stripeCheckout';
+import { purgeAllUserMediaDurable, deleteMediaRecordDurable, getMediaRecordDurable } from '../lib/storage';
 import {
   UserAccount,
   UserProfile,
@@ -37,6 +39,21 @@ const INITIAL_USERS: UserAccount[] = [];
 const INITIAL_CONVERSATIONS: Conversation[] = [];
 const INITIAL_MESSAGES: Record<string, Message[]> = {};
 const INITIAL_MOMENTS: Moment[] = [];
+
+// Keep the existing payment-test account usable without presenting it as a real member.
+const NON_DISCOVERABLE_TEST_USER_IDS = new Set(['user-1790284871319-b6ebb4b7']);
+
+// These are the only remotely hosted images that can be added without an upload.
+// Previously saved URLs remain editable for existing profiles.
+const PROFILE_PHOTO_PRESETS = new Set([
+  ...AURA_ALBUM_PHOTOS,
+  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=800'
+]);
 
 // Google/Firebase public certificate cache for cryptographic JWT signature verification
 let googleCertsCache: Record<string, string> = {};
@@ -151,6 +168,7 @@ export class DataStore {
   private userPasswords: Map<string, string> = new Map(); // userId -> salt:scryptHash
   private passwordResets: Map<string, { userId: string; expiresAt: string; used: boolean }> = new Map();
   private stripeEvents: Set<string> = new Set();
+  private profileBoostPurchases: Map<string, { userId: string; expiresAt: string }> = new Map();
   private stripeSubscriptions: Map<string, { customerId: string; subscriptionId: string; planId: string; status: string; currentPeriodEnd?: string }> = new Map();
   private localStoreSubscriptions: Map<string, UserEntitlement> = new Map(); // development fallback
   private localStoreEvents: Set<string> = new Set();
@@ -205,9 +223,13 @@ export class DataStore {
         erasureAuditLog: this.erasureAuditLog,
         userPasswords: Array.from(this.userPasswords.entries()),
         passwordResets: Array.from(this.passwordResets.entries()),
+        stripeEvents: Array.from(this.stripeEvents),
         stripeSubscriptions: Array.from(this.stripeSubscriptions.entries()),
+        profileBoostPurchases: Array.from(this.profileBoostPurchases.entries()),
         localStoreSubscriptions: Array.from(this.localStoreSubscriptions.entries()),
-        localStoreEvents: Array.from(this.localStoreEvents)
+        localStoreEvents: Array.from(this.localStoreEvents),
+        vaultAccess: Array.from(this.vaultAccess, ([ownerId, granted]) => [ownerId, Array.from(granted)]),
+        vaultRequests: Array.from(this.vaultRequests, ([ownerId, requesters]) => [ownerId, Array.from(requesters)])
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(serialized, null, 2), 'utf-8');
     } catch (err) {
@@ -243,9 +265,13 @@ export class DataStore {
       this.erasureAuditLog = data.erasureAuditLog || [];
       this.userPasswords = new Map(data.userPasswords || []);
       this.passwordResets = new Map(data.passwordResets || []);
+      this.stripeEvents = new Set(data.stripeEvents || []);
       this.stripeSubscriptions = new Map(data.stripeSubscriptions || []);
+      this.profileBoostPurchases = new Map(data.profileBoostPurchases || []);
       this.localStoreSubscriptions = new Map(data.localStoreSubscriptions || []);
       this.localStoreEvents = new Set(data.localStoreEvents || []);
+      this.vaultAccess = new Map((data.vaultAccess || []).map(([ownerId, granted]: [string, string[]]) => [ownerId, new Set(granted)]));
+      this.vaultRequests = new Map((data.vaultRequests || []).map(([ownerId, requesters]: [string, string[]]) => [ownerId, new Set(requesters)]));
       return true;
     } catch (err: any) {
       console.error('[DataStore] Critical error loading file store:', err.message);
@@ -546,18 +572,7 @@ export class DataStore {
     this.tokens.set(token, userId);
 
     // Initialize GDPR Consents
-    const initialConsents: UserConsents = {
-      necessaryCookies: true,
-      functionalCookies: true,
-      analyticsCookies: false,
-      explicitSpecialCategoryConsent: true,
-      aiAssistanceConsent: true,
-      locationProcessingConsent: true,
-      termsAcceptedVersion: '2026.1',
-      privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: now.toISOString(),
-      safeContentEnabled: true
-    };
+    const initialConsents = defaultUserConsents();
     this.consents.set(userId, initialConsents);
 
     this.saveToDisk();
@@ -583,9 +598,15 @@ export class DataStore {
         user = dbUser;
         this.users.set(user.id, user);
 
-        stored = await this.pgAdapter.getPasswordHash(user.id);
-        if (stored) {
-          this.userPasswords.set(user.id, stored);
+        const dbStored = await this.pgAdapter.getPasswordHash(user.id);
+        const memStored = this.userPasswords.get(user.id);
+        if (memStored && dbStored && memStored !== dbStored) {
+          stored = memStored;
+        } else if (dbStored) {
+          stored = dbStored;
+          this.userPasswords.set(user.id, dbStored);
+        } else {
+          stored = memStored;
         }
       } catch (dbErr: any) {
         console.error('[PostgreSQL] Database error during loginUser:', dbErr.message || dbErr);
@@ -821,7 +842,7 @@ export class DataStore {
                 photos: [
                   { id: `ph-${fbUid}-1`, url: payload.picture || AURA_ALBUM_PHOTOS[0], isPrimary: true }
                 ],
-                verified: true,
+                verified: false,
                 isOnline: true,
                 lastActiveMinutesAgo: 0
               }
@@ -931,16 +952,43 @@ export class DataStore {
 
   // --- Stripe Subscription & Webhook Processing ---
   public async isStripeEventProcessed(eventId: string): Promise<boolean> {
+    if (this.pgAdapter) return this.pgAdapter.isEventProcessed(eventId);
     return this.stripeEvents.has(eventId);
   }
 
   public async recordStripeEvent(eventId: string, eventType: string): Promise<void> {
+    if (this.pgAdapter) await this.pgAdapter.recordProcessedEvent(eventId, eventType);
     this.stripeEvents.add(eventId);
+    this.saveToDisk();
+  }
+
+  public async fulfillProfileBoostPurchase(sessionId: string, userId: string, eventId: string): Promise<{ activated: boolean; boostExpiresAt: string }> {
+    this.ensureWriteAllowed();
     if (this.pgAdapter) {
-      this.pgAdapter.recordProcessedEvent(eventId, eventType).catch(err => {
-        console.error('[Postgres] Stripe event sync error:', err.message);
-      });
+      const result = await this.pgAdapter.fulfillProfileBoostPurchase(sessionId, userId, eventId);
+      await this.getUserById(userId); // Refresh this instance after the committed transaction.
+      return result;
     }
+
+    const previous = this.profileBoostPurchases.get(sessionId);
+    if (previous) {
+      if (previous.userId !== userId) throw new Error('Profile boost purchase owner mismatch');
+      return { activated: false, boostExpiresAt: previous.expiresAt };
+    }
+    const user = this.users.get(userId);
+    if (!user) throw new Error('Profile boost customer not found');
+    const expiresAt = new Date(Math.max(Date.now(), Date.parse(user.profile.boostExpiresAt || '') || 0) + PROFILE_BOOST_DURATION_HOURS * 60 * 60 * 1000).toISOString();
+    user.profile.isBoosted = true;
+    user.profile.boostExpiresAt = expiresAt;
+    this.profileBoostPurchases.set(sessionId, { userId, expiresAt });
+    this.saveToDisk();
+    return { activated: true, boostExpiresAt: expiresAt };
+  }
+
+  public async getProfileBoostPurchase(sessionId: string, userId: string): Promise<string | null> {
+    if (this.pgAdapter) return this.pgAdapter.getProfileBoostPurchase(sessionId, userId);
+    const purchase = this.profileBoostPurchases.get(sessionId);
+    return purchase?.userId === userId ? purchase.expiresAt : null;
   }
 
   public async recordStripeSubscription(
@@ -949,70 +997,96 @@ export class DataStore {
     subscriptionId: string,
     planId: string,
     status: string,
-    periodEnd?: Date
+    periodEnd?: Date,
+    autoRenew = status === 'active' || status === 'trialing'
   ): Promise<UserAccount | null> {
-    const user = this.users.get(userId);
+    const user = await this.getUserById(userId);
     if (!user) return null;
 
     const isActive = status === 'active' || status === 'trialing';
+    if (isActive && (!periodEnd || periodEnd.getTime() <= Date.now())) {
+      throw new Error('Active Stripe subscription requires a future billing period');
+    }
+    const now = new Date().toISOString();
+    const previousEntitlement = this.localStoreSubscriptions.get(userId);
+    const stripeRecord = {
+      customerId,
+      subscriptionId,
+      planId,
+      status,
+      currentPeriodEnd: periodEnd?.toISOString()
+    };
+
+    const entitlement: UserEntitlement = {
+      userId,
+      premium: isActive,
+      provider: 'stripe',
+      productId: planId,
+      planTier: planId === 'aura_vip_annual' ? 'yearly' : planId === 'aura_vip_three_month' ? 'three_month' : 'monthly',
+      status: isActive ? 'active' : status === 'canceled' ? 'canceled' : 'account_hold',
+      expiresAt: periodEnd?.toISOString(),
+      autoRenew,
+      storeTransactionId: subscriptionId,
+      lastVerifiedAt: now,
+      createdAt: previousEntitlement?.createdAt || now,
+      updatedAt: now
+    };
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd, entitlement);
+    }
+
     user.isPremium = isActive;
     user.profile.isPremium = isActive;
     if (isActive) {
-      user.premiumExpiresAt = periodEnd ? periodEnd.toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      user.premiumExpiresAt = periodEnd!.toISOString();
       user.profile.premiumTier = planId === 'aura_vip_annual' ? 'VIP_ANNUAL' : 'VIP_MONTHLY';
     } else {
       delete user.premiumExpiresAt;
       user.profile.premiumTier = undefined;
     }
-    user.updatedAt = new Date().toISOString();
-
-    this.stripeSubscriptions.set(userId, {
-      customerId,
-      subscriptionId,
-      planId,
-      status,
-      currentPeriodEnd: user.premiumExpiresAt
-    });
-
-    // Also record into unified store subscriptions
-    this.localStoreSubscriptions.set(userId, {
-      userId,
-      premium: isActive,
-      provider: 'stripe',
-      productId: planId,
-      planTier: planId === 'aura_vip_annual' ? 'yearly' : 'monthly',
-      status: isActive ? 'active' : 'canceled',
-      expiresAt: user.premiumExpiresAt,
-      autoRenew: isActive,
-      storeTransactionId: subscriptionId,
-      lastVerifiedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-
-    if (this.pgAdapter) {
-      this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd).catch(err => {
-        console.error('[Postgres] Subscription sync error:', err.message);
-      });
-    }
-
+    user.updatedAt = now;
+    this.users.set(userId, user);
+    this.stripeSubscriptions.set(userId, stripeRecord);
+    this.localStoreSubscriptions.set(userId, entitlement);
     this.saveToDisk();
     return user;
   }
 
+  public async getStripeSubscriptionByUserId(userId: string): Promise<{
+    subscriptionId: string; planId: string; status: string; currentPeriodEnd?: Date
+  } | null> {
+    if (this.pgAdapter) return this.pgAdapter.getStripeSubscriptionByUserId(userId);
+    const sub = this.stripeSubscriptions.get(userId);
+    return sub ? {
+      subscriptionId: sub.subscriptionId,
+      planId: sub.planId,
+      status: sub.status,
+      currentPeriodEnd: sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : undefined
+    } : null;
+  }
+
   public async findUserByStripeCustomerId(customerId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const userId = await this.pgAdapter.findUserIdByStripeCustomerId(customerId);
+      return userId ? this.getUserById(userId) : null;
+    }
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.customerId === customerId) {
-        return this.users.get(userId) || null;
+        return this.getUserById(userId);
       }
     }
     return null;
   }
 
   public async findUserByStripeSubscriptionId(subscriptionId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const userId = await this.pgAdapter.findUserIdByStripeSubscriptionId(subscriptionId);
+      return userId ? this.getUserById(userId) : null;
+    }
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.subscriptionId === subscriptionId) {
-        return this.users.get(userId) || null;
+        return this.getUserById(userId);
       }
     }
     return null;
@@ -1165,7 +1239,7 @@ export class DataStore {
   }
 
   public async getProfileById(targetUserId: string, requestingUserId?: string): Promise<UserProfile | null> {
-    const targetUser = this.users.get(targetUserId);
+    const targetUser = await this.getUserById(targetUserId);
     if (!targetUser || targetUser.status !== 'ACTIVE') {
       return null;
     }
@@ -1174,14 +1248,27 @@ export class DataStore {
       return null;
     }
 
-    return this.sanitizeProfilePrivacy(targetUser.profile, requestingUserId);
+    const hasVault = requestingUserId
+      ? await this.hasVaultAccessDurable(targetUserId, requestingUserId)
+      : false;
+    return this.sanitizeProfilePrivacy(targetUser.profile, requestingUserId, hasVault);
   }
 
   // --- Profile Methods ---
-  public async updateProfile(userId: string, updates: Partial<UserProfile>): Promise<UserProfile> {
-    const user = this.users.get(userId);
+  public async updateProfile(
+    userId: string,
+    updates: Partial<UserProfile>
+  ): Promise<UserProfile> {
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
     if (user.status !== 'ACTIVE') throw new Error(`User account is ${user.status.toLowerCase()}`);
+
+    if (updates.verified !== undefined) {
+      throw new Error('Verification status cannot be changed from profile settings');
+    }
+    if (updates.isBoosted !== undefined || updates.boostExpiresAt !== undefined) {
+      throw new Error('Profile boost is activated only after a paid purchase');
+    }
 
     // Whitelist allowed fields ONLY. Prevent role/verified/status/id tampering.
     const allowedKeys: (keyof UserProfile)[] = [
@@ -1204,6 +1291,23 @@ export class DataStore {
     ];
 
     const safeProfileUpdates: Partial<UserProfile> = {};
+    if (updates.age !== undefined) {
+      if (!Number.isInteger(updates.age) || updates.age < 18 || updates.age > 99) {
+        throw new Error('Age must be an integer between 18 and 99');
+      }
+      safeProfileUpdates.age = updates.age;
+    }
+    if (updates.lat !== undefined || updates.lng !== undefined) {
+      if (typeof updates.lat !== 'number' || !Number.isFinite(updates.lat) || Math.abs(updates.lat) > 90 ||
+          typeof updates.lng !== 'number' || !Number.isFinite(updates.lng) || Math.abs(updates.lng) > 180) {
+        throw new Error('Valid latitude and longitude must be provided together');
+      }
+      safeProfileUpdates.lat = updates.lat;
+      safeProfileUpdates.lng = updates.lng;
+    }
+    if (updates.locationPrivacy !== undefined && !['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(updates.locationPrivacy)) {
+      throw new Error('Invalid location privacy');
+    }
     for (const key of allowedKeys) {
       if (updates[key] !== undefined) {
         if (typeof updates[key] === 'string') {
@@ -1214,55 +1318,81 @@ export class DataStore {
       }
     }
 
-    user.profile = {
-      ...user.profile,
-      ...safeProfileUpdates,
-      userId
-    };
-
-    user.updatedAt = new Date().toISOString();
-    this.saveToDisk();
-
-    if (this.pgAdapter) {
-      await this.pgAdapter.saveUser(user);
+    if (updates.photos !== undefined) {
+      if (!Array.isArray(updates.photos) || updates.photos.length > 6) {
+        throw new Error('A profile can contain at most 6 photos');
+      }
+      const existingUrls = new Set((user.profile.photos || []).map(photo => photo.url));
+      const ids = new Set<string>();
+      const urls = new Set<string>();
+      const photos = [] as UserProfile['photos'];
+      for (const photo of updates.photos) {
+        if (!photo || typeof photo !== 'object' || typeof photo.id !== 'string' ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(photo.id) || ids.has(photo.id) ||
+            typeof photo.url !== 'string') {
+          throw new Error('Invalid or duplicate profile photo');
+        }
+        ids.add(photo.id);
+        const url = photo.url.trim();
+        if (!url || urls.has(url)) throw new Error('Duplicate or empty profile photo URL');
+        urls.add(url);
+        if (!existingUrls.has(url) && !PROFILE_PHOTO_PRESETS.has(url)) {
+          const match = /^\/api\/media\/([a-zA-Z0-9_-]+)$/.exec(url);
+          if (!match) throw new Error('Choose an AURA preset or upload this photo to AURA first');
+          const media = await getMediaRecordDurable(match[1]);
+          if (!media || media.deletedAt || media.ownerId !== userId ||
+              !['photo', 'profile_photo'].includes(media.category) || media.moderationStatus === 'REJECTED') {
+            throw new Error('Profile photo upload does not belong to this account');
+          }
+        }
+        photos.push({
+          id: photo.id,
+          url,
+          isPrimary: photo.isPrimary === true,
+          isPrivate: photo.isPrivate === true,
+          ...(typeof photo.caption === 'string' ? { caption: photo.caption.replace(/<[^>]*>?/gm, '').trim().slice(0, 500) } : {})
+        });
+      }
+      if (photos.length) {
+        const primaryIndex = photos.findIndex(photo => photo.isPrimary);
+        photos.forEach((photo, index) => { photo.isPrimary = index === (primaryIndex === -1 ? 0 : primaryIndex); });
+      }
+      safeProfileUpdates.photos = photos;
     }
 
-    return user.profile;
+    const updatedUser: UserAccount = {
+      ...user,
+      profile: {
+        ...user.profile,
+        ...safeProfileUpdates,
+        userId
+      },
+      updatedAt: new Date().toISOString()
+    };
+
+    if (this.pgAdapter) {
+      await this.pgAdapter.saveUser(updatedUser);
+    }
+
+    this.users.set(userId, updatedUser);
+    this.saveToDisk();
+
+    return updatedUser.profile;
   }
 
   public async addProfilePhoto(userId: string, url: string, isPrimary: boolean = false): Promise<UserProfile> {
     const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
-
-    const cleanUrl = url.trim();
-    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://') && !cleanUrl.startsWith('data:image/') && !cleanUrl.startsWith('/api/media/')) {
-      throw new Error('Invalid image URL format');
-    }
-
-    // SVG XSS prevention
-    if (cleanUrl.includes('image/svg+xml') || cleanUrl.includes('<script')) {
-      throw new Error('Dangerous or unsupported image payload');
-    }
-
-    const newPhoto = {
-      id: `ph-${Date.now()}`,
-      url: cleanUrl,
-      isPrimary: isPrimary || user.profile.photos.length === 0
-    };
-
-    if (newPhoto.isPrimary) {
-      user.profile.photos.forEach(p => (p.isPrimary = false));
-    }
-
-    user.profile.photos.push(newPhoto);
-    user.updatedAt = new Date().toISOString();
-    this.saveToDisk();
-
-    if (this.pgAdapter) {
-      await this.pgAdapter.saveUser(user);
-    }
-
-    return user.profile;
+    const photos = (user.profile.photos || []).map(photo => ({
+      ...photo,
+      isPrimary: isPrimary ? false : photo.isPrimary
+    }));
+    photos.push({
+      id: `ph-${crypto.randomUUID()}`,
+      url: url.trim(),
+      isPrimary: isPrimary || photos.length === 0
+    });
+    return this.updateProfile(userId, { photos });
   }
 
   public async deleteProfilePhoto(userId: string, photoId: string): Promise<UserProfile> {
@@ -1296,18 +1426,7 @@ export class DataStore {
     const existing = this.consents.get(userId);
     if (existing) return existing;
 
-    const defaultConsents: UserConsents = {
-      necessaryCookies: true,
-      functionalCookies: true,
-      analyticsCookies: false,
-      explicitSpecialCategoryConsent: true,
-      aiAssistanceConsent: true,
-      locationProcessingConsent: true,
-      termsAcceptedVersion: '2026.1',
-      privacyPolicyAcceptedVersion: '2026.1',
-      updatedAt: new Date().toISOString(),
-      safeContentEnabled: true
-    };
+    const defaultConsents = defaultUserConsents();
     this.consents.set(userId, defaultConsents);
     if (this.pgAdapter) {
       await this.pgAdapter.saveUserConsents(userId, defaultConsents);
@@ -1317,10 +1436,11 @@ export class DataStore {
   }
 
   public async updateUserConsents(userId: string, partial: Partial<UserConsents>): Promise<UserConsents> {
+    const preferences = validateConsentPreferences(partial);
     const current = await this.getUserConsents(userId);
     const updated: UserConsents = {
       ...current,
-      ...partial,
+      ...preferences,
       necessaryCookies: true,
       updatedAt: new Date().toISOString()
     };
@@ -1532,28 +1652,39 @@ export class DataStore {
   }
 
   public async rectifyUserData(userId: string, updates: { email?: string; displayName?: string; bio?: string }): Promise<UserAccount> {
-    const user = this.users.get(userId);
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
+
+    const updatedUser: UserAccount = {
+      ...user,
+      profile: { ...user.profile },
+      updatedAt: new Date().toISOString()
+    };
 
     if (updates.email) {
       const clean = updates.email.toLowerCase().trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) throw new Error('Invalid email format');
       const conflict = Array.from(this.users.values()).find(u => u.id !== userId && u.email === clean);
       if (conflict) throw new Error('Email is already taken by another account');
-      user.email = clean;
+      if (this.pgAdapter) {
+        const existing = await this.pgAdapter.getUserByEmail(clean);
+        if (existing && existing.id !== userId) throw new Error('Email is already taken by another account');
+      }
+      updatedUser.email = clean;
     }
 
     if (updates.displayName) {
-      user.profile.displayName = updates.displayName.replace(/<[^>]*>?/gm, '').trim();
+      updatedUser.profile.displayName = updates.displayName.replace(/<[^>]*>?/gm, '').trim();
     }
 
     if (updates.bio !== undefined) {
-      user.profile.bio = updates.bio.replace(/<[^>]*>?/gm, '').trim();
+      updatedUser.profile.bio = updates.bio.replace(/<[^>]*>?/gm, '').trim();
     }
 
-    user.updatedAt = new Date().toISOString();
+    if (this.pgAdapter) await this.pgAdapter.saveUser(updatedUser);
+    this.users.set(userId, updatedUser);
     this.saveToDisk();
-    return user;
+    return updatedUser;
   }
 
   public async restrictAccount(userId: string, reason: string): Promise<boolean> {
@@ -1591,6 +1722,9 @@ export class DataStore {
   public async eraseUserData(userId: string): Promise<boolean> {
     const user = this.users.get(userId);
     if (!user) return false;
+
+    // Purge while the durable media rows still identify their owner.
+    await purgeAllUserMediaDurable(userId);
 
     const userHash = crypto.createHash('sha256').update(userId).digest('hex');
 
@@ -1634,13 +1768,7 @@ export class DataStore {
       reason: 'GDPR_ART_17_RIGHT_TO_ERASURE'
     });
 
-    // GDPR Right to Erasure: Purge all uploaded binary media and records
-    try {
-      purgeAllUserMedia(userId);
-    } catch (e) {
-      // ignore
-    }
-
+    if (this.pgAdapter) await this.pgAdapter.saveUser(user);
     this.saveToDisk();
     return true;
   }
@@ -1857,10 +1985,15 @@ export class DataStore {
       if (b.blockedUserId === currentUserId) blockedUserIds.add(b.blockerUserId);
     });
 
-    let eligible = Array.from(this.users.values())
+    // Each instance must see newly registered users and current blocks immediately.
+    const candidates = this.pgAdapter
+      ? await this.pgAdapter.getDiscoverUsers(currentUserId)
+      : Array.from(this.users.values());
+    let eligible = candidates
       .filter(u => u.id !== currentUserId)
       .filter(u => u.status === 'ACTIVE')
-      .filter(u => !blockedUserIds.has(u.id))
+      .filter(u => !NON_DISCOVERABLE_TEST_USER_IDS.has(u.id))
+      .filter(u => this.pgAdapter || !blockedUserIds.has(u.id))
       .map(u => u.profile);
 
     const filtered = filters
@@ -1882,7 +2015,40 @@ export class DataStore {
         })
       : eligible;
 
-    return filtered.map(p => this.sanitizeProfilePrivacy(p));
+    // Prioritize active boosted profiles at the top of the discovery feed
+    const now = Date.now();
+    filtered.sort((a, b) => {
+      const aBoostActive = Boolean(a.isBoosted && a.boostExpiresAt && new Date(a.boostExpiresAt).getTime() > now);
+      const bBoostActive = Boolean(b.isBoosted && b.boostExpiresAt && new Date(b.boostExpiresAt).getTime() > now);
+      if (aBoostActive && !bBoostActive) return -1;
+      if (!aBoostActive && bBoostActive) return 1;
+      return 0;
+    });
+
+    const accessibleVaultOwners = new Set<string>();
+    if (currentUserId !== 'guest' && filtered.some(profile => profile.photos?.some(photo => photo.isPrivate))) {
+      if (this.pgAdapter) {
+        const pool = getPostgresPool();
+        if (pool) {
+          try {
+            const grants = await pool.query('SELECT owner_id FROM vault_grants WHERE granted_id = $1', [currentUserId]);
+            for (const row of grants.rows) accessibleVaultOwners.add(row.owner_id);
+          } catch (err) {
+            console.warn('[DataStore] Vault grants unavailable; private photos remain hidden.', err);
+          }
+        }
+      } else if (!isProductionEnvironment()) {
+        for (const [ownerId, granted] of this.vaultAccess) {
+          if (granted.has(currentUserId)) accessibleVaultOwners.add(ownerId);
+        }
+      }
+    }
+
+    return filtered.map(profile => this.sanitizeProfilePrivacy(
+      profile,
+      currentUserId,
+      accessibleVaultOwners.has(profile.userId)
+    ));
   }
 
   /**
@@ -1892,16 +2058,21 @@ export class DataStore {
    * - APPROXIMATE (Default): applies deterministic ~1.5km fuzzy offset
    * Never exposes exact physical address to other users.
    */
-  public sanitizeProfilePrivacy(profile: UserProfile, viewerUserId?: string): UserProfile {
+  public sanitizeProfilePrivacy(profile: UserProfile, viewerUserId?: string, durableVaultAccess?: boolean): UserProfile {
     const privacy = profile.locationPrivacy || 'APPROXIMATE';
     const isOwner = viewerUserId && (viewerUserId === profile.userId || viewerUserId === profile.id);
-    const hasVault = isOwner || (viewerUserId ? this.hasVaultAccess(profile.userId, viewerUserId) : false);
+    const hasVault = Boolean(isOwner || (durableVaultAccess !== undefined
+      ? durableVaultAccess
+      : !this.pgAdapter && !isProductionEnvironment() && viewerUserId && this.hasVaultAccess(profile.userId, viewerUserId)));
 
     const sanitizePhotos = (photos: any[]) => {
       return (photos || []).map(p => {
         if (p.isPrivate && !hasVault) {
           return {
-            ...p,
+            id: p.id,
+            url: '',
+            isPrimary: p.isPrimary === true,
+            isPrivate: true,
             isLocked: true
           };
         }
@@ -2115,6 +2286,11 @@ export class DataStore {
 
   // --- Vault Access Control ---
   public async grantVaultAccess(ownerId: string, targetUserId: string, grant: boolean): Promise<boolean> {
+    this.ensureWriteAllowed();
+    if (this.pgAdapter) {
+      if (grant) await this.pgAdapter.saveVaultGrant(ownerId, targetUserId);
+      else await this.pgAdapter.revokeVaultGrant(ownerId, targetUserId);
+    }
     if (!this.vaultAccess.has(ownerId)) {
       this.vaultAccess.set(ownerId, new Set());
     }
@@ -2145,6 +2321,13 @@ export class DataStore {
     return !!this.vaultAccess.get(ownerId)?.has(viewerUserId);
   }
 
+  public async hasVaultAccessDurable(ownerId: string, viewerUserId: string): Promise<boolean> {
+    if (ownerId === viewerUserId) return true;
+    if (this.pgAdapter) return this.pgAdapter.hasVaultAccess(ownerId, viewerUserId);
+    if (isProductionEnvironment()) return false;
+    return this.hasVaultAccess(ownerId, viewerUserId);
+  }
+
   public isVaultRequested(requesterId: string, targetUserId: string): boolean {
     return !!this.vaultRequests.get(targetUserId)?.has(requesterId);
   }
@@ -2158,14 +2341,14 @@ export class DataStore {
     });
 
     if (!conv) {
-      const otherUser = this.users.get(userBId);
+      const otherUser = await this.getUserById(userBId);
       if (!otherUser) throw new Error('Recipient user not found');
 
       const newConv: Conversation = {
         id: crypto.randomUUID(),
         participantIds: [userAId, userBId],
         unreadCount: 0,
-        otherParticipant: this.sanitizeProfilePrivacy(otherUser.profile, userAId),
+        otherParticipant: this.sanitizeProfilePrivacy(otherUser.profile),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
@@ -2177,10 +2360,16 @@ export class DataStore {
       this.conversations.set(newConv.id, newConv);
       this.messages.set(newConv.id, []);
       this.saveToDisk();
-      return newConv;
+      conv = newConv;
     }
 
-    return conv;
+    const recipient = await this.getUserById(userBId);
+    if (!recipient || recipient.status !== 'ACTIVE') throw new Error('Recipient user not found');
+    const hasVault = await this.hasVaultAccessDurable(userBId, userAId);
+    return {
+      ...conv,
+      otherParticipant: this.sanitizeProfilePrivacy(recipient.profile, userAId, hasVault)
+    };
   }
 
   public async getUserConversations(userId: string): Promise<Conversation[]> {
@@ -2190,7 +2379,7 @@ export class DataStore {
         .map(b => (b.blockerUserId === userId ? b.blockedUserId : b.blockerUserId))
     );
 
-    return Array.from(this.conversations.values())
+    const conversations = await Promise.all(Array.from(this.conversations.values())
       .filter(c => c.participantIds.includes(userId))
       .filter(c => {
         const otherId = c.participantIds.find(id => id !== userId);
@@ -2199,9 +2388,13 @@ export class DataStore {
         const otherUser = this.users.get(otherId);
         return otherUser && otherUser.status === 'ACTIVE';
       })
-      .map(c => {
+      .map(async (c): Promise<Conversation | null> => {
         const otherId = c.participantIds.find(id => id !== userId)!;
-        const otherProfile = this.sanitizeProfilePrivacy(this.users.get(otherId)!.profile, userId);
+        const otherUser = await this.getUserById(otherId);
+        if (!otherUser) return null;
+        const vaultAccessGranted = await this.hasVaultAccessDurable(userId, otherId);
+        const vaultAccessReceived = await this.hasVaultAccessDurable(otherId, userId);
+        const otherProfile = this.sanitizeProfilePrivacy(otherUser.profile, userId, vaultAccessReceived);
         
         // Prune expired messages for this conversation
         this.pruneExpiredMessages(c.id);
@@ -2215,11 +2408,14 @@ export class DataStore {
           otherParticipant: otherProfile,
           lastMessage: lastMsg,
           unreadCount,
-          vaultAccessGranted: this.hasVaultAccess(userId, otherId),
-          vaultAccessReceived: this.hasVaultAccess(otherId, userId),
+          vaultAccessGranted,
+          vaultAccessReceived,
           vaultRequested: this.isVaultRequested(userId, otherId)
         };
-      })
+      }));
+
+    return conversations
+      .filter((conversation): conversation is Conversation => conversation !== null)
       .sort((a, b) => {
         const tA = a.lastMessage ? new Date(a.lastMessage.createdAt).getTime() : 0;
         const tB = b.lastMessage ? new Date(b.lastMessage.createdAt).getTime() : 0;
@@ -2368,11 +2564,7 @@ export class DataStore {
       msg.text = 'This message was deleted';
       const mediaId = msg.photo?.mediaId || msg.voice?.mediaId || msg.starVideo?.mediaId;
       if (mediaId) {
-        try {
-          deleteMediaRecord(mediaId, requestingUserId);
-        } catch (e) {
-          // ignore
-        }
+        await deleteMediaRecordDurable(mediaId, requestingUserId);
       }
     } else {
       if (!msg.deletedForUserIds) {
@@ -2546,24 +2738,41 @@ export class DataStore {
     return { conversation: conv, message };
   }
 
-  public async markMessagesRead(conversationId: string, userId: string): Promise<void> {
+  public async markMessagesRead(conversationId: string, userId: string): Promise<Message[]> {
     const conv = this.conversations.get(conversationId);
     if (!conv || !conv.participantIds.includes(userId)) {
-      return;
+      return [];
     }
 
     const msgs = this.messages.get(conversationId) || [];
     let updated = false;
+    const nowIso = new Date().toISOString();
+    const readMessages: Message[] = [];
+
     msgs.forEach(m => {
       if (m.receiverId === userId && m.status !== 'READ') {
         m.status = 'READ';
+        m.deliveryStatus = 'read';
+        m.readStatus = true;
+        m.readAt = nowIso;
         updated = true;
+        readMessages.push(m);
       }
     });
+
+    if (this.pgAdapter && typeof (this.pgAdapter as any).markMessagesRead === 'function') {
+      try {
+        await (this.pgAdapter as any).markMessagesRead(conversationId, userId, new Date(nowIso));
+      } catch (err) {
+        console.error('[Postgres] markMessagesRead sync error:', err);
+      }
+    }
 
     if (updated) {
       this.saveToDisk();
     }
+
+    return readMessages;
   }
 
   // --- Matches ---

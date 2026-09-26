@@ -1,11 +1,23 @@
-import { moderateText } from './src/lib/moderation.js';
+import { buildStripeCheckout, buildProfileBoostCheckout, checkoutConfirmationRedirect, classifyCheckoutSession, isCheckoutSessionId, isPaidProfileBoostSession, PROFILE_BOOST_PRODUCT_ID } from './src/lib/stripeCheckout';
+import { invoiceSubscriptionId, paidInvoicePeriodEnd, syncStripeSubscription } from './src/lib/stripeSubscription';
+import type Stripe from 'stripe';
+import { moderateText } from './src/lib/moderation';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
   delete (globalThis as any).__dirname;
 }
 
+process.on('unhandledRejection', (reason) => {
+  console.warn('[Server Warning] Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server Warning] Uncaught exception safely captured:', err?.message || err);
+});
+
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import http from 'http';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
@@ -20,13 +32,13 @@ import { getAdsForPlacement, NATIVE_ADS_INVENTORY } from './src/data/nativeAds';
 import { 
   initStorage, 
   uploadUserMedia, 
-  getLocalMediaFile,
   processAndSaveMedia,
   createUploadSession,
   getUploadSession,
-  getMediaRecord,
-  getMediaFileForServing,
-  deleteMediaRecord
+  getMediaRecordDurable,
+  getMediaFileForServingDurable,
+  deleteMediaRecordDurable,
+  bindMediaToConversationDurable
 } from './src/lib/storage';
 import { 
   MEDIA_LIMITS, 
@@ -42,6 +54,7 @@ import {
 } from './src/lib/mediaSecurity';
 import { cloudBackupService } from './src/services/cloudBackupService';
 import { WebSocketServer, WebSocket } from 'ws';
+import { MEDIA_SESSION_COOKIE, LEGACY_MEDIA_SESSION_COOKIES, mediaSessionTokens } from './src/lib/mediaSessionCookies.js';
 import {
   verifyGooglePlayPurchase,
   verifyAppleStoreKitTransaction,
@@ -108,7 +121,7 @@ const upload = multer({
 
 // Initialize Express App
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const PORT = Number(process.env.PORT) || 3000; // Cloud Run sets PORT dynamically, defaults to 3000 for local/infrastructure compatibility
 
 // Security & Parsing Middlewares with rawBody capture for webhook signature verification
 app.use(
@@ -128,7 +141,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader(
     'Permissions-Policy',
-    'camera=(self), microphone=(), payment=*, geolocation=(self)'
+    'camera=(self), microphone=(self), payment=*, geolocation=(self)'
   );
   if (req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production') {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
@@ -231,6 +244,42 @@ async function optionalAuthenticateToken(req: AuthenticatedRequest, res: Respons
   next();
 }
 
+const MEDIA_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+function setMediaSessionCookie(res: Response, token: string) {
+  let maxAge = MEDIA_SESSION_MAX_AGE_MS;
+  if (token.split('.').length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+      const expiresAt = Number(payload.exp) * 1000;
+      maxAge = Number.isFinite(expiresAt)
+        ? Math.max(0, Math.min(maxAge, expiresAt - Date.now()))
+        : 0;
+    } catch {
+      maxAge = 0;
+    }
+  }
+
+  // Remove any cookie left by an earlier account before activating this one.
+  for (const name of LEGACY_MEDIA_SESSION_COOKIES) {
+    res.clearCookie(name, { path: '/', secure: true, sameSite: 'none' });
+  }
+  res.cookie(MEDIA_SESSION_COOKIE, token, {
+    path: '/',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge
+  });
+}
+
+function clearMediaSessionCookies(res: Response) {
+  res.clearCookie(MEDIA_SESSION_COOKIE, { path: '/', secure: true, sameSite: 'none', httpOnly: true });
+  for (const name of LEGACY_MEDIA_SESSION_COOKIES) {
+    res.clearCookie(name, { path: '/', secure: true, sameSite: 'none' });
+  }
+}
+
 // Admin Role Guard
 function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user || (req.user.role !== 'ADMIN' && req.user.role !== 'SUPERADMIN')) {
@@ -241,15 +290,86 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
 
 // Lazy Gemini AI Client Initialization
 let genAIClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
+function getGeminiClient(): GoogleGenAI | null {
   if (!genAIClient) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable is not configured');
+      return null;
     }
-    genAIClient = new GoogleGenAI({ apiKey });
+    genAIClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
   }
   return genAIClient;
+}
+
+/**
+ * Resilient Gemini Content Generation with automated multi-model failover
+ * Handles temporary spikes in demand (503 UNAVAILABLE), rate limits (429), and transient failures
+ */
+async function generateGeminiContentWithFailover(options: {
+  contents: string;
+  config?: any;
+}): Promise<string | null> {
+  const client = getGeminiClient();
+  if (!client) {
+    console.warn('[Gemini AI] GEMINI_API_KEY is not set. Using personalized contextual propositions.');
+    return null;
+  }
+
+  // Model fallback chain: primary -> lite -> latest flash
+  const candidateModels = [
+    'gemini-3.8-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-latest'
+  ];
+
+  for (const model of candidateModels) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await client.models.generateContent({
+          model,
+          contents: options.contents,
+          config: options.config
+        });
+
+        const text = response.text;
+        if (text && text.trim().length > 0) {
+          return text;
+        }
+      } catch (err: any) {
+        const errMsg = String(err?.message || err || '');
+        const isHighDemandOrRateLimited =
+          err?.status === 503 ||
+          err?.status === 429 ||
+          errMsg.includes('503') ||
+          errMsg.includes('high demand') ||
+          errMsg.includes('UNAVAILABLE') ||
+          errMsg.includes('RESOURCE_EXHAUSTED');
+
+        if (isHighDemandOrRateLimited) {
+          console.warn(`[Gemini AI] Model ${model} experiencing high demand (attempt ${attempt}/2).`);
+          if (attempt === 1) {
+            // Short exponential jitter delay before retry
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            continue;
+          }
+          // On second 503, immediately proceed to next fallback model
+          break;
+        } else {
+          console.warn(`[Gemini AI] Model ${model} encountered non-critical error, trying alternative.`);
+          break;
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 // --- REST API ENDPOINTS ---
@@ -292,7 +412,7 @@ app.get(['/api/health/readiness', '/api/health/ready', '/api/readiness', '/ready
   });
 });
 
-// 3. Main /api/health endpoint: returns 503 if database is not ready (never report ready based on HTTP alone)
+// 3. Main /api/health endpoint: returns 200 OK with server & database status for reverse proxy / container health checks
 app.get('/api/health', async (req: Request, res: Response) => {
   const probe = req.query.probe as string | undefined;
   if (probe === 'liveness') {
@@ -306,10 +426,10 @@ app.get('/api/health', async (req: Request, res: Response) => {
     });
   }
 
-  const ready = await store.isReady();
   const dbStatus = store.getDatabaseStatus();
+  const ready = dbStatus.connected;
 
-  if (!ready) {
+  if (probe === 'readiness' && !ready) {
     return res.status(503).json({
       status: 'unavailable',
       probe: 'readiness',
@@ -324,11 +444,11 @@ app.get('/api/health', async (req: Request, res: Response) => {
 
   return res.status(200).json({
     status: 'ok',
-    probe: 'readiness',
-    ready: true,
     app: 'AURA GAY 18+',
     environment: process.env.NODE_ENV || 'development',
     database: dbStatus,
+    ready,
+    uptimeSeconds: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
 });
@@ -385,6 +505,9 @@ app.post('/api/auth/register', authRateLimiter, async (req: Request, res: Respon
     }
 
     const result = await store.registerUser(email, cleanName, numAge, 'USER', password);
+    if (result && result.token) {
+      setMediaSessionCookie(res, result.token);
+    }
     res.status(201).json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Registration failed' });
@@ -404,6 +527,10 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
       return res.status(404).json({ error: 'No active account found for this email address. Please register.' });
     }
 
+    if (result && result.token) {
+      setMediaSessionCookie(res, result.token);
+    }
+
     res.json(result);
   } catch (err: any) {
     if (err.status === 503 || (err.message && err.message.toLowerCase().includes('database'))) {
@@ -411,6 +538,14 @@ app.post('/api/auth/login', authRateLimiter, async (req: Request, res: Response)
     }
     res.status(400).json({ error: err.message || 'Login failed' });
   }
+});
+
+// Keep media requests from native <img>/<video> elements authenticated after
+// Firebase refreshes its short-lived ID token. This requires a valid Bearer token.
+app.post('/api/auth/session', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+  setMediaSessionCookie(res, req.token!);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ success: true });
 });
 
 // Auth: Social Fallback / Sandbox Login - PERMANENTLY DISABLED FOR SECURITY
@@ -476,6 +611,113 @@ app.post('/api/auth/reset-password', authRateLimiter, async (req: Request, res: 
 // RICH MEDIA BACKEND ENDPOINTS & ACCESS CONTROL
 // ============================================================================
 
+function localMediaIdFromUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return /^\/api\/media\/([a-zA-Z0-9_-]+)(?:\?[^#]*)?$/.exec(value)?.[1] || null;
+}
+
+async function canUseMediaConversation(userId: string, conversationId: unknown): Promise<boolean> {
+  if (typeof conversationId !== 'string' || !conversationId) return false;
+  const conversation = await store.getConversation(conversationId);
+  if (!conversation || !conversation.participantIds.includes(userId)) return false;
+  const otherId = conversation.participantIds.find(id => id !== userId);
+  if (!otherId || await store.isBlocked(userId, otherId)) return false;
+  const otherUser = await store.getUserById(otherId);
+  return Boolean(otherUser && otherUser.status === 'ACTIVE');
+}
+
+type MediaRecordForAccess = NonNullable<Awaited<ReturnType<typeof getMediaRecordDurable>>>;
+type MediaAccessDenial = { status: number; error: string };
+
+async function mediaAccessDenial(record: MediaRecordForAccess, viewerId: string): Promise<MediaAccessDenial | null> {
+  const owner = await store.getUserById(record.ownerId);
+  if (!owner || owner.status !== 'ACTIVE') return { status: 404, error: 'Media owner not found.' };
+  if (viewerId === record.ownerId) return null;
+  if (await store.isBlocked(viewerId, record.ownerId)) {
+    return { status: 403, error: 'Access blocked by user policy.' };
+  }
+
+  // A profile photo is public only while it is present in the owner's saved profile.
+  // An unlisted upload has no public audience, even when its category is `photo`.
+  const profilePhotos = (record.category === 'photo' || record.category === 'profile_photo')
+    ? (owner.profile.photos || []).filter(photo => localMediaIdFromUrl(photo.url) === record.id)
+    : [];
+  if (profilePhotos.length > 0) {
+    if (profilePhotos.some(photo => photo.isPrivate) &&
+        !(await store.hasVaultAccessDurable(record.ownerId, viewerId))) {
+      return { status: 403, error: 'This photo is private.' };
+    }
+    if (record.category === 'profile_photo' && record.moderationStatus !== 'APPROVED') {
+      return { status: 403, error: 'This profile photo is pending moderation and is currently unavailable.' };
+    }
+    return null;
+  }
+  if (record.category === 'profile_photo') {
+    return { status: 403, error: 'This profile photo is not published.' };
+  }
+
+  if (!record.conversationId) {
+    return { status: 403, error: 'This media item is private.' };
+  }
+  const conversation = await store.getConversation(record.conversationId);
+  if (!conversation || !conversation.participantIds.includes(viewerId) ||
+      !conversation.participantIds.includes(record.ownerId)) {
+    return { status: 403, error: 'Unauthorized conversation media access.' };
+  }
+  for (const participantId of conversation.participantIds) {
+    const participant = await store.getUserById(participantId);
+    if (!participant || participant.status !== 'ACTIVE' ||
+        (participantId !== viewerId && await store.isBlocked(viewerId, participantId))) {
+      return { status: 403, error: 'Conversation media is unavailable.' };
+    }
+  }
+
+  const messages = await store.getMessages(record.conversationId, viewerId);
+  const hasActiveMessage = messages.some(message =>
+    message.senderId === record.ownerId && (
+      message.photo?.mediaId === record.id ||
+      message.voice?.mediaId === record.id ||
+      message.starVideo?.mediaId === record.id ||
+      localMediaIdFromUrl(message.media?.url) === record.id ||
+      localMediaIdFromUrl(message.photoUrl) === record.id
+    )
+  );
+  return hasActiveMessage ? null : { status: 404, error: 'Media is no longer accessible or was deleted.' };
+}
+
+async function bindMessageMedia(
+  messageType: unknown,
+  payload: { photo?: any; photoUrl?: unknown; voice?: any; starVideo?: any; media?: any },
+  senderId: string,
+  conversationId: string
+): Promise<boolean> {
+  const references = messageType === 'PHOTO'
+    ? [payload.photo?.mediaId, localMediaIdFromUrl(payload.photoUrl), localMediaIdFromUrl(payload.media?.url)]
+    : messageType === 'VOICE'
+    ? [payload.voice?.mediaId, localMediaIdFromUrl(payload.media?.url)]
+    : messageType === 'STAR_VIDEO'
+    ? [payload.starVideo?.mediaId, localMediaIdFromUrl(payload.starVideo?.url), localMediaIdFromUrl(payload.media?.url)]
+    : [];
+  const ids = [...new Set(references.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+  if (ids.length === 0) return true; // Legacy external URL; no AURA media object is exposed.
+  if (ids.length !== 1 || !(await canUseMediaConversation(senderId, conversationId))) return false;
+
+  const record = await getMediaRecordDurable(ids[0]);
+  const expectedCategory = messageType === 'PHOTO' ? 'photo'
+    : messageType === 'VOICE' ? 'voice' : 'star_video';
+  if (!record || record.deletedAt || record.ownerId !== senderId || record.category !== expectedCategory) {
+    return false;
+  }
+  const bound = await bindMediaToConversationDurable(record.id, senderId, conversationId);
+  if (bound && messageType === 'PHOTO' && payload.photo && !payload.photo.mediaId) {
+    payload.photo.mediaId = record.id;
+  }
+  if (bound && messageType === 'STAR_VIDEO' && payload.starVideo && !payload.starVideo.mediaId) {
+    payload.starVideo.mediaId = record.id;
+  }
+  return bound;
+}
+
 // 1. Upload Init: Allocate upload session & validate parameters before transfer
 app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -494,22 +736,8 @@ app.post('/api/media/upload/init', authenticateToken, async (req: AuthenticatedR
       return res.status(400).json({ error: `Invalid mediaType: ${mediaType}.` });
     }
 
-    if (conversationId) {
-      const conv = await store.getConversation(conversationId);
-      if (!conv || !conv.participantIds.includes(req.user!.id)) {
-        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
-      }
-
-      const otherId = conv.participantIds.find(id => id !== req.user!.id);
-      if (otherId) {
-        if (await store.isBlocked(req.user!.id, otherId)) {
-          return res.status(403).json({ error: 'Cannot upload media to a blocked conversation.' });
-        }
-        const otherUser = await store.getUserById(otherId);
-        if (!otherUser || otherUser.status !== 'ACTIVE') {
-          return res.status(403).json({ error: 'Recipient account is not active.' });
-        }
-      }
+    if (conversationId != null && !(await canUseMediaConversation(req.user!.id, conversationId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
     }
 
     const session = createUploadSession(req.user!.id, category, mimeType, size, conversationId);
@@ -559,6 +787,13 @@ app.post('/api/media/upload/complete', authenticateToken, upload.single('media')
       targetConvId = session.conversationId || targetConvId;
     } else if (req.body.category) {
       category = req.body.category;
+    }
+    if (!['photo', 'voice', 'star_video', 'profile_photo'].includes(category)) {
+      return res.status(400).json({ error: 'Invalid media category.' });
+    }
+
+    if (targetConvId != null && !(await canUseMediaConversation(req.user!.id, targetConvId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
     }
 
     if (category === 'star_video') {
@@ -617,6 +852,11 @@ app.post('/api/media/upload', authenticateToken, upload.single('media'), async (
       category = 'star_video';
     }
 
+    if (req.body.conversationId != null &&
+        !(await canUseMediaConversation(req.user!.id, req.body.conversationId))) {
+      return res.status(403).json({ error: 'Cannot upload media to this conversation.' });
+    }
+
     const record = await processAndSaveMedia({
       buffer: req.file.buffer,
       clientMime: req.file.mimetype,
@@ -648,6 +888,7 @@ app.post('/api/media/upload', authenticateToken, upload.single('media'), async (
 
 // 4. Secure Media Access & Delivery Endpoint with Strict Headers
 app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-store');
   try {
     const mediaId = String(req.params.mediaId);
     const isThumb = req.query.thumb === 'true';
@@ -679,6 +920,18 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       }
     }
 
+    // Native media elements cannot attach Authorization headers. Firebase Hosting
+    // forwards __session; direct-origin users can still have legacy cookie names.
+    if (!requestingUserId) {
+      for (const cookieToken of mediaSessionTokens(req.headers.cookie)) {
+        const user = await store.getUserByToken(cookieToken);
+        if (user && user.status === 'ACTIVE') {
+          requestingUserId = user.id;
+          break;
+        }
+      }
+    }
+
     if (!requestingUserId) {
       return res.status(401).json({ error: 'Authentication required to access media.' });
     }
@@ -688,60 +941,26 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
       return res.status(429).json({ error: 'Download rate limit exceeded.' });
     }
 
-    // 2. Fetch media record
-    const record = getMediaRecord(mediaId);
+    // A file on disk is not proof of ownership. Never serve it without its metadata record.
+    const record = await getMediaRecordDurable(mediaId);
     if (!record || record.deletedAt) {
       return res.status(404).json({ error: 'Media not found or has been deleted.' });
     }
 
-    
-    if (record.category === 'profile_photo' && record.moderationStatus !== 'APPROVED') {
-      if (record.ownerId !== requestingUserId) {
-        return res.status(403).json({ error: 'This profile photo is pending moderation and is currently unavailable.' });
-      }
-    }
-
-    // 3. Conversation access control & block check
-    if (record.conversationId) {
-      const conv = await store.getConversation(record.conversationId);
-      if (!conv || !conv.participantIds.includes(requestingUserId)) {
-        return res.status(403).json({ error: 'Unauthorized: You are not a participant in this conversation.' });
-      }
-
-      const otherId = conv.participantIds.find(id => id !== requestingUserId);
-      if (otherId) {
-        if (await store.isBlocked(requestingUserId, otherId)) {
-          return res.status(403).json({ error: 'Access blocked by user policy.' });
-        }
-        const otherUser = await store.getUserById(otherId);
-        if (!otherUser || otherUser.status !== 'ACTIVE') {
-          return res.status(403).json({ error: 'Participant account is inactive.' });
-        }
-      }
-
-      const msgs = await store.getMessages(record.conversationId, requestingUserId);
-      const hasActiveMessage = msgs.some(m => 
-        m.photo?.mediaId === mediaId || 
-        m.voice?.mediaId === mediaId || 
-        m.starVideo?.mediaId === mediaId || 
-        m.media?.url?.includes(mediaId)
-      );
-      if (!hasActiveMessage && record.ownerId !== requestingUserId) {
-        return res.status(404).json({ error: 'Media is no longer accessible or was deleted.' });
-      }
-    }
+    const denial = await mediaAccessDenial(record, requestingUserId);
+    if (denial) return res.status(denial.status).json({ error: denial.error });
 
     // 4. Serve file with mandatory security headers
-    const fileInfo = getMediaFileForServing(mediaId, isThumb);
+    const fileInfo = await getMediaFileForServingDurable(mediaId, isThumb);
     if (!fileInfo) {
       return res.status(404).json({ error: 'Media binary file not found.' });
     }
 
     res.setHeader('Content-Type', fileInfo.mimeType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'");
+    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Disposition', 'inline; filename="safe_media"');
-    res.setHeader('Cache-Control', 'private, no-transform, max-age=3600');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.sendFile(fileInfo.path);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to deliver media.' });
@@ -749,24 +968,30 @@ app.get('/api/media/:mediaId', async (req: Request, res: Response) => {
 });
 
 // 5. Generate Signed Media Access Token for Expiring Links
-app.get('/api/media/:mediaId/sign', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
-  const mediaId = String(req.params.mediaId);
-  const record = getMediaRecord(mediaId);
-  if (!record) {
-    return res.status(404).json({ error: 'Media not found.' });
+app.get('/api/media/:mediaId/sign', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const mediaId = String(req.params.mediaId);
+    const record = await getMediaRecordDurable(mediaId);
+    if (!record || record.deletedAt) {
+      return res.status(404).json({ error: 'Media not found.' });
+    }
+    const denial = await mediaAccessDenial(record, req.user!.id);
+    if (denial) return res.status(denial.status).json({ error: denial.error });
+    const signedToken = signMediaAccessToken(mediaId, req.user!.id, 900); // 15 min TTL
+    res.json({
+      token: signedToken,
+      url: `/api/media/${mediaId}?token=${signedToken}`
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to sign media access.' });
   }
-  const signedToken = signMediaAccessToken(mediaId, req.user!.id, 900); // 15 min TTL
-  res.json({
-    token: signedToken,
-    url: `/api/media/${mediaId}?token=${signedToken}`
-  });
 });
 
 // 6. Delete Media Endpoint
-app.delete('/api/media/:mediaId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+app.delete('/api/media/:mediaId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const mediaId = String(req.params.mediaId);
-    const success = deleteMediaRecord(mediaId, req.user!.id);
+    const success = await deleteMediaRecordDurable(mediaId, req.user!.id);
     if (!success) {
       return res.status(404).json({ error: 'Media not found or already deleted.' });
     }
@@ -796,18 +1021,10 @@ app.post('/api/media/link-preview', authenticateToken, async (req: Authenticated
   }
 });
 
-// Media: Authenticated / Sandboxed Delivery Endpoint (Legacy path support)
+// Legacy filenames have no reliable owner or privacy metadata. Fail closed;
+// current uploads use /api/media/:mediaId with an authorization check above.
 app.get('/api/media/files/:filename', (req: Request, res: Response) => {
-  const filename = Array.isArray(req.params.filename) ? req.params.filename[0] : (req.params.filename as string);
-  const fileInfo = getLocalMediaFile(filename);
-  if (!fileInfo) {
-    return res.status(404).json({ error: 'Media object not found.' });
-  }
-  res.setHeader('Content-Type', fileInfo.mimeType);
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'none'");
-  res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
-  res.sendFile(fileInfo.path);
+  return res.status(404).json({ error: 'Media object not found.' });
 });
 
 // Photo Album Import: Inspect Shared Album (iCloud & Google Photos)
@@ -902,7 +1119,14 @@ app.get('/api/webrtc/ice-servers', authenticateToken, (req: AuthenticatedRequest
   const turnUrls = process.env.TURN_URLS;
 
   const defaultStun = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:global.stun.twilio.com:3478'
+      ]
+    }
   ];
 
   if (!turnSecret || !turnUrls) {
@@ -958,24 +1182,66 @@ app.get('/api/auth/me', authenticateToken, (req: AuthenticatedRequest, res: Resp
   res.json({ user: req.user });
 });
 
-// Auth: Logout
-app.post('/api/auth/logout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
-  if (req.token) {
-    await store.invalidateToken(req.token);
+// Auth: Logout. Clear cookies even if the Bearer token has expired; require
+// the Authorization header so a cross-site form cannot log out the user.
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !/^Bearer\s+\S+/i.test(authHeader)) {
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  clearMediaSessionCookies(res);
+  res.setHeader('Cache-Control', 'no-store');
+  const user = await store.getUserByToken(token);
+  if (user && user.status === 'ACTIVE') {
+    await store.invalidateToken(token);
   }
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
+async function profileTextModerationError(
+  previousProfile: UserAccount['profile'],
+  updates: { displayName?: unknown; bio?: unknown }
+): Promise<{ status: number; error: string; reason?: string } | null> {
+  const nextDisplayName = typeof updates.displayName === 'string'
+    ? updates.displayName.trim() : previousProfile.displayName;
+  const nextBio = typeof updates.bio === 'string'
+    ? updates.bio.trim() : previousProfile.bio;
+  const nameChanged = nextDisplayName !== previousProfile.displayName?.trim();
+  const bioChanged = nextBio !== (previousProfile.bio || '').trim();
+
+  // Saving GPS, photos, or other fields must not depend on a second AI review.
+  if (!nameChanged && !bioChanged) return null;
+
+  const result = await moderateText(`${nextDisplayName} ${nextBio}`, 'PUBLIC_PROFILE', true);
+  if (result.isApproved) return null;
+
+  const unavailable = [
+    'Moderation service unavailable',
+    'Moderation service returned empty response',
+    'Moderation service returned unparseable JSON',
+    'Invalid moderation response schema from model',
+    'Moderation request timeout or error'
+  ].includes(result.reason || '');
+  const simpleNameOnly = nameChanged && !bioChanged &&
+    /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{0,31}$/u.test(nextDisplayName);
+  if (unavailable && simpleNameOnly) return null;
+
+  return {
+    status: unavailable ? 503 : 400,
+    error: unavailable
+      ? 'Profile text moderation is temporarily unavailable. Please try again.'
+      : 'Profile content rejected by safety policy.',
+    reason: result.reason
+  };
+}
+
 // Profile: Update
 app.put('/api/profile', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    
-    if (req.body.bio || req.body.displayName) {
-      const textToModerate = `${req.body.displayName || ''} ${req.body.bio || ''}`;
-      const modResult = await moderateText(textToModerate, 'PUBLIC_PROFILE', true);
-      if (!modResult.isApproved) {
-        return res.status(400).json({ error: 'Profile content rejected by safety policy.', reason: modResult.reason });
-      }
+    const moderationError = await profileTextModerationError(req.user!.profile, req.body);
+    if (moderationError) {
+      return res.status(moderationError.status).json({ error: moderationError.error, reason: moderationError.reason });
     }
 
     if (req.body.userMode) {
@@ -1019,6 +1285,26 @@ app.put('/api/users/status-mode', authenticateToken, async (req: AuthenticatedRe
   }
 });
 
+// Legacy free activation is disabled. Only the signed paid webhook can grant a boost.
+app.post('/api/profile/boost', authenticateToken, (_req: AuthenticatedRequest, res: Response) => {
+  res.status(410).json({ error: 'Profile Booster now requires a paid Checkout purchase.' });
+});
+
+app.get('/api/profile/boost/status', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const user = await store.getUserById(req.user!.id);
+    const boostExpiresAt = user?.profile.boostExpiresAt;
+    return res.json({
+      isBoosted: Boolean(boostExpiresAt && new Date(boostExpiresAt).getTime() > Date.now()),
+      boostExpiresAt: boostExpiresAt || null
+    });
+  } catch (error) {
+    console.error('[Profile Booster] Status unavailable:', error);
+    return res.status(503).json({ error: 'Profile Booster status unavailable' });
+  }
+});
+
 // Profile: Add Photo
 app.post('/api/profile/photos', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -1046,13 +1332,9 @@ app.delete('/api/profile/photos/:photoId', authenticateToken, async (req: Authen
 });
 
 // Discovery: Feed & Profiles
-app.get('/api/profiles', async (req: Request, res: Response) => {
+app.get('/api/profiles', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const profiles = await store.getDiscoverFeed(currentUserId);
+    const profiles = await store.getDiscoverFeed(req.user!.id);
     res.json({ profiles, count: profiles.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch profiles', profiles: [] });
@@ -1060,15 +1342,10 @@ app.get('/api/profiles', async (req: Request, res: Response) => {
 });
 
 // Profile Lookup by User ID
-app.get('/api/profiles/:userId', async (req: Request, res: Response) => {
+app.get('/api/profiles/:userId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = String(req.params.userId);
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const requestingUserId = user ? user.id : undefined;
-
-    const profile = await store.getProfileById(userId, requestingUserId);
+    const profile = await store.getProfileById(userId, req.user!.id);
     if (!profile) {
       return res.status(404).json({ error: 'User profile not found' });
     }
@@ -1078,26 +1355,18 @@ app.get('/api/profiles/:userId', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/discover', async (req: Request, res: Response) => {
+app.get('/api/discover', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const feed = await store.getDiscoverFeed(currentUserId);
+    const feed = await store.getDiscoverFeed(req.user!.id);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch discovery feed', feed: [], profiles: [] });
   }
 });
 
-app.post('/api/discover', async (req: Request, res: Response) => {
+app.post('/api/discover', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const feed = await store.getDiscoverFeed(currentUserId, req.body);
+    const feed = await store.getDiscoverFeed(req.user!.id, req.body);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to fetch discovery feed' });
@@ -1109,15 +1378,23 @@ app.get('/api/venues', (req: Request, res: Response) => {
   try {
     const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
     const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
-    const radiusKm = req.query.radiusKm ? parseFloat(req.query.radiusKm as string) : 40;
+    const radiusKm = req.query.radiusKm ? parseFloat(req.query.radiusKm as string) : 50;
     const query = req.query.q ? (req.query.q as string).trim() : '';
+    const category = req.query.category ? (req.query.category as string).trim() : undefined;
+    const cruisingOnly = req.query.cruisingOnly === 'true' || req.query.cruising === 'true';
 
     let venues = QUEER_VENUES;
 
     if (query) {
-      venues = searchVenues(query, lat, lng);
+      venues = searchVenues(query, lat, lng, { category, cruisingOnly });
     } else if (lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
-      venues = getVenuesNearLocation(lat, lng, radiusKm);
+      venues = getVenuesNearLocation(lat, lng, radiusKm, { category, cruisingOnly });
+    } else {
+      if (cruisingOnly) {
+        venues = venues.filter(v => v.isCruising || v.category === 'cruising' || v.category === 'sauna');
+      } else if (category && category !== 'all') {
+        venues = venues.filter(v => v.category === category);
+      }
     }
 
     res.json({
@@ -1245,10 +1522,21 @@ app.get('/api/conversations/:conversationId/messages', authenticateToken, async 
   try {
     const conversationId = String(req.params.conversationId);
     const messages = await store.getMessages(conversationId, req.user!.id);
-    await store.markMessagesRead(conversationId, req.user!.id);
-    res.json({ messages });
+    const readMessages = await store.markMessagesRead(conversationId, req.user!.id);
+    res.json({ messages, readCount: readMessages.length });
   } catch (err: any) {
     res.status(403).json({ error: err.message || 'Access to messages denied' });
+  }
+});
+
+// Conversations: Explicitly Mark Messages as Read
+app.post('/api/conversations/:conversationId/read', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const readMessages = await store.markMessagesRead(conversationId, req.user!.id);
+    res.json({ success: true, count: readMessages.length, readMessages });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to mark messages as read' });
   }
 });
 
@@ -1288,8 +1576,8 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
         return res.status(400).json({ error: 'Photo payload or media URL is required.' });
       }
       if (photo?.mediaId) {
-        const rec = getMediaRecord(photo.mediaId);
-        if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+        const rec = await getMediaRecordDurable(photo.mediaId);
+        if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'photo') {
           return res.status(400).json({ error: 'Invalid or unauthorized photo mediaId.' });
         }
       }
@@ -1375,29 +1663,35 @@ app.post('/api/conversations/:conversationId/messages', authenticateToken, async
       if (!voice?.mediaId) {
         return res.status(400).json({ error: 'Voice payload requires a verified mediaId.' });
       }
-      const rec = getMediaRecord(voice.mediaId);
-      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
+      const rec = await getMediaRecordDurable(voice.mediaId);
+      if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'voice') {
         return res.status(400).json({ error: 'Invalid or unauthorized voice mediaId.' });
       }
     }
 
     // 6. Validate Star Video Message
     if (messageType === 'STAR_VIDEO') {
-      if (!starVideo?.mediaId) {
-        return res.status(400).json({ error: 'Star Video payload requires a verified mediaId.' });
+      if (!starVideo?.mediaId && !media?.url && !starVideo?.url) {
+        return res.status(400).json({ error: 'Star Video payload requires a verified mediaId or media url.' });
       }
-      const rec = getMediaRecord(starVideo.mediaId);
-      if (!rec || (rec.ownerId !== req.user!.id && rec.conversationId !== conversationId)) {
-        return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
-      }
-      if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
-        return res.status(400).json({ error: `Star Video exceeds maximum length of ${MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS} seconds.` });
+      if (starVideo?.mediaId) {
+        const rec = await getMediaRecordDurable(starVideo.mediaId);
+        if (!rec || rec.ownerId !== req.user!.id || rec.category !== 'star_video') {
+          return res.status(400).json({ error: 'Invalid or unauthorized Star Video mediaId.' });
+        }
+        if (starVideo.duration && starVideo.duration > MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS) {
+          return res.status(400).json({ error: `Star Video exceeds maximum length of ${MEDIA_LIMITS.MAX_VIDEO_DURATION_SECONDS} seconds.` });
+        }
       }
     }
 
     // 7. Generic content requirement check
     if (!text?.trim() && !photoUrl && !photo && !media && !finalLocation && !finalStickerId && !voice && !starVideo && !tapType && !vaultAction && !link && !linkPreview) {
       return res.status(400).json({ error: 'Message content is required.' });
+    }
+
+    if (!(await bindMessageMedia(messageType, { photo, photoUrl, voice, starVideo, media }, req.user!.id, conversationId))) {
+      return res.status(403).json({ error: 'Media does not belong to you or this conversation.' });
     }
 
     const message = await store.sendMessage(req.user!.id, conversationId, {
@@ -1658,6 +1952,10 @@ app.post('/api/backup/cloud/run', authenticateToken, async (req: AuthenticatedRe
 app.post('/api/gdpr/rectify', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { email, displayName, bio } = req.body;
+    const moderationError = await profileTextModerationError(req.user!.profile, { displayName, bio });
+    if (moderationError) {
+      return res.status(moderationError.status).json({ error: moderationError.error, reason: moderationError.reason });
+    }
     const user = await store.rectifyUserData(req.user!.id, { email, displayName, bio });
     res.json({ success: true, user, message: 'Data rectified successfully' });
   } catch (err: any) {
@@ -1846,8 +2144,18 @@ const handleAIIcebreaker = async (req: AuthenticatedRequest, res: Response) => {
   const role = targetProfile.identityRole || 'Member';
   const bio = targetProfile.bio || 'Exploring connections';
 
+  const primaryInterest = targetProfile.interests?.[0] || 'good coffee';
+  const secondaryInterest = targetProfile.interests?.[1] || 'music';
+
+  // Dynamic contextual fallbacks personalized to their profile
+  const fallbackPropositions = [
+    `Hey ${displayName}! Loved your photos and saw you're into ${primaryInterest}. How has your week been?`,
+    `Hi ${displayName}! Your vibe is captivating. Up for grabbing a coffee or drinks nearby sometime?`,
+    `Hey there! Saw that you enjoy ${secondaryInterest}. What's your favorite spot in town?`,
+    `Hey handsome, couldn't scroll past without saying hi. What are you up to tonight?`
+  ];
+
   try {
-    const ai = getGeminiClient();
     const prompt = `You are an elite, respectful, charming conversational wingman for AURA GAY 18+, a premium adult gay dating app.
 Generate 4 distinct, engaging, authentic proposition messages/conversation starters for starting a chat with ${displayName}.
 
@@ -1868,8 +2176,7 @@ Rules:
 2. Tone must be authentic, adult 18+ appropriate, respectful, engaging, and never robotic or cheesy.
 3. Return ONLY a valid JSON array of 4 strings: ["Msg 1", "Msg 2", "Msg 3", "Msg 4"]. No markdown code fences.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+    const rawText = await generateGeminiContentWithFailover({
       contents: prompt,
       config: {
         temperature: 0.85,
@@ -1877,17 +2184,23 @@ Rules:
       }
     });
 
-    const text = response.text || '[]';
     let propositions: string[] = [];
-    try {
-      propositions = JSON.parse(text);
-    } catch {
-      propositions = [
-        `Hey ${displayName}! Loved your vibe and seeing you're into ${targetProfile.interests?.[0] || 'design'}. How has your week been?`,
-        `Hi ${displayName}! Your photos caught my attention. Up for grabbing an espresso or drink nearby sometime?`,
-        `Hey there! I saw we both appreciate good vibes and ${targetProfile.interests?.[1] || 'fitness'}. What are you up to today?`,
-        `Hey handsome, couldn't pass by your profile without saying hi! What brings you on Aura?`
-      ];
+    if (rawText) {
+      try {
+        const cleanText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const match = cleanText.match(/\[[\s\S]*\]/);
+        if (match) {
+          propositions = JSON.parse(match[0]);
+        } else {
+          propositions = JSON.parse(cleanText);
+        }
+      } catch {
+        propositions = [];
+      }
+    }
+
+    if (!Array.isArray(propositions) || propositions.length === 0) {
+      propositions = fallbackPropositions;
     }
 
     res.json({
@@ -1895,18 +2208,7 @@ Rules:
       propositions
     });
   } catch (err: any) {
-    console.error('Gemini API Error (fallback triggered):', err);
-    // Dynamic contextual fallbacks personalized to their profile
-    const primaryInterest = targetProfile.interests?.[0] || 'good coffee';
-    const secondaryInterest = targetProfile.interests?.[1] || 'music';
-
-    const fallbackPropositions = [
-      `Hey ${displayName}! Loved your photos and saw you're into ${primaryInterest}. How has your week been?`,
-      `Hi ${displayName}! Your vibe is captivating. Up for grabbing a coffee or drinks nearby sometime?`,
-      `Hey there! Saw that you enjoy ${secondaryInterest}. What's your favorite spot in town?`,
-      `Hey handsome, couldn't scroll past without saying hi. What are you up to tonight?`
-    ];
-
+    console.warn('[Gemini AI] Fallback propositions served:', err?.message || err);
     res.json({
       icebreakers: fallbackPropositions,
       propositions: fallbackPropositions,
@@ -1955,37 +2257,14 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
     const Stripe = (await import('stripe')).default;
     const stripe = new Stripe(stripeKey);
 
-    const isAnnual = planId === 'aura_vip_annual';
-    const baseUrl = getCanonicalBaseUrl(req);
+    const session = await stripe.checkout.sessions.create(
+      buildStripeCheckout(req.user!.id, planId, process.env, req.headers.host, req.headers['x-forwarded-host'], req.headers.origin)
+    );
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      client_reference_id: req.user!.id,
-      metadata: {
-        userId: req.user!.id,
-        planId
-      },
-      line_items: [
-        {
-          price_data: {
-            currency: 'usd',
-            product_data: {
-              name: isAnnual ? 'AURA VIP Pass (Annual)' : 'AURA VIP Pass (Monthly)',
-              description: 'Unlimited likes, see who liked you, stealth mode, and AI icebreaker priority.'
-            },
-            unit_amount: isAnnual ? 9999 : 1499,
-            recurring: {
-              interval: isAnnual ? 'year' : 'month'
-            }
-          },
-          quantity: 1
-        }
-      ],
-      mode: 'subscription',
-      success_url: `${baseUrl}/?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/?payment=cancelled`
-    });
-
+    // Firebase Hosting forwards this HttpOnly cookie to Cloud Run on the
+    // browser's return from Stripe, allowing the confirmation URL to be gated
+    // before the SPA (and any page-view conversion tag) is served.
+    setMediaSessionCookie(res, req.token!);
     res.json({ url: session.url, checkoutUrl: session.url });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Payment processing error' });
@@ -1993,6 +2272,106 @@ const handleCheckout = async (req: AuthenticatedRequest, res: Response) => {
 };
 app.post('/api/payments/create-checkout-session', authenticateToken, handleCheckout);
 app.post('/api/payments/checkout-session', authenticateToken, handleCheckout);
+
+app.post('/api/profile/boost/checkout', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(503).json({ error: 'Płatności Boosterem są teraz niedostępne.' });
+  try {
+    const Stripe = (await import('stripe')).default;
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.create(
+      buildProfileBoostCheckout(req.user!.id, process.env, req.headers.host, req.headers['x-forwarded-host'], req.headers.origin)
+    );
+    setMediaSessionCookie(res, req.token!);
+    return res.json({ url: session.url });
+  } catch (error: any) {
+    console.error('[Profile Booster] Checkout creation failed:', error);
+    return res.status(503).json({ error: 'Nie udało się rozpocząć płatności Boosterem.' });
+  }
+});
+
+app.get('/api/profile/boost/checkout-confirmation', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.status(400).json({ status: 'not_found' });
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(503).json({ status: 'unavailable' });
+  try {
+    const Stripe = (await import('stripe')).default;
+    const stripe = new Stripe(stripeKey);
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.client_reference_id !== req.user!.id || session.metadata?.userId !== req.user!.id ||
+        session.metadata?.productId !== PROFILE_BOOST_PRODUCT_ID || session.mode !== 'payment') {
+      return res.status(404).json({ status: 'not_found' });
+    }
+    if (session.status === 'expired') return res.json({ status: 'failed' });
+    if (session.status === 'complete' && session.payment_status === 'paid' && !isPaidProfileBoostSession(session)) {
+      return res.json({ status: 'failed' });
+    }
+    if (!isPaidProfileBoostSession(session)) return res.json({ status: 'payment_pending' });
+    const boostExpiresAt = await store.getProfileBoostPurchase(sessionId, req.user!.id);
+    if (boostExpiresAt && new Date(boostExpiresAt).getTime() <= Date.now()) {
+      return res.json({ status: 'expired', boostExpiresAt });
+    }
+    return res.json(boostExpiresAt ? { status: 'active', boostExpiresAt } : { status: 'activation_pending' });
+  } catch (error) {
+    console.error('[Profile Booster] Confirmation unavailable:', error);
+    return res.status(503).json({ status: 'unavailable' });
+  }
+});
+
+async function getCheckoutConfirmationStatus(sessionId: string, userId: string) {
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) throw new Error('Stripe is not configured');
+  const Stripe = (await import('stripe')).default;
+  const stripe = new Stripe(stripeKey);
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  return classifyCheckoutSession(session, userId);
+}
+
+// A session ID in a URL never proves payment. Verify it against Stripe and the
+// signed-in account before serving the success page at all. Unverified visits
+// are redirected away, so URL-based conversion rules cannot count them.
+app.get('/payment/confirmation', async (req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.redirect(303, '/?payment=unverified');
+
+  let user: UserAccount | null = null;
+  for (const cookieToken of mediaSessionTokens(req.headers.cookie)) {
+    user = await store.getUserByToken(cookieToken);
+    if (user?.status === 'ACTIVE') break;
+    user = null;
+  }
+  if (!user) return res.redirect(303, checkoutConfirmationRedirect('unauthenticated')!);
+
+  try {
+    const status = await getCheckoutConfirmationStatus(sessionId, user.id);
+    const destination = checkoutConfirmationRedirect(status);
+    if (destination) return res.redirect(303, destination);
+    return next();
+  } catch (error) {
+    console.error('[Stripe Checkout] Return verification unavailable:', error);
+    return res.redirect(303, '/payment/pending');
+  }
+});
+
+app.get('/api/payments/checkout-confirmation', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const sessionId = req.query.session_id;
+  if (!isCheckoutSessionId(sessionId)) return res.status(400).json({ status: 'not_found' });
+
+  try {
+    const status = await getCheckoutConfirmationStatus(sessionId, req.user!.id);
+    if (status === 'not_found') return res.status(404).json({ status });
+    const entitlement = status === 'paid' ? await store.getUserEntitlements(req.user!.id) : null;
+    return res.json({ status, vipActive: status === 'paid' && entitlement?.premium === true });
+  } catch (error) {
+    console.error('[Stripe Checkout] Confirmation check unavailable:', error);
+    return res.status(503).json({ status: 'unavailable' });
+  }
+});
 
 // Stripe Webhook Endpoint (Protected by cryptographic signature and idempotent processing)
 app.post('/api/payments/webhook', async (req: Request, res: Response) => {
@@ -2014,82 +2393,83 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'Stripe service unavailable' });
   }
 
-  let event: any;
+  let event: Stripe.Event;
+  let stripe: Stripe;
   try {
     const Stripe = (await import('stripe')).default;
-    const stripe = new Stripe(stripeKey);
+    stripe = new Stripe(stripeKey);
     event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err: any) {
     console.error('[Stripe Webhook] Signature verification failed:', err.message);
     return res.status(400).json({ error: `Webhook signature verification failed: ${err.message}` });
   }
 
-  // Idempotency check: Ignore already processed events
-  if (await store.isStripeEventProcessed(event.id)) {
-    return res.json({ received: true, message: 'Event already processed' });
-  }
-
-  await store.recordStripeEvent(event.id, event.type);
-  console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
-
   try {
+    // PostgreSQL is authoritative; a lookup failure must return 500 for Stripe to retry.
+    if (await store.isStripeEventProcessed(event.id)) {
+      return res.json({ received: true, message: 'Event already processed' });
+    }
+
+    console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
     switch (event.type) {
+      case 'checkout.session.async_payment_succeeded':
       case 'checkout.session.completed': {
         const session = event.data.object;
-        const customerId = session.customer as string;
-        const subscriptionId = session.subscription as string;
-        const userId = session.client_reference_id || session.metadata?.userId;
-        const planId = session.metadata?.planId || 'aura_vip_monthly';
-
-        if (userId) {
-          await store.recordStripeSubscription(userId, customerId, subscriptionId, planId, 'active');
-          console.log(`[Stripe Webhook] Activated VIP for user ${userId}`);
-        } else if (customerId) {
-          const user = await store.findUserByStripeCustomerId(customerId);
-          if (user) {
-            await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, 'active');
-            console.log(`[Stripe Webhook] Activated VIP for user ${user.id} via customer ID`);
+        if (session.mode === 'payment' && session.metadata?.productId === PROFILE_BOOST_PRODUCT_ID) {
+          if (isCheckoutSessionId(session.id) && session.client_reference_id && isPaidProfileBoostSession(session)) {
+            const result = await store.fulfillProfileBoostPurchase(session.id, session.client_reference_id, event.id);
+            console.log(`[Stripe Webhook] Profile Booster ${result.activated ? 'activated' : 'already fulfilled'} for user ${session.client_reference_id}`);
+          } else {
+            console.warn('[Stripe Webhook] Rejected Profile Booster session with invalid identity, amount, currency, or payment status');
           }
+          break;
         }
+        if (session.mode !== 'subscription' || session.payment_status !== 'paid') break;
+        const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+        const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+        if (!subscriptionId || !customerId ||
+            (session.client_reference_id && session.metadata?.userId && session.client_reference_id !== session.metadata.userId)) {
+          throw new Error('Paid Checkout session has inconsistent subscription ownership');
+        }
+        const userId = await syncStripeSubscription(stripe, store, subscriptionId, {
+          checkoutUserId: session.client_reference_id || session.metadata?.userId,
+          checkoutCustomerId: customerId,
+          checkoutPaid: true
+        });
+        if (userId) console.log(`[Stripe Webhook] Synchronized paid Checkout for user ${userId}`);
         break;
       }
 
       case 'customer.subscription.created':
-      case 'customer.subscription.updated': {
-        const sub = event.data.object;
-        const customerId = sub.customer as string;
-        const subscriptionId = sub.id as string;
-        const status = sub.status; // 'active', 'trialing', 'past_due', 'canceled', etc.
-        const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
-        const planId = sub.metadata?.planId || 'aura_vip_monthly';
-        const userId = sub.metadata?.userId;
-
-        let user = userId ? await store.getUserById(userId) : null;
-        if (!user && customerId) {
-          user = await store.findUserByStripeCustomerId(customerId);
-        }
-        if (!user && subscriptionId) {
-          user = await store.findUserByStripeSubscriptionId(subscriptionId);
-        }
-
-        if (user) {
-          await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, status, periodEnd);
-          console.log(`[Stripe Webhook] Updated subscription for user ${user.id}: status=${status}`);
-        }
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted':
+      case 'customer.subscription.paused':
+      case 'customer.subscription.resumed': {
+        const sub = event.data.object as Stripe.Subscription;
+        const userId = await syncStripeSubscription(stripe, store, sub.id);
+        if (userId) console.log(`[Stripe Webhook] Synchronized subscription for user ${userId}`);
         break;
       }
 
-      case 'customer.subscription.deleted':
+      case 'invoice.paid':
       case 'invoice.payment_failed': {
-        const obj = event.data.object;
-        const customerId = obj.customer as string;
-        const subscriptionId = (obj.subscription || obj.id) as string;
-
-        let user = await store.findUserByStripeCustomerId(customerId) || await store.findUserByStripeSubscriptionId(subscriptionId);
-        if (user) {
-          await store.recordStripeSubscription(user.id, customerId, subscriptionId, 'none', 'canceled');
-          console.log(`[Stripe Webhook] Deactivated VIP for user ${user.id} following cancellation or payment failure`);
+        const invoice = event.data.object as Stripe.Invoice;
+        const subscriptionId = invoiceSubscriptionId(invoice);
+        if (!subscriptionId) break;
+        let paidThrough = event.type === 'invoice.paid' ? paidInvoicePeriodEnd(invoice, subscriptionId) : undefined;
+        if (event.type === 'invoice.paid' && !paidThrough && invoice.lines?.has_more) {
+          let startingAfter: string | undefined;
+          do {
+            const lines = await stripe.invoices.listLineItems(invoice.id, { limit: 100, starting_after: startingAfter });
+            paidThrough = paidInvoicePeriodEnd({ ...invoice, lines }, subscriptionId);
+            startingAfter = lines.has_more ? lines.data.at(-1)?.id : undefined;
+          } while (!paidThrough && startingAfter);
         }
+        if (event.type === 'invoice.paid' && !paidThrough) {
+          throw new Error('Paid Stripe subscription invoice has no subscription billing period');
+        }
+        const userId = await syncStripeSubscription(stripe, store, subscriptionId, { paidThrough, paidInvoiceId: invoice.id });
+        if (userId) console.log(`[Stripe Webhook] Synchronized invoice for user ${userId}`);
         break;
       }
 
@@ -2097,6 +2477,7 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
         console.log(`[Stripe Webhook] Unhandled event type ${event.type}`);
     }
 
+    await store.recordStripeEvent(event.id, event.type);
     res.json({ received: true });
   } catch (err: any) {
     console.error('[Stripe Webhook] Error executing webhook handler:', err);
@@ -2370,52 +2751,82 @@ async function startServer() {
     process.env.NODE_ENV === 'production' ||
     (typeof __filename !== 'undefined' && __filename.endsWith('server.cjs'));
 
-  // 1. Inicjalizacja bazy PostgreSQL przed startem nasłuchiwania
-  const dbInitOk = await store.initializeDatabase();
-  const dbStatus = store.getDatabaseStatus();
-  if (dbInitOk) {
-    console.log('[DataStore] PostgreSQL persistence layer connected and schema ready.');
-  } else if (dbStatus.provider === 'local') {
-    console.warn('[DataStore] Running in local development mode with standalone storage (ALLOW_LOCAL_STORAGE=true).');
-  } else {
-    console.error('[DataStore FAIL-CLOSED] PostgreSQL database connection unavailable. Persistent database is required on Cloud Run/production. Readiness probe will report 503.');
-  }
-
-  // 2. Hydrate memory store from PostgreSQL
-  await store.hydrateFromPostgres();
-
   const httpServer = http.createServer(app);
 
   // WebRTC Video Calling Signaling Server (path: /ws/webrtc)
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/webrtc' });
+  const wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const host = request.headers.host || 'localhost';
+      const parsedUrl = new URL(request.url || '', `http://${host}`);
+      if (parsedUrl.pathname === '/ws/webrtc') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      }
+    } catch {
+      // Allow other upgrade handlers (e.g. Vite HMR if active) to proceed
+    }
+  });
 
   // PostgreSQL PubSub listener for multi-instance Cloud Run WebRTC signaling
   const pool = getPostgresPool();
   if (pool) {
-    pool.connect().then(client => {
-      client.query('LISTEN aura_webrtc_signals').catch(e => console.warn('[WebRTC PG Listen] Failed:', e.message));
-      client.on('notification', (msg) => {
-        if (msg.channel === 'aura_webrtc_signals' && msg.payload) {
-          try {
-            const data = JSON.parse(msg.payload);
-            const { targetUserId, message: remoteMessage } = data;
-            if (targetUserId) {
-              const localSockets = connectedCallSockets.get(targetUserId);
-              if (localSockets && localSockets.size > 0) {
-                const payloadStr = JSON.stringify(remoteMessage);
-                localSockets.forEach(ws => {
-                  if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(payloadStr);
-                  }
-                });
-              }
-            }
-          } catch (err) {
-            // Ignore parse errors on broadcast
+    let reconnectTimeout: any = null;
+    const setupListener = () => {
+      pool.connect().then(client => {
+        client.on('error', (err) => {
+          console.warn('[WebRTC PG Client] Socket error, reconnecting:', err.message);
+          try { client.release(true); } catch {}
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              reconnectTimeout = null;
+              setupListener();
+            }, 5000);
           }
+        });
+        client.on('end', () => {
+          if (!reconnectTimeout) {
+            reconnectTimeout = setTimeout(() => {
+              reconnectTimeout = null;
+              setupListener();
+            }, 5000);
+          }
+        });
+        client.query('LISTEN aura_webrtc_signals').catch(e => console.warn('[WebRTC PG Listen] Failed:', e.message));
+        client.on('notification', (msg) => {
+          if (msg.channel === 'aura_webrtc_signals' && msg.payload) {
+            try {
+              const data = JSON.parse(msg.payload);
+              const { targetUserId, message: remoteMessage } = data;
+              if (targetUserId) {
+                const localSockets = connectedCallSockets.get(targetUserId);
+                if (localSockets && localSockets.size > 0) {
+                  const payloadStr = JSON.stringify(remoteMessage);
+                  localSockets.forEach(ws => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(payloadStr);
+                    }
+                  });
+                }
+              }
+            } catch (err) {
+              // Ignore parse errors on broadcast
+            }
+          }
+        });
+      }).catch(err => {
+        console.warn('[WebRTC PG Listen] Connection attempt failed, retrying in 10s:', err?.message);
+        if (!reconnectTimeout) {
+          reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            setupListener();
+          }, 10000);
         }
       });
-    }).catch(() => {});
+    };
+    setupListener();
   }
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
@@ -2459,6 +2870,14 @@ async function startServer() {
             return;
           }
 
+          if (type === 'CALL_REQUEST') {
+            // Check if recipient is already in an active call
+            if (activeCallPairs.has(targetUserId)) {
+              ws.send(JSON.stringify({ type: 'CALL_REJECTED', reason: 'BUSY', targetUserId }));
+              return;
+            }
+          }
+
           if (type === 'CALL_ACCEPTED') {
             activeCallPairs.set(authenticatedUserId, targetUserId);
             activeCallPairs.set(targetUserId, authenticatedUserId);
@@ -2467,9 +2886,23 @@ async function startServer() {
             activeCallPairs.delete(targetUserId);
           }
 
+          // Enrich CALL_REQUEST with sender's public profile info
+          let senderName = 'Użytkownik AURA';
+          let senderPhoto: string | undefined;
+          if (type === 'CALL_REQUEST') {
+            try {
+              const senderUser = await store.getUserById(authenticatedUserId);
+              if (senderUser) {
+                senderName = senderUser.profile.displayName || 'Użytkownik AURA';
+                senderPhoto = senderUser.profile.photos?.find(p => p.isPrimary)?.url || senderUser.profile.photos?.[0]?.url;
+              }
+            } catch {}
+          }
+
           const forwardPayload = {
             ...message,
-            senderId: authenticatedUserId
+            senderId: authenticatedUserId,
+            ...(type === 'CALL_REQUEST' ? { senderName, senderPhoto, callType: message.callType || 'video' } : {})
           };
           const forwardPayloadStr = JSON.stringify(forwardPayload);
 
@@ -2506,16 +2939,16 @@ async function startServer() {
 
     ws.on('close', () => {
       if (authenticatedUserId) {
-        const partnerId = activeCallPairs.get(authenticatedUserId);
-        if (partnerId) {
-          terminateActiveCallBetweenUsers(authenticatedUserId, partnerId, 'DISCONNECTED');
-        }
-
         const userSockets = connectedCallSockets.get(authenticatedUserId);
         if (userSockets) {
           userSockets.delete(ws);
+          // Only terminate active call if the user has no remaining open connections
           if (userSockets.size === 0) {
             connectedCallSockets.delete(authenticatedUserId);
+            const partnerId = activeCallPairs.get(authenticatedUserId);
+            if (partnerId) {
+              terminateActiveCallBetweenUsers(authenticatedUserId, partnerId, 'DISCONNECTED');
+            }
           }
         }
       }
@@ -2527,39 +2960,78 @@ async function startServer() {
   });
 
   if (!isProduction) {
-    // Development mode: conditionally initialize Vite development server & HMR
+    // Development mode: conditionally initialize Vite development server
     delete (globalThis as any).__dirname;
     const { createServer: createViteServer } = await import('vite');
-    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
 
+    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        watch: isHmrDisabled ? null : undefined,
-        hmr: {
-          server: httpServer,
-          host: process.env.HMR_HOST || undefined,
-          port: process.env.HMR_PORT ? parseInt(process.env.HMR_PORT, 10) : undefined,
-          overlay: !isHmrDisabled,
-        },
+        hmr: isHmrDisabled ? false : { server: httpServer },
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    // Production mode: serve pre-built static assets and index.html exclusively from dist/web
-    const distPath = path.join(process.cwd(), 'dist', 'web');
+    // Production mode: serve pre-built static assets and index.html
+    const distWeb = path.join(process.cwd(), 'dist', 'web');
+    const distRoot = path.join(process.cwd(), 'dist');
+    const distPath = fs.existsSync(distWeb) ? distWeb : distRoot;
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
+  httpServer.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[Server Fatal] Port ${PORT} is already in use. Exiting to allow clean supervisor restart.`);
+      process.exit(1);
+    } else {
+      console.error('[Server Fatal] Server socket error:', err);
+    }
+  });
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`[AURA GAY 18+] Server actively running on http://0.0.0.0:${PORT} (${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'})`);
   });
+
+  // Graceful shutdown handling for container and dev server process restarts
+  const handleShutdown = () => {
+    console.log('[Server] Graceful shutdown initiated. Closing sockets and HTTP server...');
+    try {
+      wss.close();
+    } catch {}
+    httpServer.close(() => {
+      console.log('[Server] HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      process.exit(0);
+    }, 1500).unref();
+  };
+
+  process.once('SIGTERM', handleShutdown);
+  process.once('SIGINT', handleShutdown);
+
+  // Asynchronous initialization of persistent database layer without blocking server readiness
+  store.initializeDatabase().then((dbInitOk) => {
+    const dbStatus = store.getDatabaseStatus();
+    if (dbInitOk) {
+      console.log('[DataStore] Database initialization and hydration completed successfully.');
+    } else if (dbStatus.provider === 'local') {
+      console.warn('[DataStore] Running in local development mode with standalone storage (ALLOW_LOCAL_STORAGE=true).');
+    } else {
+      console.warn('[DataStore] Persistent database connection pending or reported unavailable.');
+    }
+  }).catch((err: any) => {
+    console.error('[DataStore] Error during database initialization:', err?.message || err);
+  });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[Server Fatal] Startup error:', err);
+});

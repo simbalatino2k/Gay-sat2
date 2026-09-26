@@ -75,21 +75,28 @@ export interface UserProfile {
   spotifyTopArtist?: string;
   isPremium?: boolean;
   premiumTier?: string;
+  isBoosted?: boolean;
+  boostExpiresAt?: string;
 }
+
+export type VenueCategory = 'cruising' | 'sauna' | 'bar' | 'club' | 'cafe' | 'wellness' | 'community';
 
 export interface QueerVenue {
   id: string;
   name: string;
-  category: 'bar' | 'club' | 'cafe' | 'wellness' | 'community';
+  category: VenueCategory;
   lat: number;
   lng: number;
   address: string;
   neighborhood: string;
+  city?: string;
   description: string;
   distanceKm: number;
   tags: string[];
   imageUrl?: string;
   isVerified?: boolean;
+  isCruising?: boolean;
+  openingHours?: string;
 }
 
 export interface UserAccount {
@@ -103,6 +110,7 @@ export interface UserAccount {
   profile: UserProfile;
   isPremium?: boolean;
   premiumExpiresAt?: string;
+  permissionsOnboardingHandled?: boolean;
 }
 
 export interface LikeRecord {
@@ -250,6 +258,7 @@ export interface Message {
   deliveryStatus?: DeliveryStatus;
   readStatus?: boolean;
   readAt?: string;
+  deliveredAt?: string;
   deletedStatus?: DeletedStatus;
   deletedForUserIds?: string[];
 
@@ -576,4 +585,3 @@ export interface StoreProduct {
   billingPeriod: 'P1M' | 'P3M' | 'P1Y';
   freeTrialPeriod?: string;
 }
-

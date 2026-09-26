@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SexualRole, Tribe, LookingFor } from '../types';
 import { Shield, ArrowRight, Check, Sparkles, Mail, Lock, User, MapPin, Camera, ChevronRight } from 'lucide-react';
 import { AuraLogo } from './AuraLogo';
@@ -13,16 +13,25 @@ import {
   saveProfileToFirestore 
 } from '../services/firebaseService';
 import { auth } from '../lib/firebase';
+import { FirebaseServerSyncError } from '../services/firebaseServerSync';
 
 interface OnboardingFlowProps {
   onComplete: (session: { token: string; user: any }) => void;
+  initialError?: string | null;
 }
 
 const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bottom', 'Side', 'Unspecified'];
 const TRIBES: Tribe[] = ['Bear', 'Otter', 'Cub', 'Jock', 'Twink', 'Geek', 'Daddy', 'Leather', 'Clean Cut', 'Muscle', 'Trans', 'Queer', 'Pup'];
 const LOOKING_FOR: LookingFor[] = ['Dating', 'Hookups', 'Friends', 'Networking', 'Relationship', 'Right Now', 'Chat'];
+const PHOTO_PRESETS = [
+  'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800',
+  'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=800'
+];
 
-export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) => {
+export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete, initialError }) => {
   const [step, setStep] = useState<'auth' | 'profile'>('auth');
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
@@ -32,15 +41,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
   const [displayName, setDisplayName] = useState('');
   const [age, setAge] = useState(25);
   const [identityRole, setIdentityRole] = useState<SexualRole>('Versatile');
-  const [location, setLocation] = useState('Los Angeles, CA');
+  const [location, setLocation] = useState('');
   const [bio, setBio] = useState('');
   const [selectedTribes, setSelectedTribes] = useState<Tribe[]>(['Jock']);
   const [selectedLookingFor, setSelectedLookingFor] = useState<LookingFor[]>(['Dating', 'Friends']);
-  const [photoUrl, setPhotoUrl] = useState('https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800');
+  const [photoUrl, setPhotoUrl] = useState(PHOTO_PRESETS[0]);
 
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (initialError) setError(initialError);
+  }, [initialError]);
 
   // Password Recovery State
   const [showForgotPassword, setShowForgotPassword] = useState(false);
@@ -168,6 +180,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         }
       }, 500);
     } catch (err: any) {
+      if (err instanceof FirebaseServerSyncError) {
+        setError(err.message);
+        return;
+      }
       // Fallback to local server auth if Firebase Auth fails or is disabled
       try {
         const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
@@ -218,6 +234,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     const token = localStorage.getItem('aura_auth_token') || localStorage.getItem('aura_token');
 
     try {
+      if (!token) throw new Error('Sesja wygasła. Zaloguj się ponownie.');
       const profileUpdates = {
         displayName,
         age,
@@ -229,16 +246,6 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         photos: [{ id: `ph-${Date.now()}`, url: photoUrl, isPrimary: true }]
       };
 
-      // Sync with Firestore if possible
-      try {
-        const currentUser = auth.currentUser;
-        if (currentUser) {
-          await saveProfileToFirestore(currentUser.uid, profileUpdates);
-        }
-      } catch (fsErr) {
-        console.warn('Firestore profile save notice:', fsErr);
-      }
-
       const res = await fetch('/api/profile', {
         method: 'PUT',
         headers: {
@@ -248,23 +255,32 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         body: JSON.stringify(profileUpdates)
       });
       const data = await res.json();
-      if (data.user) {
-        setSuccess(true);
-        setTimeout(() => {
-          if (token) {
-            localStorage.setItem('aura_auth_token', token);
-            localStorage.setItem('aura_token', token);
-          }
-          onComplete({ token: token!, user: data.user });
-        }, 500);
-      } else {
-        // If local API didn't return user, use fallback or navigate
-        if (token) {
-          localStorage.setItem('aura_auth_token', token);
-          localStorage.setItem('aura_token', token);
-        }
-        onComplete({ token: token || 'aura_session', user: { id: auth.currentUser?.uid || 'user-new', profile: profileUpdates } });
+      if (!res.ok || !data?.profile) {
+        throw new Error(data?.error || 'Nie udało się zapisać profilu.');
       }
+
+      const meRes = await fetch('/api/auth/me', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const meData = await meRes.json();
+      if (!meRes.ok || !meData?.user) {
+        throw new Error(meData?.error || 'Nie udało się odczytać zapisanego profilu.');
+      }
+
+      if (auth.currentUser) {
+        try {
+          await saveProfileToFirestore(auth.currentUser.uid, data.profile);
+        } catch (fsErr) {
+          console.warn('Firestore profile save notice:', fsErr);
+        }
+      }
+
+      setSuccess(true);
+      setTimeout(() => {
+        localStorage.setItem('aura_auth_token', token);
+        localStorage.setItem('aura_token', token);
+        onComplete({ token, user: meData.user });
+      }, 500);
     } catch (err: any) {
       setError(err.message || 'Error updating profile');
     } finally {
@@ -752,15 +768,22 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
                 <div>
                   <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5 mb-1">
                     <Camera className="w-3.5 h-3.5 text-fuchsia-400" />
-                    <span>Primary Photo Image URL</span>
+                    <span>Choose a profile photo</span>
                   </label>
-                  <input
-                    type="text"
-                    required
-                    value={photoUrl}
-                    onChange={e => setPhotoUrl(e.target.value)}
-                    className="w-full aura-glass-input rounded-xl px-3 py-2.5 text-xs text-white outline-none"
-                  />
+                  <div className="flex gap-2 overflow-x-auto py-1">
+                    {PHOTO_PRESETS.map((preset, idx) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setPhotoUrl(preset)}
+                        aria-label={`Choose profile photo ${idx + 1}`}
+                        aria-pressed={photoUrl === preset}
+                        className={`w-14 h-14 shrink-0 rounded-xl overflow-hidden border-2 ${photoUrl === preset ? 'border-fuchsia-400' : 'border-white/10'}`}
+                      >
+                        <img src={preset} alt="" className="w-full h-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <button
@@ -796,4 +819,3 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
     </div>
   );
 };
-

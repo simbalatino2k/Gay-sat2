@@ -110,7 +110,7 @@ public class AuraBillingPlugin extends Plugin implements PurchasesUpdatedListene
                 .setProductList(productList)
                 .build();
 
-            billingClient.queryProductDetailsAsync(params, (billingResult, productDetailsList) -> {
+            billingClient.queryProductDetailsAsync(params, (billingResult, productDetailsResult) -> {
                 if (billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) {
                     call.reject("Failed to query Google Play product details: " + billingResult.getDebugMessage());
                     return;
@@ -119,7 +119,7 @@ public class AuraBillingPlugin extends Plugin implements PurchasesUpdatedListene
                 JSArray array = new JSArray();
                 cachedProductDetails.clear();
 
-                for (ProductDetails details : productDetailsList) {
+                for (ProductDetails details : productDetailsResult.getProductDetailsList()) {
                     cachedProductDetails.put(details.getProductId(), details);
                     JSObject item = new JSObject();
                     item.put("id", details.getProductId());
@@ -171,7 +171,8 @@ public class AuraBillingPlugin extends Plugin implements PurchasesUpdatedListene
                     .setProductList(productList)
                     .build();
 
-                billingClient.queryProductDetailsAsync(params, (billingResult, productDetailsList) -> {
+                billingClient.queryProductDetailsAsync(params, (billingResult, productDetailsResult) -> {
+                    List<ProductDetails> productDetailsList = productDetailsResult.getProductDetailsList();
                     if (billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK && !productDetailsList.isEmpty()) {
                         ProductDetails fetched = productDetailsList.get(0);
                         cachedProductDetails.put(productId, fetched);

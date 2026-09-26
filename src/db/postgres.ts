@@ -1,5 +1,8 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { PROFILE_BOOST_DURATION_HOURS } from '../lib/stripeCheckout';
 import {
   UserAccount,
   UserProfile,
@@ -24,6 +27,56 @@ import {
 
 let pgPool: Pool | null = null;
 let isInitialized = false;
+let messageReceiptColumnsAvailable = true;
+
+/**
+ * Checks whether a Unix domain socket path exists on the local filesystem.
+ */
+export function isUnixSocketAccessible(sockPath?: string): boolean {
+  if (!sockPath) return false;
+  try {
+    if (fs.existsSync(sockPath)) return true;
+    if (fs.existsSync(path.join(sockPath, '.s.PGSQL.5432'))) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Extracts unix socket host parameter from database URL if present.
+ */
+export function extractSocketFromUrl(urlStr?: string): string | null {
+  if (!urlStr) return null;
+  try {
+    const match = urlStr.match(/[?&]host=([^&]+)/);
+    if (match) {
+      const decoded = decodeURIComponent(match[1]);
+      if (decoded.startsWith('/')) return decoded;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Resolves accessible socket host between /cloudsql and /app/cloudsql.
+ */
+export function resolveAccessibleSocketHost(host?: string): string | undefined {
+  if (!host) return undefined;
+  if (!host.startsWith('/')) return host;
+  if (isUnixSocketAccessible(host)) return host;
+
+  if (host.startsWith('/cloudsql/')) {
+    const alt = `/app${host}`;
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+  if (host.startsWith('/app/cloudsql/')) {
+    const alt = host.replace('/app/cloudsql/', '/cloudsql/');
+    if (isUnixSocketAccessible(alt)) return alt;
+  }
+
+  return host;
+}
 
 /**
  * Validates configuration and returns connection pool suitable for Cloud Run and PostgreSQL.
@@ -31,24 +84,62 @@ let isInitialized = false;
 export function getPostgresPool(): Pool | null {
   if (pgPool) return pgPool;
 
-  const databaseUrl = process.env.DATABASE_URL;
-  const sqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  let databaseUrl = process.env.DATABASE_URL;
+  const rawSqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  const sqlHost = resolveAccessibleSocketHost(rawSqlHost);
   const sqlUser = process.env.SQL_USER || process.env.PGUSER;
   const sqlPassword = process.env.SQL_PASSWORD || process.env.PGPASSWORD;
   const sqlDbName = process.env.SQL_DB_NAME || process.env.PGDATABASE;
   const sqlPort = process.env.SQL_PORT || process.env.PGPORT ? parseInt(process.env.SQL_PORT || process.env.PGPORT!, 10) : 5432;
 
+  // Validate databaseUrl: If it references a Unix domain socket, ensure that socket path actually exists.
+  if (databaseUrl) {
+    const socketInUrl = extractSocketFromUrl(databaseUrl);
+    if (socketInUrl) {
+      const resolvedSocket = resolveAccessibleSocketHost(socketInUrl);
+      if (resolvedSocket && isUnixSocketAccessible(resolvedSocket)) {
+        if (resolvedSocket !== socketInUrl) {
+          databaseUrl = databaseUrl.replace(encodeURIComponent(socketInUrl), encodeURIComponent(resolvedSocket)).replace(socketInUrl, resolvedSocket);
+        }
+      } else {
+        console.warn(`[PostgreSQL Pool] Bypassing DATABASE_URL pointing to non-existent Unix socket: ${socketInUrl}`);
+        databaseUrl = undefined;
+      }
+    }
+  }
+
   let poolConfig: PoolConfig | null = null;
 
-  // 1. Unix Domain Socket (/cloudsql/...)
-  const isUnixSocket = !!((sqlHost && sqlHost.startsWith('/')) || (databaseUrl && (databaseUrl.includes('/cloudsql') || databaseUrl.includes('host=%2Fcloudsql'))));
-  
-  // 2. Local Cloud SQL Auth Proxy (127.0.0.1 or localhost)
-  const isLocalProxy = !!((sqlHost && (sqlHost === 'localhost' || sqlHost === '127.0.0.1')) ||
-                         (databaseUrl && (databaseUrl.includes('@localhost') || databaseUrl.includes('@127.0.0.1'))));
+  // Prefer explicit Cloud SQL parameters (sqlHost + sqlUser + sqlDbName) if sqlHost is accessible or if databaseUrl was absent/invalid
+  const hasDirectCloudSql = Boolean(sqlHost && sqlUser && sqlDbName && (!sqlHost.startsWith('/') || isUnixSocketAccessible(sqlHost)));
 
-  if (databaseUrl) {
-    // Enforce verified TLS for remote PostgreSQL connections without rejectUnauthorized: false.
+  if (hasDirectCloudSql) {
+    const isUnixSocket = !!sqlHost?.startsWith('/');
+    const isLocalProxy = !!(sqlHost === 'localhost' || sqlHost === '127.0.0.1');
+
+    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
+    if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
+      sslConfig = {
+        rejectUnauthorized: true,
+        ...(process.env.CA_CERT ? { ca: process.env.CA_CERT } : {})
+      };
+    }
+
+    poolConfig = {
+      host: sqlHost,
+      user: sqlUser,
+      password: sqlPassword || '',
+      database: sqlDbName,
+      port: sqlHost?.startsWith('/') ? undefined : sqlPort,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+      ssl: sslConfig
+    };
+  } else if (databaseUrl) {
+    const isUnixSocket = databaseUrl.includes('/cloudsql') || databaseUrl.includes('host=%2Fcloudsql');
+    const isLocalProxy = databaseUrl.includes('@localhost') || databaseUrl.includes('@127.0.0.1');
+
     let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
     if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
       sslConfig = {
@@ -65,6 +156,9 @@ export function getPostgresPool(): Pool | null {
       ssl: sslConfig
     };
   } else if (sqlHost && sqlUser && sqlDbName) {
+    const isUnixSocket = !!sqlHost.startsWith('/');
+    const isLocalProxy = !!(sqlHost === 'localhost' || sqlHost === '127.0.0.1');
+
     let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
     if (!isUnixSocket && !isLocalProxy && (process.env.NODE_ENV === 'production' || process.env.FORCE_SSL === 'true')) {
       sslConfig = {
@@ -102,11 +196,260 @@ export function getPostgresPool(): Pool | null {
   }
 }
 
+let adminPgPool: Pool | null = null;
+
+export function getAdminPostgresPool(): Pool | null {
+  if (adminPgPool) return adminPgPool;
+
+  const rawSqlHost = process.env.SQL_HOST || process.env.PGHOST || (process.env.CLOUD_SQL_CONNECTION_NAME ? `/cloudsql/${process.env.CLOUD_SQL_CONNECTION_NAME}` : undefined);
+  const sqlHost = resolveAccessibleSocketHost(rawSqlHost);
+  const sqlAdminUser = process.env.SQL_ADMIN_USER;
+  const sqlAdminPassword = process.env.SQL_ADMIN_PASSWORD;
+  const sqlDbName = process.env.SQL_DB_NAME || process.env.PGDATABASE;
+  const sqlPort = process.env.SQL_PORT || process.env.PGPORT ? parseInt(process.env.SQL_PORT || process.env.PGPORT!, 10) : 5432;
+
+  if (sqlAdminUser && sqlAdminPassword && sqlHost && sqlDbName) {
+    const isUnixSocket = !!(sqlHost.startsWith('/'));
+    try {
+      adminPgPool = new Pool({
+        host: sqlHost,
+        user: sqlAdminUser,
+        password: sqlAdminPassword,
+        database: sqlDbName,
+        port: isUnixSocket ? undefined : sqlPort,
+        max: 3,
+        connectionTimeoutMillis: 10000,
+        ssl: false
+      });
+      adminPgPool.on('error', (err) => {
+        console.error('[PostgreSQL Admin Pool] Unexpected error on idle client:', err.message);
+      });
+      return adminPgPool;
+    } catch (err: any) {
+      console.error('[PostgreSQL Admin Pool] Initialization error:', err.message);
+    }
+  }
+
+  return getPostgresPool();
+}
+
 /**
- * Auto-creates tables and migrations safely.
+ * Required tables and essential columns that must exist for runtime operation.
+ */
+const REQUIRED_SCHEMA_DEFINITIONS: Record<string, string[]> = {
+  users: [
+    'id', 'email', 'display_name', 'age', 'role', 'status', 'bio',
+    'sexual_role', 'tribe', 'looking_for', 'vibe', 'interests', 'location',
+    'photos', 'is_verified', 'is_premium', 'premium_tier', 'privacy',
+    'user_mode', 'mode_updated_at', 'created_at', 'updated_at'
+  ],
+  user_passwords: ['user_id', 'salt_hash', 'created_at', 'updated_at'],
+  password_resets: ['token', 'user_id', 'expires_at', 'used', 'created_at'],
+  sessions: ['token', 'user_id', 'created_at', 'expires_at', 'last_used_at'],
+  user_consents: [
+    'user_id', 'gdpr_accepted', 'age_verified_18_plus', 'privacy_policy_version',
+    'terms_version', 'dsa_accepted', 'ai_assistance_consent', 'safe_content_enabled',
+    'location_processing_consent', 'special_category_consent', 'necessary_cookies',
+    'functional_cookies', 'analytics_cookies', 'timestamp', 'ip_address'
+  ],
+  likes: ['id', 'from_user_id', 'to_user_id', 'is_super_like', 'created_at'],
+  matches: ['id', 'user1_id', 'user2_id', 'is_super_match', 'created_at'],
+  blocks: ['id', 'blocker_user_id', 'blocked_user_id', 'created_at'],
+  reports: [
+    'id', 'reporter_user_id', 'reported_user_id', 'reason', 'details',
+    'status', 'reported_message_id', 'reported_media_id', 'decision',
+    'decision_reason', 'decided_at', 'decided_by', 'created_at'
+  ],
+  conversations: ['id', 'participant_ids', 'last_message_text', 'last_message_timestamp', 'created_at', 'updated_at'],
+  messages: [
+    'id', 'conversation_id', 'sender_id', 'receiver_id', 'text', 'type',
+    'media', 'status', 'client_message_id', 'created_at'
+  ],
+  moments: ['id', 'user_id', 'media_url', 'caption', 'expires_at', 'likes_count', 'views_count', 'created_at'],
+  subscriptions: ['id', 'user_id', 'stripe_customer_id', 'stripe_subscription_id', 'status', 'plan_id', 'current_period_end', 'created_at', 'updated_at'],
+  store_subscriptions: [
+    'id', 'user_id', 'provider', 'product_id', 'base_plan_id', 'purchase_token_hash',
+    'transaction_id', 'original_transaction_id', 'environment', 'status', 'auto_renew',
+    'purchase_date', 'expires_at', 'grace_period_expires_at', 'revoked_at', 'created_at',
+    'updated_at', 'last_verified_at'
+  ],
+  store_billing_events: ['id', 'provider', 'external_event_id', 'event_type', 'received_at', 'processed_at', 'status', 'metadata'],
+  stripe_events: ['event_id', 'event_type', 'processed_at'],
+  admin_audit_logs: ['id', 'admin_id', 'action', 'target_id', 'details', 'timestamp'],
+  moderation_notices: ['id', 'user_id', 'reason', 'dsa_statement_of_reasons', 'action_taken', 'created_at'],
+  dsa_appeals: ['id', 'notice_id', 'user_id', 'explanation', 'status', 'created_at', 'reviewed_at', 'reviewer_notes'],
+  media_records: ['id', 'owner_id', 'category', 'moderation_status', 'moderation_reason', 'mime_type', 'size', 'created_at'],
+  vault_grants: ['owner_id', 'granted_id', 'granted_at']
+};
+
+/**
+ * Read-only schema and privilege verification for production when running without DDL/admin rights.
+ * Returns true if all required tables, columns, and DML privileges exist.
+ * Otherwise logs precise details and returns false (fail-closed).
+ */
+export async function validatePostgresProductionSchema(pool: Pool): Promise<boolean> {
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (connErr: any) {
+    console.error('[PostgreSQL Production Audit Connection Failed]', connErr.message || connErr);
+    return false;
+  }
+
+  try {
+    const whoRes = await client.query(`
+      SELECT current_user, current_database(),
+             has_schema_privilege(current_user, 'public', 'USAGE') AS has_usage,
+             has_schema_privilege(current_user, 'public', 'CREATE') AS has_create
+    `);
+    const who = whoRes.rows[0] || {};
+    console.log(
+      `[PostgreSQL Production Audit] Connected as user='${who.current_user}' on database='${who.current_database}' (public USAGE=${who.has_usage}, CREATE=${who.has_create})`
+    );
+
+    // 1. Query all existing tables in schema public
+    const tablesRes = await client.query(`
+      SELECT tablename
+      FROM pg_tables
+      WHERE schemaname = 'public'
+    `);
+    const existingTables = new Set(tablesRes.rows.map((r: any) => r.tablename));
+
+    const missingTables: string[] = [];
+    const requiredTableNames = Object.keys(REQUIRED_SCHEMA_DEFINITIONS);
+    for (const tbl of requiredTableNames) {
+      if (!existingTables.has(tbl)) {
+        missingTables.push(tbl);
+      }
+    }
+
+    if (missingTables.length > 0) {
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Missing ${missingTables.length} required table(s) in schema public: ${missingTables.join(', ')}`
+      );
+      return false;
+    }
+
+    // 2. Query all existing columns for the required tables
+    const colsRes = await client.query(`
+      SELECT table_name, column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = ANY($1)
+    `, [requiredTableNames]);
+
+    const tableColumnsMap = new Map<string, Set<string>>();
+    for (const row of colsRes.rows) {
+      if (!tableColumnsMap.has(row.table_name)) {
+        tableColumnsMap.set(row.table_name, new Set());
+      }
+      tableColumnsMap.get(row.table_name)!.add(row.column_name);
+    }
+
+    const messageColumns = tableColumnsMap.get('messages') || new Set<string>();
+    messageReceiptColumnsAvailable = messageColumns.has('read_at') && messageColumns.has('delivered_at');
+    if (!messageReceiptColumnsAvailable) {
+      console.warn('[PostgreSQL] Message receipt timestamps unavailable; preserving read/delivered status until the columns are migrated.');
+    }
+
+    const missingColumns: Array<{ table: string; column: string }> = [];
+    for (const [tbl, cols] of Object.entries(REQUIRED_SCHEMA_DEFINITIONS)) {
+      const existingCols = tableColumnsMap.get(tbl) || new Set<string>();
+      for (const col of cols) {
+        if (!existingCols.has(col)) {
+          missingColumns.push({ table: tbl, column: col });
+        }
+      }
+    }
+
+    if (missingColumns.length > 0) {
+      const detailed = missingColumns.map(m => `${m.table}.${m.column}`).join(', ');
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Missing ${missingColumns.length} required column(s) in schema public: ${detailed}`
+      );
+      return false;
+    }
+
+    // 3. Verify DML privileges (SELECT, INSERT, UPDATE, DELETE) on key tables
+    const sampleTablesToCheck = ['users', 'sessions', 'user_consents', 'conversations', 'messages'];
+    const missingPrivileges: string[] = [];
+
+    for (const tbl of sampleTablesToCheck) {
+      const privRes = await client.query(`
+        SELECT
+          has_table_privilege(current_user, $1, 'SELECT') AS can_select,
+          has_table_privilege(current_user, $1, 'INSERT') AS can_insert,
+          has_table_privilege(current_user, $1, 'UPDATE') AS can_update,
+          has_table_privilege(current_user, $1, 'DELETE') AS can_delete
+      `, [`public.${tbl}`]);
+      const p = privRes.rows[0] || {};
+      if (!p.can_select) missingPrivileges.push(`${tbl}:SELECT`);
+      if (!p.can_insert) missingPrivileges.push(`${tbl}:INSERT`);
+      if (!p.can_update) missingPrivileges.push(`${tbl}:UPDATE`);
+      if (!p.can_delete) missingPrivileges.push(`${tbl}:DELETE`);
+    }
+
+    if (missingPrivileges.length > 0) {
+      console.error(
+        `[PostgreSQL Production Audit FAIL-CLOSED] Runtime user lacks required DML privileges: ${missingPrivileges.join(', ')}`
+      );
+      return false;
+    }
+
+    console.log(
+      `[PostgreSQL Production Audit] All ${requiredTableNames.length} tables, required columns, and DML permissions verified successfully in schema public.`
+    );
+    return true;
+  } catch (err: any) {
+    console.error('[PostgreSQL Production Audit ERROR]', err.message || err);
+    return false;
+  } finally {
+    if (client) {
+      try {
+        client.release();
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Auto-creates tables and migrations safely in development or when admin credentials are provided.
+ * In production when running without SQL_ADMIN_USER/SQL_ADMIN_PASSWORD, skips all DDL and runs
+ * read-only validation instead to prevent permission errors on restricted runtime roles.
  */
 export async function initPostgresSchema(): Promise<boolean> {
-  const pool = getPostgresPool();
+  const isCloudRun = !!(process.env.K_SERVICE || process.env.K_REVISION || process.env.K_CONFIGURATION);
+  const isProd = process.env.NODE_ENV === 'production' || process.env.SQL_DB_NAME === 'cloud_sql_production_database' || isCloudRun;
+  const hasAdminCredentials = !!(process.env.SQL_ADMIN_USER && process.env.SQL_ADMIN_PASSWORD);
+
+  // In production / Cloud Run without admin credentials, execute ONLY read-only verification
+  if (isProd && !hasAdminCredentials) {
+    console.log('[PostgreSQL] Production environment without admin credentials detected. Running read-only schema & permission validation (no DDL)...');
+    const runtimePool = getPostgresPool();
+    if (!runtimePool) {
+      console.error('[PostgreSQL FAIL-CLOSED] PostgreSQL connection pool unavailable for production audit.');
+      return false;
+    }
+
+    try {
+      const isValid = await validatePostgresProductionSchema(runtimePool);
+      if (isValid) {
+        isInitialized = true;
+        console.log('[PostgreSQL] Production schema validated successfully. API is ready to serve requests.');
+        return true;
+      } else {
+        isInitialized = false;
+        console.error('[PostgreSQL FAIL-CLOSED] Production schema validation failed. Blocking startup to prevent data loss or crashes.');
+        return false;
+      }
+    } catch (auditErr: any) {
+      isInitialized = false;
+      console.error('[PostgreSQL FAIL-CLOSED] Production schema validation error:', auditErr.message || auditErr);
+      return false;
+    }
+  }
+
+  // Development mode or when admin credentials are provided: run migrations via admin/dev pool
+  const pool = getAdminPostgresPool() || getPostgresPool();
   if (!pool) return false;
 
   const client = await pool.connect();
@@ -132,6 +475,7 @@ export async function initPostgresSchema(): Promise<boolean> {
         is_verified BOOLEAN DEFAULT FALSE,
         is_premium BOOLEAN DEFAULT FALSE,
         premium_tier VARCHAR(64),
+        boost_expires_at TIMESTAMPTZ,
         privacy JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -162,11 +506,11 @@ export async function initPostgresSchema(): Promise<boolean> {
 
       CREATE TABLE IF NOT EXISTS user_consents (
         user_id VARCHAR(128) PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        gdpr_accepted BOOLEAN NOT NULL DEFAULT TRUE,
-        age_verified_18_plus BOOLEAN NOT NULL DEFAULT TRUE,
-        privacy_policy_version VARCHAR(32) DEFAULT '2.0.0',
-        terms_version VARCHAR(32) DEFAULT '2.0.0',
-        dsa_accepted BOOLEAN NOT NULL DEFAULT TRUE,
+        gdpr_accepted BOOLEAN NOT NULL DEFAULT FALSE,
+        age_verified_18_plus BOOLEAN NOT NULL DEFAULT FALSE,
+        privacy_policy_version VARCHAR(32) DEFAULT '',
+        terms_version VARCHAR(32) DEFAULT '',
+        dsa_accepted BOOLEAN NOT NULL DEFAULT FALSE,
         timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         ip_address VARCHAR(128)
       );
@@ -287,6 +631,16 @@ export async function initPostgresSchema(): Promise<boolean> {
         processed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS profile_boost_purchases (
+        session_id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event_id VARCHAR(255) NOT NULL,
+        amount_cents INT NOT NULL CHECK (amount_cents = 199),
+        currency VARCHAR(3) NOT NULL CHECK (currency = 'eur'),
+        activated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS admin_audit_logs (
         id VARCHAR(128) PRIMARY KEY,
         admin_id VARCHAR(128) NOT NULL,
@@ -327,18 +681,34 @@ export async function initPostgresSchema(): Promise<boolean> {
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS ai_assistance_consent BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS ai_assistance_consent BOOLEAN DEFAULT FALSE;
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS safe_content_enabled BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS location_processing_consent BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS special_category_consent BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS location_processing_consent BOOLEAN DEFAULT FALSE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS special_category_consent BOOLEAN DEFAULT FALSE;
 
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS necessary_cookies BOOLEAN DEFAULT TRUE;
-      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS functional_cookies BOOLEAN DEFAULT TRUE;
+      ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS functional_cookies BOOLEAN DEFAULT FALSE;
       ALTER TABLE user_consents ADD COLUMN IF NOT EXISTS analytics_cookies BOOLEAN DEFAULT FALSE;
 
+      ALTER TABLE user_consents ALTER COLUMN gdpr_accepted SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN age_verified_18_plus SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN dsa_accepted SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN ai_assistance_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN location_processing_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN special_category_consent SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN functional_cookies SET DEFAULT FALSE;
+      ALTER TABLE user_consents ALTER COLUMN terms_version SET DEFAULT '';
+      ALTER TABLE user_consents ALTER COLUMN privacy_policy_version SET DEFAULT '';
+
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id VARCHAR(128);
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS user_mode VARCHAR(32) DEFAULT 'ONLINE';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS mode_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS boost_expires_at TIMESTAMPTZ;
+      ALTER TABLE sessions ALTER COLUMN token TYPE TEXT;
+      ALTER TABLE users ALTER COLUMN tribe TYPE VARCHAR(128);
+      ALTER TABLE users ALTER COLUMN looking_for TYPE VARCHAR(255);
 
       CREATE TABLE IF NOT EXISTS vault_grants (
         owner_id VARCHAR(128) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -372,6 +742,17 @@ export async function initPostgresSchema(): Promise<boolean> {
       CREATE INDEX IF NOT EXISTS idx_store_events_ext ON store_billing_events(provider, external_event_id);
     `);
 
+    // Ensure the application user has full DML permissions on all tables and sequences
+    const appUser = process.env.SQL_USER || process.env.PGUSER;
+    if (appUser && process.env.SQL_ADMIN_USER && appUser !== process.env.SQL_ADMIN_USER) {
+      await client.query(`
+        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "${appUser}";
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${appUser}";
+      `);
+    }
+
     await client.query('COMMIT');
     isInitialized = true;
     console.log('[PostgreSQL] Database schema initialized successfully.');
@@ -390,6 +771,45 @@ export class PostgresStoreAdapter {
 
   constructor(pool: Pool) {
     this.pool = pool;
+  }
+
+  public async getDiscoverUsers(viewerId: string): Promise<UserAccount[]> {
+    const result = await this.pool.query(
+      `SELECT u.* FROM users u
+       WHERE u.id <> $1 AND u.status = 'ACTIVE'
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks b
+           WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = u.id)
+              OR (b.blocked_user_id = $1 AND b.blocker_user_id = u.id)
+         )`,
+      [viewerId]
+    );
+    return result.rows.map(row => this.mapUserRow(row));
+  }
+
+  private serializeLocation(profile: UserProfile): string {
+    return JSON.stringify({
+      city: profile.location || '',
+      lat: profile.lat,
+      lng: profile.lng
+    });
+  }
+
+  private serializePrivacy(profile: UserProfile): string {
+    return JSON.stringify({
+      ...(profile as any).privacy,
+      locationPrivacy: profile.locationPrivacy || 'APPROXIMATE',
+      profileExtras: {
+        heightCm: profile.heightCm,
+        weightKg: profile.weightKg,
+        relationshipStatus: profile.relationshipStatus,
+        approximateArea: profile.approximateArea,
+        instagramHandle: profile.instagramHandle,
+        spotifyTopArtist: profile.spotifyTopArtist,
+        isBoosted: profile.isBoosted,
+        boostExpiresAt: profile.boostExpiresAt
+      }
+    });
   }
 
   public async getUserById(userId: string): Promise<UserAccount | null> {
@@ -461,20 +881,26 @@ export class PostgresStoreAdapter {
           mode_updated_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP`,
         [
-          user.id, user.email, user.profile.displayName, user.profile.age, user.role, user.status, p.bio || null,
-          (p as any).identityRole || (p as any).sexualRole || null,
-          p.tribes ? JSON.stringify(p.tribes) : ((p as any).tribe || null),
-          p.lookingFor ? JSON.stringify(p.lookingFor) : null,
+          user.id,
+          user.email,
+          p.displayName,
+          p.age,
+          user.role,
+          user.status,
+          p.bio || null,
+          p.identityRole || (p as any).sexualRole || 'Versatile',
+          JSON.stringify(p.tribes || []),
+          JSON.stringify(p.lookingFor || []),
           (p as any).vibe || null,
           p.interests ? JSON.stringify(p.interests) : null,
-          p.location || null,
+          this.serializeLocation(p),
           p.photos ? JSON.stringify(p.photos) : null,
           p.verified || false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || 'none',
-          JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          this.serializePrivacy(p),
           p.userMode || 'ONLINE',
-          user.createdAt
+          user.createdAt || new Date().toISOString()
         ]
       );
 
@@ -548,16 +974,16 @@ export class PostgresStoreAdapter {
           user.status,
           p.bio || null,
           p.identityRole || (p as any).sexualRole || 'Versatile',
-          (p.tribes && p.tribes.length > 0 ? p.tribes[0] : (p as any).tribe) || 'Queer',
-          (Array.isArray(p.lookingFor) ? p.lookingFor.join(',') : (p as any).lookingFor) || 'Dating',
+          JSON.stringify(p.tribes || []),
+          JSON.stringify(p.lookingFor || []),
           (p as any).vibe || null,
           JSON.stringify(p.interests || []),
-          JSON.stringify(typeof p.location === 'object' ? p.location : { city: p.location || 'Warsaw' }),
+          this.serializeLocation(p),
           JSON.stringify(p.photos || []),
           p.verified ?? (p as any).isVerified ?? false,
           user.isPremium || p.isPremium || false,
           p.premiumTier || null,
-          JSON.stringify((p as any).privacy || { locationPrivacy: p.locationPrivacy || 'APPROXIMATE' }),
+          this.serializePrivacy(p),
           p.userMode || 'ONLINE',
           user.createdAt || new Date().toISOString()
         ]
@@ -677,8 +1103,10 @@ export class PostgresStoreAdapter {
     }
   }
 
-  public async setStripeSubscription(userId: string, customerId: string, subscriptionId: string, planId: string, status: string, periodEnd?: Date): Promise<void> {
-    const isPremium = status === 'active';
+  public async setStripeSubscription(
+    userId: string, customerId: string, subscriptionId: string, planId: string,
+    status: string, periodEnd: Date | undefined, entitlement: UserEntitlement
+  ): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -703,18 +1131,11 @@ export class PostgresStoreAdapter {
           subscriptionId,
           status,
           planId,
-          periodEnd || new Date(Date.now() + 30 * 24 * 3600 * 1000)
+          periodEnd || null
         ]
       );
 
-      await client.query(
-        `UPDATE users SET
-          is_premium = $1,
-          premium_tier = $2,
-          updated_at = CURRENT_TIMESTAMP
-         WHERE id = $3`,
-        [isPremium, isPremium ? 'VIP_PLUS' : null, userId]
-      );
+      await this.upsertStoreSubscriptionWithClient(client, entitlement);
 
       await client.query('COMMIT');
     } catch (err) {
@@ -723,6 +1144,38 @@ export class PostgresStoreAdapter {
     } finally {
       client.release();
     }
+  }
+
+  public async getStripeSubscriptionByUserId(userId: string): Promise<{
+    subscriptionId: string; planId: string; status: string; currentPeriodEnd?: Date
+  } | null> {
+    const res = await this.pool.query(
+      'SELECT stripe_subscription_id, plan_id, status, current_period_end FROM subscriptions WHERE user_id = $1 LIMIT 1',
+      [userId]
+    );
+    const row = res.rows[0];
+    return row?.stripe_subscription_id ? {
+      subscriptionId: row.stripe_subscription_id,
+      planId: row.plan_id,
+      status: row.status,
+      currentPeriodEnd: row.current_period_end || undefined
+    } : null;
+  }
+
+  public async findUserIdByStripeCustomerId(customerId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM subscriptions WHERE stripe_customer_id = $1 ORDER BY updated_at DESC LIMIT 1',
+      [customerId]
+    );
+    return res.rows[0]?.user_id || null;
+  }
+
+  public async findUserIdByStripeSubscriptionId(subscriptionId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM subscriptions WHERE stripe_subscription_id = $1 LIMIT 1',
+      [subscriptionId]
+    );
+    return res.rows[0]?.user_id || null;
   }
 
   public async isEventProcessed(eventId: string): Promise<boolean> {
@@ -737,16 +1190,73 @@ export class PostgresStoreAdapter {
     );
   }
 
+  public async fulfillProfileBoostPurchase(sessionId: string, userId: string, eventId: string): Promise<{ activated: boolean; boostExpiresAt: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // The user lock serializes purchases for the same profile. The unique
+      // Checkout session key also deduplicates different Stripe event IDs.
+      const userResult = await client.query(
+        'SELECT boost_expires_at, CURRENT_TIMESTAMP AS database_now FROM users WHERE id = $1 FOR UPDATE',
+        [userId]
+      );
+      if (!userResult.rows.length) throw new Error('Profile boost customer not found');
+
+      const existing = userResult.rows[0].boost_expires_at as Date | null;
+      const databaseNow = userResult.rows[0].database_now as Date;
+      const expiresAt = new Date(Math.max(databaseNow.getTime(), existing?.getTime() || 0) + PROFILE_BOOST_DURATION_HOURS * 60 * 60 * 1000);
+      const inserted = await client.query(
+        `INSERT INTO profile_boost_purchases (session_id, user_id, event_id, amount_cents, currency, expires_at)
+         VALUES ($1, $2, $3, 199, 'eur', $4)
+         ON CONFLICT (session_id) DO NOTHING RETURNING expires_at`,
+        [sessionId, userId, eventId, expiresAt]
+      );
+      if (!inserted.rows.length) {
+        const prior = await client.query('SELECT user_id, expires_at FROM profile_boost_purchases WHERE session_id = $1', [sessionId]);
+        if (prior.rows[0]?.user_id !== userId) throw new Error('Profile boost purchase owner mismatch');
+        await client.query('COMMIT');
+        return { activated: false, boostExpiresAt: (prior.rows[0].expires_at as Date).toISOString() };
+      }
+
+      await client.query('UPDATE users SET boost_expires_at = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [userId, expiresAt]);
+      await client.query('COMMIT');
+      return { activated: true, boostExpiresAt: expiresAt.toISOString() };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getProfileBoostPurchase(sessionId: string, userId: string): Promise<string | null> {
+    const result = await this.pool.query(
+      'SELECT expires_at FROM profile_boost_purchases WHERE session_id = $1 AND user_id = $2',
+      [sessionId, userId]
+    );
+    return result.rows[0]?.expires_at?.toISOString() || null;
+  }
+
   public async upsertStoreSubscription(entitlement: UserEntitlement): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await this.upsertStoreSubscriptionWithClient(client, entitlement);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
-      const isPrem = entitlement.premium && (entitlement.status === 'active' || entitlement.status === 'grace_period');
-      const planTier = entitlement.planTier || (entitlement.productId?.includes('yearly') ? 'yearly' : 'monthly');
-      const premiumTier = isPrem ? (planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY') : null;
+  private async upsertStoreSubscriptionWithClient(client: PoolClient, entitlement: UserEntitlement): Promise<void> {
+    const isPrem = entitlement.premium && (entitlement.status === 'active' || entitlement.status === 'grace_period');
+    const planTier = entitlement.planTier || (entitlement.productId?.includes('yearly') ? 'yearly' : 'monthly');
+    const premiumTier = isPrem ? (planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY') : null;
 
-      await client.query(
+    await client.query(
         `INSERT INTO store_subscriptions (
           id, user_id, provider, product_id, base_plan_id,
           purchase_token_hash, transaction_id, original_transaction_id,
@@ -788,24 +1298,16 @@ export class PostgresStoreAdapter {
           entitlement.expiresAt ? new Date(entitlement.expiresAt) : null,
           entitlement.gracePeriodUntil ? new Date(entitlement.gracePeriodUntil) : null
         ]
-      );
+    );
 
-      await client.query(
+    await client.query(
         `UPDATE users SET
           is_premium = $1,
           premium_tier = $2,
           updated_at = CURRENT_TIMESTAMP
          WHERE id = $3`,
         [isPrem, premiumTier, entitlement.userId]
-      );
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
+    );
   }
 
   public async getStoreSubscriptionByUserId(userId: string): Promise<UserEntitlement | null> {
@@ -884,10 +1386,55 @@ export class PostgresStoreAdapter {
   }
 
   private mapUserRow(row: any): UserAccount {
-    const lookingForArr = row.looking_for
-      ? (typeof row.looking_for === 'string' ? row.looking_for.split(',') : row.looking_for)
-      : ['Dating', 'Friends'];
-    const tribesArr = row.tribe ? [row.tribe] : ['Queer'];
+    const parseList = (value: any, fallback: string[]) => {
+      if (Array.isArray(value)) return value;
+      if (!value) return fallback;
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* Older records use comma-separated text. */ }
+      return String(value).split(',').map(item => item.trim()).filter(Boolean);
+    };
+    const lookingForArr = parseList(row.looking_for, ['Dating', 'Friends']);
+    const tribesArr = parseList(row.tribe, ['Queer']);
+    const privacy = row.privacy && typeof row.privacy === 'object' ? row.privacy : {};
+    const profileExtras = privacy.profileExtras && typeof privacy.profileExtras === 'object' ? privacy.profileExtras : {};
+
+    let interests: string[] = [];
+    if (typeof row.interests === 'string') {
+      try { interests = JSON.parse(row.interests); } catch { interests = []; }
+    } else if (Array.isArray(row.interests)) {
+      interests = row.interests;
+    }
+
+    let photos: any[] = [];
+    if (typeof row.photos === 'string') {
+      try { photos = JSON.parse(row.photos); } catch { photos = []; }
+    } else if (Array.isArray(row.photos)) {
+      photos = row.photos;
+    }
+
+    let locationStr = '';
+    let lat: number | undefined = undefined;
+    let lng: number | undefined = undefined;
+    if (typeof row.location === 'object' && row.location !== null) {
+      locationStr = row.location.city || row.location.address || row.location.name || '';
+      lat = typeof row.location.lat === 'number' ? row.location.lat : undefined;
+      lng = typeof row.location.lng === 'number' ? row.location.lng : undefined;
+    } else if (typeof row.location === 'string') {
+      try {
+        const parsedLoc = JSON.parse(row.location);
+        if (typeof parsedLoc === 'object' && parsedLoc !== null) {
+          locationStr = parsedLoc.city || parsedLoc.address || parsedLoc.name || '';
+          lat = typeof parsedLoc.lat === 'number' ? parsedLoc.lat : undefined;
+          lng = typeof parsedLoc.lng === 'number' ? parsedLoc.lng : undefined;
+        } else {
+          locationStr = row.location;
+        }
+      } catch {
+        locationStr = row.location;
+      }
+    }
 
     return {
       id: row.id,
@@ -907,10 +1454,21 @@ export class PostgresStoreAdapter {
         identityRole: row.sexual_role || 'Versatile',
         tribes: tribesArr,
         lookingFor: lookingForArr,
-        interests: typeof row.interests === 'string' ? JSON.parse(row.interests) : row.interests || [],
-        location: typeof row.location === 'object' ? (row.location.city || 'Warsaw') : (row.location || 'Warsaw'),
+        interests,
+        location: locationStr,
+        lat: typeof lat === 'number' && Number.isFinite(lat) && Math.abs(lat) <= 90 ? lat : undefined,
+        lng: typeof lng === 'number' && Number.isFinite(lng) && Math.abs(lng) <= 180 ? lng : undefined,
+        locationPrivacy: ['HIDDEN', 'EXACT', 'APPROXIMATE'].includes(privacy.locationPrivacy) ? privacy.locationPrivacy : 'APPROXIMATE',
+        approximateArea: typeof profileExtras.approximateArea === 'string' ? profileExtras.approximateArea : undefined,
+        heightCm: typeof profileExtras.heightCm === 'number' ? profileExtras.heightCm : undefined,
+        weightKg: typeof profileExtras.weightKg === 'number' ? profileExtras.weightKg : undefined,
+        relationshipStatus: typeof profileExtras.relationshipStatus === 'string' ? profileExtras.relationshipStatus : undefined,
+        instagramHandle: typeof profileExtras.instagramHandle === 'string' ? profileExtras.instagramHandle : undefined,
+        spotifyTopArtist: typeof profileExtras.spotifyTopArtist === 'string' ? profileExtras.spotifyTopArtist : undefined,
+        isBoosted: row.boost_expires_at instanceof Date && row.boost_expires_at.getTime() > Date.now(),
+        boostExpiresAt: row.boost_expires_at instanceof Date ? row.boost_expires_at.toISOString() : undefined,
         distanceKm: 0,
-        photos: typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos || [],
+        photos,
         verified: !!row.is_verified,
         isOnline: true,
         lastActiveMinutesAgo: 0,
@@ -942,23 +1500,90 @@ export class PostgresStoreAdapter {
     );
   }
 
+  public async saveMessageAndConversationTransaction(msg: Message, conv: Conversation): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO conversations (id, participant_ids, last_message_text, last_message_timestamp, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET
+           participant_ids = EXCLUDED.participant_ids,
+           last_message_text = EXCLUDED.last_message_text,
+           last_message_timestamp = EXCLUDED.last_message_timestamp,
+           updated_at = EXCLUDED.updated_at`,
+        [
+          conv.id,
+          JSON.stringify(conv.participantIds || []),
+          conv.lastMessage?.text || null,
+          conv.lastMessage?.createdAt || null,
+          conv.createdAt ? new Date(conv.createdAt) : new Date(),
+          conv.updatedAt ? new Date(conv.updatedAt) : new Date()
+        ]
+      );
+      await client.query(
+        `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`,
+        [
+          msg.id,
+          msg.conversationId,
+          msg.senderId,
+          msg.receiverId,
+          msg.text || null,
+          msg.type,
+          msg.media ? JSON.stringify(msg.media) : null,
+          msg.status,
+          msg.createdAt ? new Date(msg.createdAt) : new Date(),
+          msg.clientMessageId || null
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   public async saveMessage(msg: Message): Promise<void> {
+    const receiptColumns = messageReceiptColumnsAvailable ? ', read_at, delivered_at' : '';
+    const receiptValues = messageReceiptColumnsAvailable ? ', $11, $12' : '';
+    const receiptUpdates = messageReceiptColumnsAvailable
+      ? ', read_at = EXCLUDED.read_at, delivered_at = EXCLUDED.delivered_at'
+      : '';
+    const values = [
+      msg.id,
+      msg.conversationId,
+      msg.senderId,
+      msg.receiverId,
+      msg.text || null,
+      msg.type,
+      msg.media ? JSON.stringify(msg.media) : null,
+      msg.status,
+      msg.createdAt ? new Date(msg.createdAt) : new Date(),
+      msg.clientMessageId || null
+    ];
+    if (messageReceiptColumnsAvailable) {
+      values.push(msg.readAt ? new Date(msg.readAt) : null);
+      values.push(msg.deliveredAt ? new Date(msg.deliveredAt) : null);
+    }
     await this.pool.query(
-      `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`,
-      [
-        msg.id,
-        msg.conversationId,
-        msg.senderId,
-        msg.receiverId,
-        msg.text || null,
-        msg.type,
-        msg.media ? JSON.stringify(msg.media) : null,
-        msg.status,
-        msg.createdAt ? new Date(msg.createdAt) : new Date(),
-        msg.clientMessageId || null
-      ]
+      `INSERT INTO messages (id, conversation_id, sender_id, receiver_id, text, type, media, status, created_at, client_message_id${receiptColumns})
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10${receiptValues})
+       ON CONFLICT (id) DO UPDATE SET
+         status = EXCLUDED.status${receiptUpdates}`,
+      values
+    );
+  }
+
+  public async markMessagesRead(conversationId: string, userId: string, readAtDate: Date = new Date()): Promise<void> {
+    await this.pool.query(
+      `UPDATE messages
+       SET status = 'READ'${messageReceiptColumnsAvailable ? ', read_at = $1' : ''}
+       WHERE conversation_id = $${messageReceiptColumnsAvailable ? '2' : '1'} AND receiver_id = $${messageReceiptColumnsAvailable ? '3' : '2'} AND status != 'READ'`,
+      messageReceiptColumnsAvailable ? [readAtDate, conversationId, userId] : [conversationId, userId]
     );
   }
 
@@ -1040,10 +1665,10 @@ export class PostgresStoreAdapter {
       functionalCookies: !!r.functional_cookies,
       analyticsCookies: !!r.analytics_cookies,
       explicitSpecialCategoryConsent: !!r.special_category_consent,
-      aiAssistanceConsent: r.ai_assistance_consent !== false,
-      locationProcessingConsent: r.location_processing_consent !== false,
-      termsAcceptedVersion: r.terms_version || '2.0.0',
-      privacyPolicyAcceptedVersion: r.privacy_policy_version || '2.0.0',
+      aiAssistanceConsent: r.ai_assistance_consent === true,
+      locationProcessingConsent: r.location_processing_consent === true,
+      termsAcceptedVersion: r.terms_version || '',
+      privacyPolicyAcceptedVersion: r.privacy_policy_version || '',
       updatedAt: r.timestamp ? new Date(r.timestamp).toISOString() : new Date().toISOString(),
       safeContentEnabled: r.safe_content_enabled !== false
     };
@@ -1073,8 +1698,8 @@ export class PostgresStoreAdapter {
         consents.functionalCookies,
         consents.analyticsCookies,
         consents.explicitSpecialCategoryConsent,
-        consents.aiAssistanceConsent !== false,
-        consents.locationProcessingConsent !== false,
+        consents.aiAssistanceConsent === true,
+        consents.locationProcessingConsent === true,
         consents.termsAcceptedVersion,
         consents.privacyPolicyAcceptedVersion,
         consents.safeContentEnabled !== false
@@ -1116,6 +1741,7 @@ export class PostgresStoreAdapter {
     const res = await this.pool.query('SELECT * FROM messages ORDER BY created_at ASC');
     return res.rows.map(row => ({
       id: row.id,
+      clientMessageId: row.client_message_id,
       conversationId: row.conversation_id,
       senderId: row.sender_id,
       receiverId: row.receiver_id,
@@ -1123,6 +1749,20 @@ export class PostgresStoreAdapter {
       type: row.type,
       media: row.media,
       status: row.status,
+      deliveryStatus: (row.status === 'READ' ? 'read' : row.status === 'DELIVERED' ? 'delivered' : 'sent') as any,
+      readStatus: row.status === 'READ',
+      readAt: row.read_at ? new Date(row.read_at).toISOString() : undefined,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : undefined,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
+    }));
+  }
+
+  public async loadAllBlocks(): Promise<BlockRecord[]> {
+    const res = await this.pool.query('SELECT * FROM blocks ORDER BY created_at ASC');
+    return res.rows.map(row => ({
+      id: row.id,
+      blockerUserId: row.blocker_user_id,
+      blockedUserId: row.blocked_user_id,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
     }));
   }
@@ -1134,6 +1774,7 @@ export class PostgresStoreAdapter {
     );
     return res.rows.map(row => ({
       id: row.id,
+      clientMessageId: row.client_message_id,
       conversationId: row.conversation_id,
       senderId: row.sender_id,
       receiverId: row.receiver_id,
@@ -1141,6 +1782,10 @@ export class PostgresStoreAdapter {
       type: row.type,
       media: row.media,
       status: row.status,
+      deliveryStatus: (row.status === 'READ' ? 'read' : row.status === 'DELIVERED' ? 'delivered' : 'sent') as any,
+      readStatus: row.status === 'READ',
+      readAt: row.read_at ? new Date(row.read_at).toISOString() : undefined,
+      deliveredAt: row.delivered_at ? new Date(row.delivered_at).toISOString() : undefined,
       createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString()
     }));
   }

@@ -221,7 +221,7 @@ export const PremiumPaywallModal: React.FC<PremiumPaywallModalProps> = ({
         )}
 
         {/* Value Prop Features */}
-        <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-xl p-3.5 mb-6 space-y-2.5">
+        <div className="bg-zinc-900/60 border border-zinc-800/80 rounded-xl p-3.5 mb-4 space-y-2.5">
           {PREMIUM_FEATURES.map((feat) => (
             <div key={feat.key} className="flex items-start gap-2.5 text-xs">
               <div className="w-4 h-4 rounded-full bg-violet-900/50 border border-violet-500/40 flex items-center justify-center shrink-0 mt-0.5 text-violet-300">
@@ -235,24 +235,36 @@ export const PremiumPaywallModal: React.FC<PremiumPaywallModalProps> = ({
           ))}
         </div>
 
+        {/* Promo Code & Renewal Transparency */}
+        {selectedProduct?.tier === 'yearly' && (
+          <div className="mb-5 p-3 rounded-xl bg-violet-950/30 border border-violet-700/50 text-xs text-zinc-300 space-y-1">
+            <div className="flex items-center justify-between font-semibold text-violet-300">
+              <span>Promo Code</span>
+              <span className="text-[11px] px-1.5 py-0.5 bg-violet-900/60 rounded border border-violet-500/40 text-violet-200">Private Checkout</span>
+            </div>
+            <p className="text-[11px] text-zinc-400">
+              Masz kod promocyjny? Wpisz swój kod bezpośrednio w polu &quot;Dodaj kod promocyjny&quot; na bezpiecznej stronie płatności.
+            </p>
+            <p className="text-[10px] text-zinc-400 pt-0.5 border-t border-violet-900/40">
+              * Kod rabatowy naliczany jest w podsumowaniu zamówienia.
+            </p>
+          </div>
+        )}
+
         {/* Action Button */}
         <button
           id="btn-subscribe-now"
           disabled={isPurchasing || isLoadingProducts || products.length === 0 || !selectedProductId}
           onClick={handlePurchase}
-          className="w-full py-3.5 px-4 rounded-xl font-bold text-sm text-white bg-violet-600 hover:bg-violet-500 active:scale-[0.99] disabled:opacity-50 transition shadow-lg shadow-violet-900/40 flex items-center justify-center gap-2"
+          className="w-full py-4 px-6 rounded-2xl font-black text-base text-white bg-violet-600 hover:bg-violet-500 active:scale-[0.98] disabled:opacity-50 transition-all shadow-xl shadow-violet-900/50 flex items-center justify-center gap-2.5"
         >
           {isPurchasing ? (
             <>
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>Connecting to {platform === 'android' ? 'Google Play' : platform === 'ios' ? 'App Store' : 'Checkout'}...</span>
+              <RefreshCw className="w-5 h-5 animate-spin" />
+              <span>Łączenie ze sklepem...</span>
             </>
-          ) : products.length === 0 && !isLoadingProducts ? (
-            <span>Subscription products are temporarily unavailable</span>
           ) : (
-            <span>
-              Subscribe with {platform === 'android' ? 'Google Play' : platform === 'ios' ? 'Apple ID' : 'Card'} — {selectedProduct?.localizedPrice || ''}
-            </span>
+            <span>Wybierz Premium</span>
           )}
         </button>
 

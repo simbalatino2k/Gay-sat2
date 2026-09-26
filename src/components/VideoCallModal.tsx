@@ -13,9 +13,13 @@ import {
   X, 
   Maximize2, 
   Minimize2,
-  Info
+  Info,
+  Phone,
+  Volume2
 } from 'lucide-react';
 import { videoEffectsService, APPROVED_EFFECTS, VideoEffect } from '../services/videoEffectsService';
+import { MediaPermissionModal } from './MediaPermissionModal';
+import { auraWebSocketUrl } from '../lib/websocketEndpoint';
 
 export type CallState = 
   | 'IDLE'
@@ -30,6 +34,8 @@ export type CallState =
   | 'TIMEOUT'
   | 'PERMISSION_DENIED';
 
+export type CallType = 'video' | 'voice';
+
 interface VideoCallModalProps {
   isOpen: boolean;
   isIncoming: boolean;
@@ -42,7 +48,99 @@ interface VideoCallModalProps {
   };
   authToken: string;
   incomingSignalData?: any;
+  callType?: CallType;
   onClose: () => void;
+}
+
+// Synthesized audio feedback for calling (zero external audio file dependencies)
+class CallTonePlayer {
+  private ctx: AudioContext | null = null;
+  private intervalId: any = null;
+
+  private initCtx() {
+    if (!this.ctx) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        this.ctx = new AudioCtx();
+      }
+    }
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+  }
+
+  public playRingback() {
+    this.stop();
+    this.initCtx();
+
+    const beep = () => {
+      if (!this.ctx) return;
+      try {
+        const osc1 = this.ctx.createOscillator();
+        const osc2 = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+
+        osc1.type = 'sine';
+        osc2.type = 'sine';
+        osc1.frequency.setValueAtTime(440, this.ctx.currentTime);
+        osc2.frequency.setValueAtTime(480, this.ctx.currentTime);
+
+        gain.gain.setValueAtTime(0.03, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + 1.2);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(this.ctx.destination);
+
+        osc1.start();
+        osc2.start();
+        osc1.stop(this.ctx.currentTime + 1.2);
+        osc2.stop(this.ctx.currentTime + 1.2);
+      } catch {}
+    };
+
+    beep();
+    this.intervalId = setInterval(beep, 3000);
+  }
+
+  public playIncomingRingtone() {
+    this.stop();
+    this.initCtx();
+
+    const chime = () => {
+      if (!this.ctx) return;
+      try {
+        const notes = [523.25, 659.25, 783.99, 1046.50];
+        notes.forEach((freq, idx) => {
+          if (!this.ctx) return;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          const start = this.ctx.currentTime + idx * 0.12;
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, start);
+          gain.gain.setValueAtTime(0.05, start);
+          gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.35);
+
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+
+          osc.start(start);
+          osc.stop(start + 0.35);
+        });
+      } catch {}
+    };
+
+    chime();
+    this.intervalId = setInterval(chime, 2500);
+  }
+
+  public stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
 }
 
 export const VideoCallModal: React.FC<VideoCallModalProps> = ({
@@ -52,19 +150,25 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   targetUser,
   authToken,
   incomingSignalData,
+  callType = 'video',
   onClose
 }) => {
+  const [activeCallType, setActiveCallType] = useState<CallType>(callType);
   const [callState, setCallState] = useState<CallState>(isIncoming ? 'INCOMING_RINGING' : 'OUTGOING_RINGING');
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(callType === 'voice');
+  const [isSelfViewExpanded, setIsSelfViewExpanded] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [callDuration, setCallDuration] = useState(0);
   const [showEffects, setShowEffects] = useState(false);
   const [activeEffect, setActiveEffect] = useState('none');
+  const activeEffectRef = useRef('none');
   const [turnNotice, setTurnNotice] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showPermissionModal, setShowPermissionModal] = useState<boolean>(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localPreviewStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -72,6 +176,48 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const wsRef = useRef<WebSocket | null>(null);
   const videoSenderRef = useRef<RTCRtpSender | null>(null);
   const timeoutTimerRef = useRef<any>(null);
+  const tonePlayerRef = useRef<CallTonePlayer | null>(null);
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const hasRemoteDescriptionRef = useRef<boolean>(false);
+
+  // Synchronize initial callType
+  useEffect(() => {
+    if (incomingSignalData?.callType) {
+      setActiveCallType(incomingSignalData.callType);
+      setIsVideoOff(incomingSignalData.callType === 'voice');
+    } else {
+      setActiveCallType(callType);
+      setIsVideoOff(callType === 'voice');
+    }
+  }, [callType, incomingSignalData]);
+
+  useEffect(() => {
+    if (!isOpen || isVideoOff) setIsSelfViewExpanded(false);
+  }, [isOpen, isVideoOff]);
+
+  // Audio ringtone / ringback management
+  useEffect(() => {
+    if (!tonePlayerRef.current) {
+      tonePlayerRef.current = new CallTonePlayer();
+    }
+    const player = tonePlayerRef.current;
+
+    if (isOpen) {
+      if (callState === 'OUTGOING_RINGING') {
+        player.playRingback();
+      } else if (callState === 'INCOMING_RINGING') {
+        player.playIncomingRingtone();
+      } else {
+        player.stop();
+      }
+    } else {
+      player.stop();
+    }
+
+    return () => {
+      player.stop();
+    };
+  }, [isOpen, callState]);
 
   // Timer for connected call duration
   useEffect(() => {
@@ -86,24 +232,275 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     return () => clearInterval(interval);
   }, [callState]);
 
+  // Keep the local preview on the same processed track sent to the other person.
+  useEffect(() => {
+    const preview = localPreviewStreamRef.current || localStreamRef.current;
+    if (localVideoRef.current && preview) {
+      if (localVideoRef.current.srcObject !== preview) {
+        localVideoRef.current.srcObject = preview;
+      }
+    }
+  }, [callState, isVideoOff]);
+
+  const bindLocalPreview = (track: MediaStreamTrack | null) => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const rawTrack = stream.getVideoTracks()[0];
+    localPreviewStreamRef.current = track && track !== rawTrack
+      ? new MediaStream([track])
+      : stream;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localPreviewStreamRef.current;
+    }
+  };
+
+  // Ensure remote video/audio ref binds to stream and plays reliably
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStreamRef.current) {
+      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      }
+      remoteVideoRef.current.play().catch(e => {
+        console.warn('[WebRTC] Odtwarzanie strumienia zdalnego wymaga interakcji użytkownika:', e?.message);
+      });
+    }
+  }, [callState, remoteStreamRef.current]);
+
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Helper to establish WebSocket connection for WebRTC signaling
+  // Helper to drain queued ICE candidates once remote description is set
+  const drainIceCandidates = async (pc: RTCPeerConnection) => {
+    while (pendingIceCandidatesRef.current.length > 0) {
+      const cand = pendingIceCandidatesRef.current.shift();
+      if (cand) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) {
+          console.warn('[WebRTC] Błąd dodawania zakolejkowanego kandydata ICE:', e);
+        }
+      }
+    }
+  };
+
+  // Fetch ICE servers and TURN credentials
+  const fetchIceServers = async (): Promise<RTCIceServer[]> => {
+    const fallbackServers: RTCIceServer[] = [
+      {
+        urls: [
+          'stun:stun.l.google.com:19302',
+          'stun:stun1.l.google.com:19302',
+          'stun:stun2.l.google.com:19302',
+          'stun:global.stun.twilio.com:3478'
+        ]
+      }
+    ];
+
+    try {
+      const res = await fetch('/api/webrtc/ice-servers', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (!data.turnConfigured) {
+          setTurnNotice('TURN relay nie jest skonfigurowany. Połączenie działa w trybie bezpośrednim P2P STUN.');
+        }
+        return data.iceServers && data.iceServers.length > 0 ? data.iceServers : fallbackServers;
+      }
+    } catch (e) {
+      console.warn('[WebRTC] Błąd pobierania serwerów ICE, użycie domyślnych STUN:', e);
+    }
+    return fallbackServers;
+  };
+
+  // Start local media stream (camera & microphone, with fallback to audio-only if needed)
+  const startLocalMedia = async (targetFacing = facingMode, audioOnly = isVideoOff): Promise<MediaStream> => {
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: audioOnly ? false : {
+          facingMode: targetFacing,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      localStreamRef.current = stream;
+      bindLocalPreview(stream.getVideoTracks()[0] || null);
+      return stream;
+    } catch (err: any) {
+      console.warn('[WebRTC] Błąd inicjalizacji mediów, próba zapasowego audio:', err);
+      if (!audioOnly) {
+        try {
+          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            video: false
+          });
+          localStreamRef.current = audioOnlyStream;
+          localPreviewStreamRef.current = audioOnlyStream;
+          setIsVideoOff(true);
+          return audioOnlyStream;
+        } catch {}
+      }
+      setCallState('PERMISSION_DENIED');
+      setErrorMessage('Wymagany jest dostęp do mikrofonu (i opcjonalnie kamery) aby rozmawiać.');
+      setShowPermissionModal(true);
+      throw err;
+    }
+  };
+
+  // Initialize WebRTC RTCPeerConnection
+  const initializePeerConnection = async (isInitiator: boolean) => {
+    try {
+      const iceServers = await fetchIceServers();
+      const pc = new RTCPeerConnection({
+        iceServers,
+        iceCandidatePoolSize: 2,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
+      });
+      pcRef.current = pc;
+      hasRemoteDescriptionRef.current = false;
+
+      // Start local media if not already started
+      const stream = localStreamRef.current || (await startLocalMedia(facingMode, isVideoOff));
+
+      // Add local tracks to peer connection
+      stream.getTracks().forEach(track => {
+        const sender = pc.addTrack(track, stream);
+        if (track.kind === 'video') {
+          videoSenderRef.current = sender;
+        }
+      });
+      if (activeEffectRef.current !== 'none' && stream.getVideoTracks().length > 0) {
+        try {
+          const effectTrack = await videoEffectsService.applyEffect(activeEffectRef.current, stream, videoSenderRef.current);
+          bindLocalPreview(effectTrack);
+        } catch (effectError) {
+          console.warn('[WebRTC] Efekt kamery nie jest dostępny:', effectError);
+          activeEffectRef.current = 'none';
+          setActiveEffect('none');
+          bindLocalPreview(stream.getVideoTracks()[0] || null);
+        }
+      }
+
+      // Handle remote incoming tracks
+      pc.ontrack = (event) => {
+        if (!remoteStreamRef.current) {
+          remoteStreamRef.current = new MediaStream();
+        }
+        if (event.streams && event.streams[0]) {
+          event.streams[0].getTracks().forEach(track => {
+            if (!remoteStreamRef.current?.getTracks().some(t => t.id === track.id)) {
+              remoteStreamRef.current?.addTrack(track);
+            }
+          });
+        } else if (event.track) {
+          if (!remoteStreamRef.current.getTracks().some(t => t.id === event.track.id)) {
+            remoteStreamRef.current.addTrack(event.track);
+          }
+        }
+
+        if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+          remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        }
+        remoteVideoRef.current?.play().catch(() => {});
+        setCallState('CONNECTED');
+      };
+
+      // Handle local ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'ICE_CANDIDATE',
+            targetUserId: targetUser.id,
+            candidate: event.candidate
+          }));
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'connected') {
+          setCallState('CONNECTED');
+        } else if (pc.connectionState === 'disconnected') {
+          setCallState('RECONNECTING');
+        } else if (pc.connectionState === 'failed') {
+          if (pc.restartIce) {
+            pc.restartIce();
+          } else {
+            handleEndCall('ENDED');
+          }
+        } else if (pc.connectionState === 'closed') {
+          handleEndCall('ENDED');
+        }
+      };
+
+      if (isInitiator) {
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: !isVideoOff
+        });
+        await pc.setLocalDescription(offer);
+
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'OFFER',
+            targetUserId: targetUser.id,
+            sdp: offer
+          }));
+        }
+      }
+    } catch (err: any) {
+      console.error('[WebRTC] Błąd inicjalizacji połączenia:', err);
+      setErrorMessage(err.message || 'Nie udało się nawiązać połączenia.');
+    }
+  };
+
+  // Handle incoming remote offer
+  const handleRemoteOffer = async (remoteSdp: any) => {
+    try {
+      if (!pcRef.current) {
+        await initializePeerConnection(false);
+      }
+      const pc = pcRef.current!;
+      await pc.setRemoteDescription(new RTCSessionDescription(remoteSdp));
+      hasRemoteDescriptionRef.current = true;
+      await drainIceCandidates(pc);
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'ANSWER',
+          targetUserId: targetUser.id,
+          sdp: answer
+        }));
+      }
+      setCallState('CONNECTED');
+    } catch (err) {
+      console.error('[WebRTC] Błąd obsługi oferty zdalnej:', err);
+    }
+  };
+
+  // Establish WebSocket connection for WebRTC signaling
   useEffect(() => {
     if (!isOpen) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/webrtc`;
+    const wsUrl = auraWebSocketUrl(window.location);
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      // Authenticate with server
       ws.send(JSON.stringify({
         type: 'AUTH',
         token: authToken
@@ -113,20 +510,20 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     ws.onmessage = async (evt) => {
       try {
         const data = JSON.parse(evt.data);
-        const { type, senderId } = data;
+        const { type } = data;
 
         if (type === 'AUTH_SUCCESS') {
-          // If outgoing call, initiate CALL_REQUEST
           if (!isIncoming && callState === 'OUTGOING_RINGING') {
             ws.send(JSON.stringify({
               type: 'CALL_REQUEST',
-              targetUserId: targetUser.id
+              targetUserId: targetUser.id,
+              callType: activeCallType
             }));
 
-            // Ringing timeout (30 seconds)
+            // Ringing timeout (35 seconds)
             timeoutTimerRef.current = setTimeout(() => {
               handleEndCall('TIMEOUT');
-            }, 30000);
+            }, 35000);
           }
         }
 
@@ -139,7 +536,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         if (type === 'CALL_REJECTED') {
           clearTimeout(timeoutTimerRef.current);
           setCallState(data.reason === 'BUSY' ? 'BUSY' : 'REJECTED');
-          setTimeout(() => handleEndCall('REJECTED'), 2500);
+          setTimeout(() => handleEndCall('REJECTED'), 2200);
         }
 
         if (type === 'CALL_TERMINATED' || type === 'CALL_END') {
@@ -153,13 +550,21 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         if (type === 'ANSWER') {
           if (pcRef.current) {
             await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            hasRemoteDescriptionRef.current = true;
+            await drainIceCandidates(pcRef.current);
             setCallState('CONNECTED');
           }
         }
 
         if (type === 'ICE_CANDIDATE') {
-          if (pcRef.current && data.candidate) {
-            await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+          if (pcRef.current && hasRemoteDescriptionRef.current && pcRef.current.remoteDescription) {
+            try {
+              await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } catch (err) {
+              console.warn('[WebRTC] Błąd dodawania kandydata ICE:', err);
+            }
+          } else {
+            pendingIceCandidatesRef.current.push(data.candidate);
           }
         }
       } catch (err) {
@@ -179,163 +584,25 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
     return () => {
       clearTimeout(timeoutTimerRef.current);
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.onopen = () => {
+          try { ws.close(); } catch {}
+        };
       }
     };
   }, [isOpen, authToken]);
 
-  // Fetch ICE servers and TURN credentials
-  const fetchIceServers = async (): Promise<RTCIceServer[]> => {
-    try {
-      const res = await fetch('/api/webrtc/ice-servers', {
-        headers: { Authorization: `Bearer ${authToken}` }
-      });
-      const data = await res.json();
-      if (!data.turnConfigured) {
-        setTurnNotice('TURN relay nie jest skonfigurowany. Połączenie działa w trybie bezpośrednim P2P STUN.');
-      }
-      return data.iceServers || [{ urls: ['stun:stun.l.google.com:19302'] }];
-    } catch (e) {
-      return [{ urls: ['stun:stun.l.google.com:19302'] }];
-    }
-  };
-
-  // Start local media stream (camera & microphone)
-  const startLocalMedia = async (targetFacing = facingMode): Promise<MediaStream> => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: targetFacing,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-
-      localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-      return stream;
-    } catch (err: any) {
-      console.error('[WebRTC] Brak uprawnień do kamery/mikrofonu:', err);
-      setCallState('PERMISSION_DENIED');
-      setErrorMessage('Aplikacja nie uzyskała dostępu do kamery lub mikrofonu.');
-      throw err;
-    }
-  };
-
-  // Initialize WebRTC RTCPeerConnection
-  const initializePeerConnection = async (isInitiator: boolean) => {
-    try {
-      const iceServers = await fetchIceServers();
-      const pc = new RTCPeerConnection({
-        iceServers,
-        iceCandidatePoolSize: 2
-      });
-      pcRef.current = pc;
-
-      // Start local media if not already started
-      const stream = localStreamRef.current || (await startLocalMedia());
-
-      // Add local tracks to peer connection
-      stream.getTracks().forEach(track => {
-        const sender = pc.addTrack(track, stream);
-        if (track.kind === 'video') {
-          videoSenderRef.current = sender;
-        }
-      });
-
-      // Handle remote incoming tracks
-      pc.ontrack = (event) => {
-        if (!remoteStreamRef.current) {
-          remoteStreamRef.current = new MediaStream();
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStreamRef.current;
-          }
-        }
-        event.streams[0].getTracks().forEach(track => {
-          remoteStreamRef.current?.addTrack(track);
-        });
-        setCallState('CONNECTED');
-      };
-
-      // Handle ICE candidates
-      pc.onicecandidate = (event) => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'ICE_CANDIDATE',
-            targetUserId: targetUser.id,
-            candidate: event.candidate
-          }));
-        }
-      };
-
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          setCallState('CONNECTED');
-        } else if (pc.connectionState === 'disconnected') {
-          setCallState('RECONNECTING');
-        } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-          handleEndCall('ENDED');
-        }
-      };
-
-      if (isInitiator) {
-        const offer = await pc.createOffer({
-          offerToReceiveAudio: true,
-          offerToReceiveVideo: true
-        });
-        await pc.setLocalDescription(offer);
-
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'OFFER',
-            targetUserId: targetUser.id,
-            sdp: offer
-          }));
-        }
-      }
-    } catch (err: any) {
-      console.error('[WebRTC] Błąd inicjalizacji połączenia:', err);
-      setErrorMessage(err.message || 'Nie udało się nawiązać wideorozmowy.');
-    }
-  };
-
-  // Handle incoming remote offer
-  const handleRemoteOffer = async (remoteSdp: any) => {
-    try {
-      if (!pcRef.current) {
-        await initializePeerConnection(false);
-      }
-      const pc = pcRef.current!;
-      await pc.setRemoteDescription(new RTCSessionDescription(remoteSdp));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'ANSWER',
-          targetUserId: targetUser.id,
-          sdp: answer
-        }));
-      }
-      setCallState('CONNECTED');
-    } catch (err) {
-      console.error('[WebRTC] Błąd obsługi oferty zdalnej:', err);
-    }
-  };
-
-  // Accept incoming call (prompts for camera/mic permissions only now)
+  // Accept incoming call
   const handleAcceptCall = async () => {
     try {
       setCallState('CONNECTING');
-      await startLocalMedia();
+      await startLocalMedia(facingMode, isVideoOff);
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
           type: 'CALL_ACCEPTED',
@@ -346,7 +613,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         await handleRemoteOffer(incomingSignalData.sdp);
       }
     } catch (e) {
-      // Permission denied handled in startLocalMedia
+      // Handled in startLocalMedia
     }
   };
 
@@ -365,8 +632,8 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   // End or close call
   const handleEndCall = (finalState: CallState = 'ENDED') => {
     clearTimeout(timeoutTimerRef.current);
+    tonePlayerRef.current?.stop();
 
-    // Notify other participant
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'CALL_END',
@@ -374,7 +641,6 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       }));
     }
 
-    // Stop all media tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
@@ -384,19 +650,19 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       remoteStreamRef.current = null;
     }
 
-    // Close WebRTC PeerConnection
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
     }
 
-    // Clean up effects
     videoEffectsService.cleanup();
-
+    activeEffectRef.current = 'none';
+    setActiveEffect('none');
+    localPreviewStreamRef.current = null;
     setCallState(finalState);
     setTimeout(() => {
       onClose();
-    }, 800);
+    }, 700);
   };
 
   // Toggle Mute Audio
@@ -409,46 +675,107 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
   };
 
-  // Toggle Video Camera
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach(track => {
-        track.enabled = isVideoOff;
-      });
-      setIsVideoOff(!isVideoOff);
+  // Toggle Video Camera or upgrade voice to video
+  const toggleVideo = async () => {
+    if (isVideoOff) {
+      // Turn video ON
+      try {
+        const stream = localStreamRef.current;
+        if (!stream) return;
+        let videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack || videoTrack.readyState === 'ended') {
+          const videoStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } }
+          });
+          [videoTrack] = videoStream.getVideoTracks();
+          if (videoTrack) {
+            stream.getVideoTracks().forEach(oldTrack => stream.removeTrack(oldTrack));
+            stream.addTrack(videoTrack);
+            if (pcRef.current && !videoSenderRef.current) {
+              videoSenderRef.current = pcRef.current.addTrack(videoTrack, stream);
+            }
+          }
+        }
+        if (!videoTrack) return;
+        videoTrack.enabled = true;
+        let previewTrack: MediaStreamTrack | null = videoTrack;
+        if (activeEffect !== 'none') {
+          try {
+            previewTrack = await videoEffectsService.applyEffect(activeEffect, stream, videoSenderRef.current);
+          } catch (effectError) {
+            console.warn('[WebRTC] Błąd przywrócenia efektu kamery:', effectError);
+            await videoEffectsService.applyEffect('none', stream, videoSenderRef.current);
+            activeEffectRef.current = 'none';
+            setActiveEffect('none');
+          }
+        } else if (videoSenderRef.current) {
+          await videoSenderRef.current.replaceTrack(videoTrack);
+        }
+        bindLocalPreview(previewTrack);
+        setIsVideoOff(false);
+      } catch (err) {
+        console.warn('[WebRTC] Błąd włączania wideo:', err);
+      }
+    } else {
+      // Turn video OFF
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach(track => {
+          track.enabled = false;
+        });
+        setIsVideoOff(true);
+      }
     }
   };
 
   // Switch camera facing mode (front/rear)
   const handleSwitchCamera = async () => {
     const nextFacing = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextFacing);
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach(t => t.stop());
-    }
-
+    const stream = localStreamRef.current;
+    if (!stream) return;
     try {
-      const newStream = await startLocalMedia(nextFacing);
-      const [newVideoTrack] = newStream.getVideoTracks();
+      // Request only a camera track so the active microphone and mute state stay intact.
+      const cameraStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: nextFacing, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      const [newVideoTrack] = cameraStream.getVideoTracks();
+      if (!newVideoTrack) return;
+      const oldVideoTracks = stream.getVideoTracks();
+      oldVideoTracks.forEach(track => stream.removeTrack(track));
+      stream.addTrack(newVideoTrack);
 
-      if (videoSenderRef.current && newVideoTrack) {
-        if (activeEffect !== 'none') {
-          // Re-apply effect with new track
-          await videoEffectsService.applyEffect(activeEffect, newStream, videoSenderRef.current);
+      try {
+        if (videoSenderRef.current) {
+          const previewTrack = activeEffect !== 'none'
+            ? await videoEffectsService.applyEffect(activeEffect, stream, videoSenderRef.current)
+            : newVideoTrack;
+          if (activeEffect === 'none') {
+            await videoSenderRef.current.replaceTrack(newVideoTrack);
+          }
+          bindLocalPreview(previewTrack);
         } else {
-          await videoSenderRef.current.replaceTrack(newVideoTrack);
+          bindLocalPreview(newVideoTrack);
         }
+        oldVideoTracks.forEach(track => track.stop());
+        setFacingMode(nextFacing);
+      } catch (err) {
+        stream.removeTrack(newVideoTrack);
+        newVideoTrack.stop();
+        oldVideoTracks.forEach(track => stream.addTrack(track));
+        throw err;
       }
     } catch (err) {
       console.warn('Błąd przełączenia kamery:', err);
     }
   };
 
-  // Apply selected AR effect
+  // Apply a native camera effect to both the call and local preview.
   const handleSelectEffect = async (effect: VideoEffect) => {
-    setActiveEffect(effect.id);
-    if (!localStreamRef.current) return;
+    if (!localStreamRef.current) {
+      activeEffectRef.current = effect.id;
+      setActiveEffect(effect.id);
+      return;
+    }
 
     try {
       const processedTrack = await videoEffectsService.applyEffect(
@@ -457,32 +784,33 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         videoSenderRef.current
       );
 
-      // Also update local preview to show the effect
-      if (localVideoRef.current && processedTrack) {
-        const previewStream = new MediaStream([processedTrack]);
-        localVideoRef.current.srcObject = previewStream;
-      }
+      bindLocalPreview(processedTrack);
+      activeEffectRef.current = effect.id;
+      setActiveEffect(effect.id);
     } catch (err) {
       console.warn('Błąd aplikacji efektu wideo:', err);
-      // Fallback to normal video
-      if (localVideoRef.current && localStreamRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+      try {
+        await videoEffectsService.applyEffect('none', localStreamRef.current, videoSenderRef.current);
+      } catch (restoreError) {
+        console.warn('Nie udało się przywrócić obrazu bez efektu:', restoreError);
       }
+      bindLocalPreview(localStreamRef.current.getVideoTracks()[0] || null);
+      activeEffectRef.current = 'none';
+      setActiveEffect('none');
     }
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] bg-[#05060a] flex flex-col justify-between overflow-hidden select-none safe-area-inset">
-      
+    <div id="modal-aura-call" className="fixed inset-0 z-[100] bg-[#05060a] flex flex-col justify-between overflow-hidden select-none safe-area-inset">
       {/* Ambient Glow */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-96 h-96 bg-purple-600/10 rounded-full blur-[120px] pointer-events-none" />
 
       {/* Top Header Bar */}
       <div className="relative z-10 px-4 pt-4 pb-2 flex items-center justify-between bg-gradient-to-b from-[#05060a]/90 via-[#05060a]/50 to-transparent">
         <div className="flex items-center gap-2.5">
-          <div className="w-10 h-10 rounded-xl overflow-hidden border border-purple-500/40 bg-purple-950/40">
+          <div className="w-10 h-10 rounded-xl overflow-hidden border border-purple-500/40 bg-purple-950/40 shadow-md">
             <img 
               src={targetUser.photoUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'} 
               alt={targetUser.displayName} 
@@ -490,14 +818,19 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             />
           </div>
           <div>
-            <h4 className="text-sm font-bold text-white leading-tight">{targetUser.displayName}</h4>
+            <div className="flex items-center gap-1.5">
+              <h4 className="text-sm font-bold text-white leading-tight">{targetUser.displayName}</h4>
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-black uppercase bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                {activeCallType === 'voice' ? 'Głosowe' : 'Wideo'}
+              </span>
+            </div>
             <div className="flex items-center gap-1.5 text-[11px] text-fuchsia-300">
               <span className={`w-2 h-2 rounded-full ${callState === 'CONNECTED' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
               <span>
                 {callState === 'CONNECTED' ? formatDuration(callDuration) : 
                  callState === 'CONNECTING' ? 'Nawiązywanie połączenia...' :
                  callState === 'OUTGOING_RINGING' ? 'Dzwonię...' :
-                 callState === 'INCOMING_RINGING' ? 'Przychodząca rozmowa...' :
+                 callState === 'INCOMING_RINGING' ? 'Przychodzące połączenie...' :
                  callState === 'RECONNECTING' ? 'Wznawianie połączenia...' :
                  callState === 'PERMISSION_DENIED' ? 'Brak uprawnień' : 'Połączenie'}
               </span>
@@ -507,7 +840,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
         <div className="flex items-center gap-2">
           {callState === 'CONNECTED' && (
-            <span className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-[10px] text-purple-300 font-semibold">
+            <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-[10px] text-purple-300 font-semibold shadow-sm">
               <ShieldCheck className="w-3 h-3 text-cyan-400" />
               Szyfrowane P2P
             </span>
@@ -515,45 +848,62 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         </div>
       </div>
 
-      {/* Main Video View Area */}
+      {/* Main Call View Area */}
       <div className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden">
         
-        {/* Remote Video (Fullscreen / Large) */}
-        {callState === 'CONNECTED' || callState === 'RECONNECTING' ? (
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            className="w-full h-full object-cover bg-black"
-          />
-        ) : (
-          /* Calling / Ringing Placeholder */
-          <div className="flex flex-col items-center justify-center p-6 text-center space-y-4 max-w-xs">
+        {/* Remote Video & Audio Element (Always mounted so remote audio tracks always play) */}
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className={`w-full h-full object-cover bg-black ${callState === 'CONNECTED' && activeCallType === 'video' ? 'block' : 'hidden'}`}
+        />
+
+        {/* Audio Mode or Ringing Avatar View */}
+        {((callState === 'CONNECTED' && activeCallType === 'voice') || callState !== 'CONNECTED') && (
+          <div className="flex flex-col items-center justify-center p-6 text-center space-y-4 max-w-xs z-10">
             <div className="relative">
-              <div className="w-28 h-28 rounded-3xl overflow-hidden border-2 border-purple-500/50 shadow-2xl shadow-purple-900/40">
+              <div className="w-28 h-28 rounded-3xl overflow-hidden border-2 border-purple-500/50 shadow-2xl shadow-purple-900/40 relative z-10">
                 <img 
                   src={targetUser.photoUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=800'} 
                   alt={targetUser.displayName} 
                   className="w-full h-full object-cover"
                 />
               </div>
-              {callState === 'OUTGOING_RINGING' && (
-                <div className="absolute -inset-2 rounded-3xl border border-purple-400/40 animate-ping pointer-events-none" />
+
+              {/* Pulsing ring animations */}
+              {(callState === 'OUTGOING_RINGING' || callState === 'INCOMING_RINGING') && (
+                <div className="absolute -inset-3 rounded-3xl border-2 border-purple-400/50 animate-ping pointer-events-none" />
+              )}
+              {callState === 'CONNECTED' && (
+                <div className="absolute -inset-2 rounded-3xl border border-emerald-400/40 animate-pulse pointer-events-none" />
               )}
             </div>
 
             <div>
               <h3 className="text-lg font-extrabold text-white">{targetUser.displayName}</h3>
               <p className="text-xs text-slate-400 mt-1">
-                {callState === 'OUTGOING_RINGING' ? 'Oczekiwanie na odebranie przez rozmówcę...' :
-                 callState === 'INCOMING_RINGING' ? 'Zaproszenie do prywatnej wideorozmowy AURA' :
+                {callState === 'OUTGOING_RINGING' ? 'Oczekiwanie na odebranie...' :
+                 callState === 'INCOMING_RINGING' ? (activeCallType === 'voice' ? 'Przychodząca rozmowa głosowa' : 'Przychodząca wideorozmowa') :
                  callState === 'CONNECTING' ? 'Inicjalizacja bezpiecznego kanału audio/wideo...' :
+                 callState === 'CONNECTED' ? (isVideoOff ? 'Rozmowa głosowa w toku' : 'Połączenie aktywne') :
                  callState === 'BUSY' ? 'Użytkownik prowadzi inną rozmowę.' :
                  callState === 'REJECTED' ? 'Rozmowa odrzucona.' :
                  callState === 'TIMEOUT' ? 'Brak odpowiedzi.' :
-                 callState === 'PERMISSION_DENIED' ? errorMessage || 'Wymagane uprawnienia do kamery i mikrofonu.' :
+                 callState === 'PERMISSION_DENIED' ? errorMessage || 'Wymagane uprawnienia.' :
                  'Łączenie...'}
               </p>
+
+              {callState === 'PERMISSION_DENIED' && (
+                <button
+                  id="btn-videocall-fix-permissions"
+                  type="button"
+                  onClick={() => setShowPermissionModal(true)}
+                  className="mt-3 px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white shadow-lg shadow-purple-900/50 transition active:scale-95"
+                >
+                  Zezwól na dostęp / Sprawdź uprawnienia
+                </button>
+              )}
             </div>
 
             {turnNotice && (
@@ -567,7 +917,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
         {/* Local Video Picture-in-Picture (PiP) */}
         {(callState === 'CONNECTED' || callState === 'CONNECTING') && (
-          <div className="absolute top-4 right-4 z-20 w-28 h-40 sm:w-36 sm:h-52 rounded-2xl overflow-hidden border border-purple-500/40 shadow-2xl bg-black/80 backdrop-blur-md">
+          <div className={`absolute top-4 right-4 z-20 max-h-[calc(100%-2rem)] rounded-2xl overflow-hidden border border-purple-500/40 shadow-2xl bg-black/80 backdrop-blur-md transition-[width,height] duration-200 ${
+            isSelfViewExpanded
+              ? 'w-[min(72vw,320px)] h-[min(55dvh,440px)] sm:w-[min(40vw,480px)] sm:h-[min(70dvh,600px)]'
+              : 'w-28 h-40 sm:w-36 sm:h-52'
+          }`}>
             <video
               ref={localVideoRef}
               autoPlay
@@ -575,46 +929,64 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               muted
               className={`w-full h-full object-cover ${isVideoOff ? 'hidden' : ''}`}
             />
+            {!isVideoOff && (
+              <button
+                id="btn-call-expand-self-view"
+                type="button"
+                onClick={() => setIsSelfViewExpanded(expanded => !expanded)}
+                aria-label={isSelfViewExpanded ? 'Zmniejsz podgląd własnej kamery' : 'Powiększ podgląd własnej kamery'}
+                aria-pressed={isSelfViewExpanded}
+                title={isSelfViewExpanded ? 'Zmniejsz podgląd' : 'Powiększ podgląd'}
+                className="absolute top-2 right-2 w-10 h-10 flex items-center justify-center rounded-xl bg-black/70 border border-white/30 text-white shadow-lg backdrop-blur-sm hover:bg-black/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fuchsia-400 transition active:scale-95"
+              >
+                {isSelfViewExpanded ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+              </button>
+            )}
             {isVideoOff && (
               <div className="w-full h-full flex flex-col items-center justify-center p-2 text-slate-400 bg-[#090b14]">
                 <VideoOff className="w-6 h-6 text-slate-500 mb-1" />
                 <span className="text-[10px] font-medium">Kamera wył.</span>
               </div>
             )}
-            {activeEffect !== 'none' && (
+            {activeEffect !== 'none' && !isVideoOff && (
               <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md border border-purple-500/40 text-[9px] font-bold text-fuchsia-300 flex items-center gap-1">
                 <Sparkles className="w-2.5 h-2.5 text-amber-400" />
-                <span>AR</span>
+                <span>Efekt</span>
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* AR Effects Drawer Panel */}
-      {showEffects && (
+      {/* Camera Effects Drawer Panel */}
+      {showEffects && !isVideoOff && (
         <div className="relative z-30 px-4 py-3 bg-[#0d0f1b]/95 border-t border-purple-500/20 backdrop-blur-xl animate-in slide-in-from-bottom duration-200">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-white">
               <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-              <span>Efekty AR i Aparatu</span>
+              <span>Efekty kamery</span>
             </div>
             <button 
+              type="button"
               onClick={() => setShowEffects(false)}
+              aria-label="Zamknij efekty kamery"
               className="p-1 rounded-lg text-slate-400 hover:text-white"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div className="grid grid-cols-5 gap-2 pb-1">
+          <div className="flex gap-2 pb-2 overflow-x-auto snap-x snap-mandatory" aria-label="Wybierz efekt kamery">
             {APPROVED_EFFECTS.map((eff) => {
               const isActive = activeEffect === eff.id;
               return (
                 <button
                   key={eff.id}
+                  type="button"
                   onClick={() => handleSelectEffect(eff)}
-                  className={`flex flex-col items-center p-2 rounded-xl border transition-all text-center ${
+                  aria-label={`${eff.name}. ${eff.description}`}
+                  aria-pressed={isActive}
+                  className={`flex-none w-24 min-h-20 flex flex-col items-center justify-center p-2 rounded-xl border transition-all text-center snap-start ${
                     isActive 
                       ? 'border-fuchsia-500 bg-fuchsia-500/20 text-white shadow-md shadow-purple-950/50 scale-105' 
                       : 'border-white/10 hover:border-white/20 bg-white/[0.03] text-slate-300'
@@ -626,13 +998,13 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   >
                     {eff.id === 'none' ? <X className="w-3.5 h-3.5 text-white" /> : <Sparkles className="w-3.5 h-3.5 text-white" />}
                   </div>
-                  <span className="text-[10px] font-medium leading-tight truncate w-full">{eff.name}</span>
+                  <span className="text-[10px] font-medium leading-tight line-clamp-2 w-full">{eff.name}</span>
                 </button>
               );
             })}
           </div>
-          <div className="text-[10px] text-slate-400 text-center mt-1">
-            Efekty nakładane są bezpośrednio na strumień wideo i są widoczne dla rozmówcy w czasie rzeczywistym.
+          <div className="text-[10px] text-slate-400 text-center mt-1" aria-live="polite">
+            {APPROVED_EFFECTS.find(effect => effect.id === activeEffect)?.description} Efekt widzi także rozmówca.
           </div>
         </div>
       )}
@@ -644,6 +1016,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         {callState === 'INCOMING_RINGING' ? (
           <div className="flex items-center gap-6 w-full max-w-xs justify-around">
             <button
+              id="btn-call-reject"
               onClick={handleRejectCall}
               className="flex flex-col items-center gap-1.5 group"
             >
@@ -654,11 +1027,12 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             </button>
 
             <button
+              id="btn-call-accept"
               onClick={handleAcceptCall}
               className="flex flex-col items-center gap-1.5 group"
             >
               <div className="w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-500 flex items-center justify-center text-white shadow-xl shadow-emerald-950/60 transition group-active:scale-90 animate-pulse">
-                <Video className="w-7 h-7" />
+                {activeCallType === 'voice' ? <Phone className="w-7 h-7" /> : <Video className="w-7 h-7" />}
               </div>
               <span className="text-xs font-bold text-emerald-300">Odbierz</span>
             </button>
@@ -668,6 +1042,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           <>
             {/* Mute Audio */}
             <button
+              id="btn-call-mute"
               onClick={toggleMute}
               className={`p-3.5 rounded-full border transition active:scale-90 ${
                 isMuted 
@@ -681,6 +1056,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
             {/* Video Camera Toggle */}
             <button
+              id="btn-call-video-toggle"
               onClick={toggleVideo}
               className={`p-3.5 rounded-full border transition active:scale-90 ${
                 isVideoOff 
@@ -692,33 +1068,42 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
             </button>
 
-            {/* Switch Camera (Front/Rear) */}
-            <button
-              onClick={handleSwitchCamera}
-              className="p-3.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] border border-white/10 text-white transition active:scale-90"
-              title="Przełącz aparat przód / tył"
-            >
-              <SwitchCamera className="w-5 h-5" />
-            </button>
+            {/* Switch Camera (Front/Rear) - visible if video is active */}
+            {!isVideoOff && (
+              <button
+                id="btn-call-switch-camera"
+                onClick={handleSwitchCamera}
+                className="p-3.5 rounded-full bg-white/[0.08] hover:bg-white/[0.15] border border-white/10 text-white transition active:scale-90"
+                title="Przełącz aparat przód / tył"
+              >
+                <SwitchCamera className="w-5 h-5" />
+              </button>
+            )}
 
-            {/* AR Effects Button */}
-            <button
-              onClick={() => setShowEffects(!showEffects)}
-              className={`p-3.5 rounded-full border transition active:scale-90 ${
-                showEffects || activeEffect !== 'none'
-                  ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-[0_0_15px_rgba(217,70,239,0.5)]'
-                  : 'bg-white/[0.08] hover:bg-white/[0.15] border-white/10 text-white'
-              }`}
-              title="Efekty AR i aparatu"
-            >
-              <Sparkles className="w-5 h-5" />
-            </button>
+            {/* Camera Effects Button - visible if video is active */}
+            {!isVideoOff && (
+              <button
+                id="btn-call-ar-effects"
+                onClick={() => setShowEffects(!showEffects)}
+                className={`p-3.5 rounded-full border transition active:scale-90 ${
+                  showEffects || activeEffect !== 'none'
+                    ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-[0_0_15px_rgba(217,70,239,0.5)]'
+                    : 'bg-white/[0.08] hover:bg-white/[0.15] border-white/10 text-white'
+                }`}
+                title="Efekty kamery"
+                aria-label="Efekty kamery"
+                aria-expanded={showEffects}
+              >
+                <Sparkles className="w-5 h-5" />
+              </button>
+            )}
 
             {/* End Call Button */}
             <button
+              id="btn-call-hangup"
               onClick={() => handleEndCall('ENDED')}
               className="p-3.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white shadow-xl shadow-rose-950/60 transition active:scale-90"
-              title="Zakończ rozmowę"
+              title="Zakończ połączenie"
             >
               <PhoneOff className="w-5 h-5" />
             </button>
@@ -726,6 +1111,28 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         )}
       </div>
 
+      {/* Permissions missing or denied modal */}
+      <MediaPermissionModal
+        isOpen={showPermissionModal}
+        onClose={() => {
+          setShowPermissionModal(false);
+          if (callState === 'PERMISSION_DENIED') {
+            handleEndCall('ENDED');
+          }
+        }}
+        onGranted={async () => {
+          setShowPermissionModal(false);
+          setErrorMessage(null);
+          setCallState(isIncoming ? 'CONNECTING' : 'OUTGOING_RINGING');
+          try {
+            await startLocalMedia(facingMode, isVideoOff);
+            await initializePeerConnection(!isIncoming);
+          } catch (e) {
+            console.error('[WebRTC] Błąd ponownej inicjalizacji mediów:', e);
+          }
+        }}
+        callTargetName={targetUser.displayName}
+      />
     </div>
   );
 };
