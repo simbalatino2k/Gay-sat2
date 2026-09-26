@@ -20,10 +20,11 @@ import { auraWebSocketUrl } from './lib/websocketEndpoint';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from './lib/firebase';
 import { formatUserAccount, logoutFirebase } from './services/firebaseService';
+import { ensureFirebaseServerSession, FirebaseServerSyncError } from './services/firebaseServerSync';
 import { useBackgroundNotifications } from './hooks/useBackgroundNotifications';
 import { PermissionsPromptModal } from './components/PermissionsPromptModal';
 import { PermissionResults } from './services/permissionsService';
-import { PERMISSIONS_PROMPTED_KEY, isPaymentReturnLocation, shouldOfferPermissionsPrompt } from './lib/permissionsPrompt';
+import { PERMISSIONS_PROMPTED_KEY, isPaymentReturnLocation, shouldOfferPermissionsPrompt, shouldRememberPermissionsChoice } from './lib/permissionsPrompt';
 import { useTranslation, LanguagePickerButton } from './context/LanguageContext';
 import { VideoCallModal } from './components/VideoCallModal';
 import { ProfileSetupRequiredModal } from './components/common/ProfileSetupRequiredModal';
@@ -46,6 +47,7 @@ export default function App() {
   useBackgroundNotifications(token);
 
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [authSyncError, setAuthSyncError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<NavTab>('discover');
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [initialChatMessage, setInitialChatMessage] = useState<string | null>(null);
@@ -221,9 +223,14 @@ export default function App() {
           }
 
           const formattedUser = formatUserAccount(fbUser, firestoreData);
+          const serverUser = await ensureFirebaseServerSession(idToken, fbUser.uid, firestoreData);
+          const activeUser = {
+            ...serverUser,
+            permissionsOnboardingHandled: formattedUser.permissionsOnboardingHandled
+          };
           // Paid visibility is owned by the application server, not Firestore.
-          formattedUser.profile.isBoosted = false;
-          formattedUser.profile.boostExpiresAt = undefined;
+          activeUser.profile.isBoosted = false;
+          activeUser.profile.boostExpiresAt = undefined;
           try {
             const boostResponse = await fetch('/api/profile/boost/status', {
               headers: { Authorization: `Bearer ${idToken}` },
@@ -231,16 +238,25 @@ export default function App() {
             });
             if (boostResponse.ok) {
               const boost = await boostResponse.json();
-              formattedUser.profile.isBoosted = boost.isBoosted === true;
-              formattedUser.profile.boostExpiresAt = typeof boost.boostExpiresAt === 'string' ? boost.boostExpiresAt : undefined;
+              activeUser.profile.isBoosted = boost.isBoosted === true;
+              activeUser.profile.boostExpiresAt = typeof boost.boostExpiresAt === 'string' ? boost.boostExpiresAt : undefined;
             }
           } catch (boostError) {
             console.warn('Profile Booster status is temporarily unavailable:', boostError);
           }
-          setCurrentUser(formattedUser);
+          setCurrentUser(activeUser);
+          setAuthSyncError(null);
           setToken(idToken);
           localStorage.setItem('aura_auth_token', idToken);
         } catch (err: any) {
+          if (err instanceof FirebaseServerSyncError) {
+            setCurrentUser(null);
+            setToken(null);
+            localStorage.removeItem('aura_auth_token');
+            setAuthSyncError(err.message);
+            setIsLoadingUser(false);
+            return;
+          }
           console.warn('Notice loading Firestore profile (using Auth profile fallback):', err?.message || err);
           try {
             const fallbackToken = await fbUser.getIdToken();
@@ -318,9 +334,16 @@ export default function App() {
     }
   };
 
+  const closePermissions = (results?: PermissionResults | null) => {
+    if (shouldRememberPermissionsChoice(results)) {
+      markPermissionsHandled();
+    } else {
+      setShowPermissionsModal(false);
+    }
+  };
+
   const handlePermissionsCompleted = (results: PermissionResults) => {
-    markPermissionsHandled();
-    if (results.coords && currentUser?.profile) {
+    if (results.locationSaved && results.coords && currentUser?.profile) {
       setCurrentUser({
         ...currentUser,
         profile: { ...currentUser.profile, lat: results.coords.lat, lng: results.coords.lng }
@@ -343,6 +366,7 @@ export default function App() {
 
   const handleLoginSuccess = (newToken: string, user: UserAccount) => {
     localStorage.setItem('aura_auth_token', newToken);
+    setAuthSyncError(null);
     setToken(newToken);
     setCurrentUser(user);
 
@@ -409,11 +433,11 @@ export default function App() {
   if (!token || !currentUser) {
     return (
       <>
-        <OnboardingFlow onComplete={({ token, user }) => handleLoginSuccess(token, user)} />
+        <OnboardingFlow initialError={authSyncError} onComplete={({ token, user }) => handleLoginSuccess(token, user)} />
         <PermissionsPromptModal
           isOpen={showPermissionsModal && !isPaymentReturnLocation(window.location.pathname, window.location.search)}
           authToken={token}
-          onClose={markPermissionsHandled}
+          onClose={closePermissions}
           onCompleted={handlePermissionsCompleted}
         />
       </>
@@ -624,6 +648,7 @@ export default function App() {
                 onOpenProfile={(prof) => setSelectedProfile(prof)}
                 onOpenChat={handleOpenChatWithUser}
                 onOpenPremium={() => setActiveTab('settings')}
+                onSwitchToFeed={() => setActiveTab('discover')}
               />
             )}
 
@@ -780,7 +805,7 @@ export default function App() {
       <PermissionsPromptModal
         isOpen={showPermissionsModal && !isPaymentReturnLocation(window.location.pathname, window.location.search)}
         authToken={token}
-        onClose={markPermissionsHandled}
+        onClose={closePermissions}
         onCompleted={handlePermissionsCompleted}
       />
 

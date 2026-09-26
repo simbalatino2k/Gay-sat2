@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { UserAccount, UserProfile, LocationPrivacyMode, QueerVenue } from '../types';
+import { getMapProfilePosition, MapProfilePosition } from '../lib/mapProfilePosition';
 import {
   LocateFixed,
   Shield,
@@ -56,6 +57,7 @@ interface MapViewProps {
   onOpenProfile: (profile: UserProfile) => void;
   onOpenChat: (userId: string) => void;
   onOpenPremium: () => void;
+  onSwitchToFeed?: () => void;
 }
 
 // Default center: Warsaw, Poland [longitude, latitude]
@@ -100,7 +102,8 @@ export const MapView: React.FC<MapViewProps> = ({
   onUpdateUser,
   onOpenProfile,
   onOpenChat,
-  onOpenPremium: _onOpenPremium
+  onOpenPremium: _onOpenPremium,
+  onSwitchToFeed
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -109,6 +112,14 @@ export const MapView: React.FC<MapViewProps> = ({
   const userMarkerRef = useRef<maplibregl.Marker | null>(null);
 
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [profilesLoaded, setProfilesLoaded] = useState(false);
+  const [profilesError, setProfilesError] = useState(false);
+  const [selectedMapPosition, setSelectedMapPosition] = useState<MapProfilePosition | null>(null);
+  const mapProfiles = useMemo(() => profiles.flatMap(profile => {
+    if (profile.userId === currentUser?.id || profile.id === currentUser?.id) return [];
+    const position = getMapProfilePosition(profile, POPULAR_CITIES);
+    return position ? [{ profile, position }] : [];
+  }), [profiles, currentUser?.id]);
   const [venues, setVenues] = useState<QueerVenue[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<UserProfile | null>(null);
   const [selectedVenue, setSelectedVenue] = useState<QueerVenue | null>(null);
@@ -168,8 +179,12 @@ export const MapView: React.FC<MapViewProps> = ({
       const data = await res.json();
       const list: UserProfile[] = data.feed || data.profiles || [];
       setProfiles(list);
+      setProfilesError(false);
     } catch (err: any) {
       console.warn('[MapView] Nie udało się pobrać profili:', err.message || err);
+      setProfilesError(true);
+    } finally {
+      setProfilesLoaded(true);
     }
   }, [authToken]);
 
@@ -462,24 +477,14 @@ export const MapView: React.FC<MapViewProps> = ({
     markersRef.current.forEach(m => m.remove());
     markersRef.current = [];
 
-    // Filter profiles that have valid coordinates (server already strips coordinates if HIDDEN or fuzzes if APPROXIMATE)
-    const mappableProfiles = profiles.filter(
-      p =>
-        typeof p.lat === 'number' && Number.isFinite(p.lat) && Math.abs(p.lat) <= 90 &&
-        typeof p.lng === 'number' && Number.isFinite(p.lng) && Math.abs(p.lng) <= 180 &&
-        p.locationPrivacy !== 'HIDDEN' &&
-        p.id !== currentUser?.id &&
-        p.userId !== currentUser?.id
-    );
-
-    mappableProfiles.forEach(prof => {
+    mapProfiles.forEach(({ profile: prof, position }) => {
       const el = document.createElement('div');
       el.className =
         'aura-profile-marker group relative cursor-pointer transform hover:scale-110 active:scale-95 transition-all duration-200';
 
       const photoUrl = prof.photos && prof.photos.length > 0 && prof.photos[0].url ? prof.photos[0].url : '';
-      const isOnline = !!prof.isOnline;
-      const isExact = prof.locationPrivacy === 'EXACT';
+      const isOnline = position.kind !== 'city' && !!prof.isOnline;
+      const isExact = position.kind === 'exact';
       const safeName = escapeHtml(prof.displayName || 'Użytkownik');
       const safeAge = typeof prof.age === 'number' ? prof.age : '';
       const initial = escapeHtml((prof.displayName || 'U').charAt(0).toUpperCase());
@@ -487,7 +492,9 @@ export const MapView: React.FC<MapViewProps> = ({
 
       el.innerHTML = `
         <div class="relative w-12 h-12 rounded-full overflow-hidden border-2 ${
-          isExact
+          position.kind === 'city'
+            ? 'border-dashed border-cyan-300 shadow-[0_0_12px_rgba(103,232,249,0.5)]'
+            : isExact
             ? 'border-fuchsia-400 shadow-[0_0_12px_rgba(217,70,239,0.7)]'
             : 'border-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.5)]'
         } bg-[#0b0d14] flex items-center justify-center">
@@ -503,27 +510,28 @@ export const MapView: React.FC<MapViewProps> = ({
           }
         </div>
         <div class="absolute -bottom-4 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-[#070810]/95 border border-white/20 text-[9px] font-bold text-slate-100 whitespace-nowrap shadow-md pointer-events-none group-hover:border-purple-400 group-hover:text-white transition-colors">
-          ${safeName}${safeAge ? `, ${safeAge}` : ''}
+          ${position.kind === 'city' ? '≈ ' : ''}${safeName}${safeAge ? `, ${safeAge}` : ''}${position.kind === 'city' ? ` · ${escapeHtml(position.cityName || '')}` : ''}
         </div>
       `;
 
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         setSelectedProfile(prof);
+        setSelectedMapPosition(position);
         map.flyTo({
-          center: [prof.lng!, prof.lat!],
-          zoom: Math.max(map.getZoom(), 13.5),
+          center: [position.lng, position.lat],
+          zoom: position.kind === 'city' ? 9 : Math.max(map.getZoom(), 13.5),
           duration: 700
         });
       });
 
       const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
-        .setLngLat([prof.lng!, prof.lat!])
+        .setLngLat([position.lng, position.lat])
         .addTo(map);
 
       markersRef.current.push(marker);
     });
-  }, [profiles, currentUser, mapGeneration]);
+  }, [mapProfiles, mapGeneration]);
 
   // Render LGBT+ venues & Cruising spots markers on the map
   useEffect(() => {
@@ -719,7 +727,7 @@ export const MapView: React.FC<MapViewProps> = ({
               Radar AURA
             </span>
             <span className="text-[11px] text-fuchsia-200 font-bold px-2 py-0.5 rounded-lg bg-fuchsia-950/60 border border-fuchsia-500/40">
-              {profiles.length} osób
+              {mapProfiles.length} osób
             </span>
             <span className="text-[10px] text-amber-300 font-extrabold px-2 py-0.5 rounded-lg bg-amber-950/60 border border-amber-500/50 flex items-center gap-1 shadow-sm">
               <Flame className="w-3.5 h-3.5 text-amber-400" /> {venues.length} miejsc
@@ -915,6 +923,23 @@ export const MapView: React.FC<MapViewProps> = ({
       {/* Map Canvas Container */}
       <div ref={mapContainerRef} className="w-full h-full flex-1 bg-[#05060a]" />
 
+      {profilesLoaded && mapProfiles.length === 0 && !mapLoading && !mapError && !selectedProfile && !selectedVenue && (
+        <div className="absolute bottom-24 left-4 z-20 max-w-xs rounded-2xl border border-purple-500/40 bg-[#090716]/95 p-3 text-xs text-slate-200 shadow-xl">
+          <p className="font-bold text-white">
+            {profilesError ? 'Nie udało się pobrać profili.' : 'Brak profili z udostępnioną lokalizacją.'}
+          </p>
+          <p className="mt-1 text-slate-300">
+            {profilesError ? 'Sprawdź połączenie i spróbuj ponownie.' : profiles.length > 0
+              ? `${profiles.length} profili możesz zobaczyć w Odkrywaj. Mapa wymaga lokalizacji lub rozpoznanego miasta w profilu.`
+              : 'Nowe konta pojawią się tutaj po zapisaniu lokalizacji lub rozpoznanego miasta.'}
+          </p>
+          <div className="mt-2 flex gap-2">
+            {profilesError && <button type="button" onClick={() => void fetchProfiles()} className="font-semibold text-fuchsia-300">Ponów</button>}
+            {onSwitchToFeed && <button type="button" onClick={onSwitchToFeed} className="font-semibold text-fuchsia-300">Odkrywaj</button>}
+          </div>
+        </div>
+      )}
+
       {/* Loading Overlay */}
       {mapLoading && (
         <div className="absolute inset-0 z-20 bg-[#05060a]/80 backdrop-blur-sm flex flex-col items-center justify-center p-6">
@@ -1079,7 +1104,7 @@ export const MapView: React.FC<MapViewProps> = ({
           <div className="relative p-3.5 rounded-3xl bg-[#090714]/95 backdrop-blur-2xl border-2 border-purple-500/40 shadow-[0_12px_45px_rgba(147,51,234,0.35),0_0_20px_rgba(217,70,239,0.2)] flex flex-col gap-3">
             {/* Top-Right Dedicated Close X Button */}
             <button
-              onClick={() => setSelectedProfile(null)}
+              onClick={() => { setSelectedProfile(null); setSelectedMapPosition(null); }}
               className="absolute -top-2.5 -right-2.5 z-30 w-7 h-7 rounded-full bg-gradient-to-tr from-purple-700 to-fuchsia-600 border-2 border-white/80 shadow-[0_0_12px_rgba(217,70,239,0.8)] text-white hover:scale-110 active:scale-95 flex items-center justify-center transition-all cursor-pointer"
               title="Zamknij (X)"
               aria-label="Zamknij okno profilu"
@@ -1101,7 +1126,7 @@ export const MapView: React.FC<MapViewProps> = ({
                       {selectedProfile.displayName.charAt(0)}
                     </div>
                   )}
-                  {selectedProfile.isOnline && (
+                  {selectedMapPosition?.kind !== 'city' && selectedProfile.isOnline && (
                     <span className="absolute bottom-1 right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#090b14]" />
                   )}
                 </div>
@@ -1118,9 +1143,11 @@ export const MapView: React.FC<MapViewProps> = ({
                   <p className="text-[11px] text-slate-300 flex items-center gap-1 mt-0.5">
                     <Radio className="w-3 h-3 text-fuchsia-400" />
                     <span>
-                      {selectedProfile.locationPrivacy === 'EXACT'
+                      {selectedMapPosition?.kind === 'city'
+                        ? `Orientacyjnie: ${selectedMapPosition.cityName}`
+                        : selectedMapPosition?.kind === 'exact'
                         ? 'Dokładna pozycja'
-                        : '~1.5 km w okolicy'}
+                        : 'Przybliżona pozycja'}
                     </span>
                     {selectedProfile.identityRole && (
                       <span className="px-1.5 py-0.2 rounded-md bg-purple-900/40 text-purple-200 border border-purple-500/30 text-[10px]">

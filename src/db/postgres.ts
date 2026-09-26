@@ -1,4 +1,4 @@
-import { Pool, PoolConfig } from 'pg';
+import { Pool, PoolClient, PoolConfig } from 'pg';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -1103,8 +1103,10 @@ export class PostgresStoreAdapter {
     }
   }
 
-  public async setStripeSubscription(userId: string, customerId: string, subscriptionId: string, planId: string, status: string, periodEnd?: Date): Promise<void> {
-    const isPremium = status === 'active';
+  public async setStripeSubscription(
+    userId: string, customerId: string, subscriptionId: string, planId: string,
+    status: string, periodEnd: Date | undefined, entitlement: UserEntitlement
+  ): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -1129,18 +1131,11 @@ export class PostgresStoreAdapter {
           subscriptionId,
           status,
           planId,
-          periodEnd || new Date(Date.now() + 30 * 24 * 3600 * 1000)
+          periodEnd || null
         ]
       );
 
-      await client.query(
-        `UPDATE users SET
-          is_premium = $1,
-          premium_tier = $2,
-          updated_at = CURRENT_TIMESTAMP
-         WHERE id = $3`,
-        [isPremium, isPremium ? 'VIP_PLUS' : null, userId]
-      );
+      await this.upsertStoreSubscriptionWithClient(client, entitlement);
 
       await client.query('COMMIT');
     } catch (err) {
@@ -1149,6 +1144,38 @@ export class PostgresStoreAdapter {
     } finally {
       client.release();
     }
+  }
+
+  public async getStripeSubscriptionByUserId(userId: string): Promise<{
+    subscriptionId: string; planId: string; status: string; currentPeriodEnd?: Date
+  } | null> {
+    const res = await this.pool.query(
+      'SELECT stripe_subscription_id, plan_id, status, current_period_end FROM subscriptions WHERE user_id = $1 LIMIT 1',
+      [userId]
+    );
+    const row = res.rows[0];
+    return row?.stripe_subscription_id ? {
+      subscriptionId: row.stripe_subscription_id,
+      planId: row.plan_id,
+      status: row.status,
+      currentPeriodEnd: row.current_period_end || undefined
+    } : null;
+  }
+
+  public async findUserIdByStripeCustomerId(customerId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM subscriptions WHERE stripe_customer_id = $1 ORDER BY updated_at DESC LIMIT 1',
+      [customerId]
+    );
+    return res.rows[0]?.user_id || null;
+  }
+
+  public async findUserIdByStripeSubscriptionId(subscriptionId: string): Promise<string | null> {
+    const res = await this.pool.query(
+      'SELECT user_id FROM subscriptions WHERE stripe_subscription_id = $1 LIMIT 1',
+      [subscriptionId]
+    );
+    return res.rows[0]?.user_id || null;
   }
 
   public async isEventProcessed(eventId: string): Promise<boolean> {
@@ -1214,12 +1241,22 @@ export class PostgresStoreAdapter {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await this.upsertStoreSubscriptionWithClient(client, entitlement);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
-      const isPrem = entitlement.premium && (entitlement.status === 'active' || entitlement.status === 'grace_period');
-      const planTier = entitlement.planTier || (entitlement.productId?.includes('yearly') ? 'yearly' : 'monthly');
-      const premiumTier = isPrem ? (planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY') : null;
+  private async upsertStoreSubscriptionWithClient(client: PoolClient, entitlement: UserEntitlement): Promise<void> {
+    const isPrem = entitlement.premium && (entitlement.status === 'active' || entitlement.status === 'grace_period');
+    const planTier = entitlement.planTier || (entitlement.productId?.includes('yearly') ? 'yearly' : 'monthly');
+    const premiumTier = isPrem ? (planTier === 'yearly' ? 'VIP_ANNUAL' : 'VIP_MONTHLY') : null;
 
-      await client.query(
+    await client.query(
         `INSERT INTO store_subscriptions (
           id, user_id, provider, product_id, base_plan_id,
           purchase_token_hash, transaction_id, original_transaction_id,
@@ -1261,24 +1298,16 @@ export class PostgresStoreAdapter {
           entitlement.expiresAt ? new Date(entitlement.expiresAt) : null,
           entitlement.gracePeriodUntil ? new Date(entitlement.gracePeriodUntil) : null
         ]
-      );
+    );
 
-      await client.query(
+    await client.query(
         `UPDATE users SET
           is_premium = $1,
           premium_tier = $2,
           updated_at = CURRENT_TIMESTAMP
          WHERE id = $3`,
         [isPrem, premiumTier, entitlement.userId]
-      );
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
+    );
   }
 
   public async getStoreSubscriptionByUserId(userId: string): Promise<UserEntitlement | null> {
@@ -1385,18 +1414,18 @@ export class PostgresStoreAdapter {
       photos = row.photos;
     }
 
-    let locationStr = 'Warsaw';
+    let locationStr = '';
     let lat: number | undefined = undefined;
     let lng: number | undefined = undefined;
     if (typeof row.location === 'object' && row.location !== null) {
-      locationStr = row.location.city || row.location.address || row.location.name || 'Warsaw';
+      locationStr = row.location.city || row.location.address || row.location.name || '';
       lat = typeof row.location.lat === 'number' ? row.location.lat : undefined;
       lng = typeof row.location.lng === 'number' ? row.location.lng : undefined;
     } else if (typeof row.location === 'string') {
       try {
         const parsedLoc = JSON.parse(row.location);
         if (typeof parsedLoc === 'object' && parsedLoc !== null) {
-          locationStr = parsedLoc.city || parsedLoc.address || parsedLoc.name || row.location;
+          locationStr = parsedLoc.city || parsedLoc.address || parsedLoc.name || '';
           lat = typeof parsedLoc.lat === 'number' ? parsedLoc.lat : undefined;
           lng = typeof parsedLoc.lng === 'number' ? parsedLoc.lng : undefined;
         } else {

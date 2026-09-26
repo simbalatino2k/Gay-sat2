@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SexualRole, Tribe, LookingFor } from '../types';
 import { Shield, ArrowRight, Check, Sparkles, Mail, Lock, User, MapPin, Camera, ChevronRight } from 'lucide-react';
 import { AuraLogo } from './AuraLogo';
@@ -13,9 +13,11 @@ import {
   saveProfileToFirestore 
 } from '../services/firebaseService';
 import { auth } from '../lib/firebase';
+import { FirebaseServerSyncError } from '../services/firebaseServerSync';
 
 interface OnboardingFlowProps {
   onComplete: (session: { token: string; user: any }) => void;
+  initialError?: string | null;
 }
 
 const ROLES: SexualRole[] = ['Top', 'Vers Top', 'Versatile', 'Vers Bottom', 'Bottom', 'Side', 'Unspecified'];
@@ -29,7 +31,7 @@ const PHOTO_PRESETS = [
   'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?auto=format&fit=crop&q=80&w=800'
 ];
 
-export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) => {
+export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete, initialError }) => {
   const [step, setStep] = useState<'auth' | 'profile'>('auth');
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
@@ -39,7 +41,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
   const [displayName, setDisplayName] = useState('');
   const [age, setAge] = useState(25);
   const [identityRole, setIdentityRole] = useState<SexualRole>('Versatile');
-  const [location, setLocation] = useState('Los Angeles, CA');
+  const [location, setLocation] = useState('');
   const [bio, setBio] = useState('');
   const [selectedTribes, setSelectedTribes] = useState<Tribe[]>(['Jock']);
   const [selectedLookingFor, setSelectedLookingFor] = useState<LookingFor[]>(['Dating', 'Friends']);
@@ -48,6 +50,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (initialError) setError(initialError);
+  }, [initialError]);
 
   // Password Recovery State
   const [showForgotPassword, setShowForgotPassword] = useState(false);
@@ -175,6 +180,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({ onComplete }) =>
         }
       }, 500);
     } catch (err: any) {
+      if (err instanceof FirebaseServerSyncError) {
+        setError(err.message);
+        return;
+      }
       // Fallback to local server auth if Firebase Auth fails or is disabled
       try {
         const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';

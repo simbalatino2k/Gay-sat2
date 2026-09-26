@@ -1,12 +1,11 @@
 import React, { useState } from 'react';
 import { MapPin, Camera, Mic, CheckCircle2, Shield, Flame, X, Sparkles } from 'lucide-react';
 import { requestAllPermissionsOnLogin, PermissionResults } from '../services/permissionsService';
-import { PERMISSIONS_PROMPTED_KEY } from '../lib/permissionsPrompt';
 
 interface PermissionsPromptModalProps {
   authToken: string | null;
   isOpen: boolean;
-  onClose: () => void;
+  onClose: (results?: PermissionResults | null) => void;
   onCompleted: (results: PermissionResults) => void;
 }
 
@@ -19,22 +18,19 @@ export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
   const [isRequesting, setIsRequesting] = useState(false);
   const [results, setResults] = useState<PermissionResults | null>(null);
   const [selected, setSelected] = useState({ location: false, camera: false, microphone: false });
-  const dismiss = () => onClose();
+  const dismiss = () => onClose(results);
 
   if (!isOpen) return null;
 
   const handleGrantAll = async () => {
-    // A selected permission is a user response even if the browser prompt is dismissed.
-    localStorage.setItem(PERMISSIONS_PROMPTED_KEY, 'true');
     setIsRequesting(true);
     try {
       const res = await requestAllPermissionsOnLogin(authToken, undefined, selected);
       setResults(res);
       onCompleted(res);
-      // Auto close after brief success display if location was granted
-      setTimeout(() => {
-        onClose();
-      }, 1200);
+      if (!res.error) {
+        setTimeout(() => onClose(res), 1200);
+      }
     } catch (e) {
       console.warn('Błąd przyznawania uprawnień:', e);
     } finally {
@@ -87,7 +83,7 @@ export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-white">Lokalizacja GPS</span>
-                {results?.locationGranted ? (
+                {results?.locationSaved ? (
                   <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-400">
                     <CheckCircle2 className="w-3.5 h-3.5" /> Przyznano
                   </span>
@@ -100,6 +96,7 @@ export const PermissionsPromptModal: React.FC<PermissionsPromptModalProps> = ({
               <p className="text-[11px] text-slate-400 mt-0.5">
                 Wyszukiwanie osób w pobliżu oraz natychmiastowe oznaczanie stref cruisingu i saun.
               </p>
+              {results?.error && <p role="alert" className="text-[11px] text-amber-300 mt-1">{results.error}</p>}
             </div>
           </div>
 

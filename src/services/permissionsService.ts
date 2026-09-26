@@ -6,6 +6,7 @@
 
 export interface PermissionResults {
   locationGranted: boolean;
+  locationSaved: boolean;
   cameraGranted: boolean;
   microphoneGranted: boolean;
   coords?: { lat: number; lng: number };
@@ -77,6 +78,8 @@ export async function requestAllPermissionsOnLogin(
 ): Promise<PermissionResults> {
   // Request Location first
   const locResult = selected.location ? await requestLocationPermission() : { granted: false, coords: undefined };
+  let locationSaved = false;
+  let locationError: string | undefined;
 
   if (locResult.granted && locResult.coords) {
     try {
@@ -88,10 +91,10 @@ export async function requestAllPermissionsOnLogin(
       onLocationUpdate(locResult.coords);
     }
 
-    // Update location on backend if auth token is present
+    // A granted device permission does not mean the profile is visible on the map.
     if (authToken) {
       try {
-        fetch('/api/profile', {
+        const response = await fetch('/api/profile', {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
@@ -102,10 +105,15 @@ export async function requestAllPermissionsOnLogin(
             lng: locResult.coords.lng,
             location: 'Bieżąca lokalizacja GPS'
           })
-        }).catch((e) => console.warn('[Permissions] Failed to persist location to profile:', e));
-      } catch (e) {
-        // ignore
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        locationSaved = true;
+      } catch (err) {
+        console.warn('[Permissions] Failed to persist location to profile:', err);
+        locationError = 'Lokalizacja GPS działa, ale profil nie został zapisany na mapie. Spróbuj ponownie.';
       }
+    } else {
+      locationError = 'Zaloguj się ponownie, aby zapisać lokalizację na mapie.';
     }
   }
 
@@ -114,8 +122,10 @@ export async function requestAllPermissionsOnLogin(
 
   return {
     locationGranted: locResult.granted,
+    locationSaved,
     cameraGranted: mediaResult.cameraGranted,
     microphoneGranted: mediaResult.microphoneGranted,
-    coords: locResult.coords
+    coords: locResult.coords,
+    error: locationError
   };
 }

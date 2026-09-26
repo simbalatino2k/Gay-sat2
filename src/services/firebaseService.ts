@@ -32,6 +32,7 @@ import {
 } from '../lib/firebase';
 import { UserAccount, UserProfile } from '../types';
 import { AURA_ALBUM_PHOTOS } from '../data/auraAlbum';
+import { ensureFirebaseServerSession } from './firebaseServerSync';
 
 /**
  * Maps a Firebase User and Firestore data to the app's UserAccount structure
@@ -40,27 +41,32 @@ export function formatUserAccount(
   fbUser: FirebaseUser, 
   firestoreData?: any
 ): UserAccount {
+  const profileData = firestoreData?.profile || firestoreData || {};
   const defaultProfile: UserProfile = {
     id: `prof-${fbUser.uid}`,
     userId: fbUser.uid,
-    displayName: firestoreData?.displayName || fbUser.displayName || 'AURA Member',
-    age: firestoreData?.age || 25,
-    identityRole: firestoreData?.identityRole || 'Versatile',
-    location: firestoreData?.location || 'Los Angeles, CA',
-    distanceKm: firestoreData?.distanceKm || 0.8,
-    bio: firestoreData?.bio || 'Passionate about life, good energy, and authentic connections.',
-    relationshipStatus: firestoreData?.relationshipStatus || 'Single',
-    lookingFor: firestoreData?.lookingFor || ['Dating', 'Friends'],
-    tribes: firestoreData?.tribes || ['Clean Cut'],
-    interests: firestoreData?.interests || ['Coffee', 'Travel', 'Art'],
-    photos: firestoreData?.photos || [
+    displayName: profileData.displayName || firestoreData?.displayName || fbUser.displayName || 'AURA Member',
+    age: profileData.age || 25,
+    identityRole: profileData.identityRole || 'Versatile',
+    location: profileData.location || 'Global Member',
+    lat: typeof profileData.lat === 'number' ? profileData.lat : undefined,
+    lng: typeof profileData.lng === 'number' ? profileData.lng : undefined,
+    locationPrivacy: profileData.locationPrivacy || 'APPROXIMATE',
+    approximateArea: profileData.approximateArea,
+    distanceKm: profileData.distanceKm ?? 0.8,
+    bio: profileData.bio || 'Passionate about life, good energy, and authentic connections.',
+    relationshipStatus: profileData.relationshipStatus || 'Single',
+    lookingFor: profileData.lookingFor || ['Dating', 'Friends'],
+    tribes: profileData.tribes || ['Clean Cut'],
+    interests: profileData.interests || ['Coffee', 'Travel', 'Art'],
+    photos: profileData.photos || [
       {
         id: `ph-${fbUser.uid}`,
         url: fbUser.photoURL || AURA_ALBUM_PHOTOS[0] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=800',
         isPrimary: true
       }
     ],
-    verified: firestoreData?.verified === true,
+    verified: profileData.verified === true,
     isOnline: true,
     lastActiveMinutesAgo: 0
   };
@@ -103,9 +109,10 @@ async function signInWithOAuthProvider(
     }
 
     let userAccount: UserAccount;
+    let firestoreData: any = null;
 
     if (userDocSnap && userDocSnap.exists()) {
-      const firestoreData = userDocSnap.data();
+      firestoreData = userDocSnap.data();
       userAccount = formatUserAccount(fbUser, firestoreData);
     } else {
       // New user signing in with social provider - create profile in Firestore
@@ -141,7 +148,9 @@ async function signInWithOAuthProvider(
       }
     }
 
-    return { token, user: userAccount };
+    const serverUser = await ensureFirebaseServerSession(token, fbUser.uid, firestoreData || { profile: userAccount.profile });
+
+    return { token, user: { ...serverUser, permissionsOnboardingHandled: userAccount.permissionsOnboardingHandled } };
   } catch (err: any) {
     // If the provider is not enabled in the Firebase Console (auth/operation-not-allowed)
     // or configuration is pending, seamlessly fallback to development social authentication
@@ -244,7 +253,9 @@ export async function registerWithFirebaseEmail(
     console.warn('Notice saving profile to Firestore in register:', err);
   }
 
-  return { token, user: userAccount };
+  const serverUser = await ensureFirebaseServerSession(token, fbUser.uid, { profile: userAccount.profile });
+
+  return { token, user: serverUser };
 }
 
 /**
@@ -273,7 +284,8 @@ export async function loginWithFirebaseEmail(
   }
 
   const userAccount = formatUserAccount(fbUser, firestoreData);
-  return { token, user: userAccount };
+  const serverUser = await ensureFirebaseServerSession(token, fbUser.uid, firestoreData);
+  return { token, user: { ...serverUser, permissionsOnboardingHandled: userAccount.permissionsOnboardingHandled } };
 }
 
 /**

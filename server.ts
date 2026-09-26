@@ -1,4 +1,6 @@
 import { buildStripeCheckout, buildProfileBoostCheckout, checkoutConfirmationRedirect, classifyCheckoutSession, isCheckoutSessionId, isPaidProfileBoostSession, PROFILE_BOOST_PRODUCT_ID } from './src/lib/stripeCheckout';
+import { invoiceSubscriptionId, paidInvoicePeriodEnd, syncStripeSubscription } from './src/lib/stripeSubscription';
+import type Stripe from 'stripe';
 import { moderateText } from './src/lib/moderation';
 // Clean up tsx global __dirname if it was set to '.' to prevent ERR_INVALID_ARG_VALUE in Node 22 ESM plugins (e.g. vite-plugin-pwa)
 if ((globalThis as any).__dirname === '.') {
@@ -2371,30 +2373,30 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'Stripe service unavailable' });
   }
 
-  let event: any;
+  let event: Stripe.Event;
+  let stripe: Stripe;
   try {
     const Stripe = (await import('stripe')).default;
-    const stripe = new Stripe(stripeKey);
+    stripe = new Stripe(stripeKey);
     event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err: any) {
     console.error('[Stripe Webhook] Signature verification failed:', err.message);
     return res.status(400).json({ error: `Webhook signature verification failed: ${err.message}` });
   }
 
-  // Idempotency check: Ignore already processed events
-  if (await store.isStripeEventProcessed(event.id)) {
-    return res.json({ received: true, message: 'Event already processed' });
-  }
-
-  console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
-
   try {
+    // PostgreSQL is authoritative; a lookup failure must return 500 for Stripe to retry.
+    if (await store.isStripeEventProcessed(event.id)) {
+      return res.json({ received: true, message: 'Event already processed' });
+    }
+
+    console.log(`[Stripe Webhook] Processing event ${event.id} of type ${event.type}`);
     switch (event.type) {
       case 'checkout.session.async_payment_succeeded':
       case 'checkout.session.completed': {
         const session = event.data.object;
         if (session.mode === 'payment' && session.metadata?.productId === PROFILE_BOOST_PRODUCT_ID) {
-          if (isCheckoutSessionId(session.id) && isPaidProfileBoostSession(session)) {
+          if (isCheckoutSessionId(session.id) && session.client_reference_id && isPaidProfileBoostSession(session)) {
             const result = await store.fulfillProfileBoostPurchase(session.id, session.client_reference_id, event.id);
             console.log(`[Stripe Webhook] Profile Booster ${result.activated ? 'activated' : 'already fulfilled'} for user ${session.client_reference_id}`);
           } else {
@@ -2403,60 +2405,51 @@ app.post('/api/payments/webhook', async (req: Request, res: Response) => {
           break;
         }
         if (session.mode !== 'subscription' || session.payment_status !== 'paid') break;
-        const customerId = session.customer as string;
-        const subscriptionId = session.subscription as string;
-        const userId = session.client_reference_id || session.metadata?.userId;
-        const planId = session.metadata?.planId || 'aura_vip_monthly';
-
-        if (userId) {
-          await store.recordStripeSubscription(userId, customerId, subscriptionId, planId, 'active');
-          console.log(`[Stripe Webhook] Activated VIP for user ${userId}`);
-        } else if (customerId) {
-          const user = await store.findUserByStripeCustomerId(customerId);
-          if (user) {
-            await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, 'active');
-            console.log(`[Stripe Webhook] Activated VIP for user ${user.id} via customer ID`);
-          }
+        const subscriptionId = typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+        const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+        if (!subscriptionId || !customerId ||
+            (session.client_reference_id && session.metadata?.userId && session.client_reference_id !== session.metadata.userId)) {
+          throw new Error('Paid Checkout session has inconsistent subscription ownership');
         }
+        const userId = await syncStripeSubscription(stripe, store, subscriptionId, {
+          checkoutUserId: session.client_reference_id || session.metadata?.userId,
+          checkoutCustomerId: customerId,
+          checkoutPaid: true
+        });
+        if (userId) console.log(`[Stripe Webhook] Synchronized paid Checkout for user ${userId}`);
         break;
       }
 
       case 'customer.subscription.created':
-      case 'customer.subscription.updated': {
-        const sub = event.data.object;
-        const customerId = sub.customer as string;
-        const subscriptionId = sub.id as string;
-        const status = sub.status; // 'active', 'trialing', 'past_due', 'canceled', etc.
-        const periodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
-        const planId = sub.metadata?.planId || 'aura_vip_monthly';
-        const userId = sub.metadata?.userId;
-
-        let user = userId ? await store.getUserById(userId) : null;
-        if (!user && customerId) {
-          user = await store.findUserByStripeCustomerId(customerId);
-        }
-        if (!user && subscriptionId) {
-          user = await store.findUserByStripeSubscriptionId(subscriptionId);
-        }
-
-        if (user) {
-          await store.recordStripeSubscription(user.id, customerId, subscriptionId, planId, status, periodEnd);
-          console.log(`[Stripe Webhook] Updated subscription for user ${user.id}: status=${status}`);
-        }
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted':
+      case 'customer.subscription.paused':
+      case 'customer.subscription.resumed': {
+        const sub = event.data.object as Stripe.Subscription;
+        const userId = await syncStripeSubscription(stripe, store, sub.id);
+        if (userId) console.log(`[Stripe Webhook] Synchronized subscription for user ${userId}`);
         break;
       }
 
-      case 'customer.subscription.deleted':
+      case 'invoice.paid':
       case 'invoice.payment_failed': {
-        const obj = event.data.object;
-        const customerId = obj.customer as string;
-        const subscriptionId = (obj.subscription || obj.id) as string;
-
-        let user = await store.findUserByStripeCustomerId(customerId) || await store.findUserByStripeSubscriptionId(subscriptionId);
-        if (user) {
-          await store.recordStripeSubscription(user.id, customerId, subscriptionId, 'none', 'canceled');
-          console.log(`[Stripe Webhook] Deactivated VIP for user ${user.id} following cancellation or payment failure`);
+        const invoice = event.data.object as Stripe.Invoice;
+        const subscriptionId = invoiceSubscriptionId(invoice);
+        if (!subscriptionId) break;
+        let paidThrough = event.type === 'invoice.paid' ? paidInvoicePeriodEnd(invoice, subscriptionId) : undefined;
+        if (event.type === 'invoice.paid' && !paidThrough && invoice.lines?.has_more) {
+          let startingAfter: string | undefined;
+          do {
+            const lines = await stripe.invoices.listLineItems(invoice.id, { limit: 100, starting_after: startingAfter });
+            paidThrough = paidInvoicePeriodEnd({ ...invoice, lines }, subscriptionId);
+            startingAfter = lines.has_more ? lines.data.at(-1)?.id : undefined;
+          } while (!paidThrough && startingAfter);
         }
+        if (event.type === 'invoice.paid' && !paidThrough) {
+          throw new Error('Paid Stripe subscription invoice has no subscription billing period');
+        }
+        const userId = await syncStripeSubscription(stripe, store, subscriptionId, { paidThrough, paidInvoiceId: invoice.id });
+        if (userId) console.log(`[Stripe Webhook] Synchronized invoice for user ${userId}`);
         break;
       }
 

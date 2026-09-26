@@ -220,6 +220,7 @@ export class DataStore {
         erasureAuditLog: this.erasureAuditLog,
         userPasswords: Array.from(this.userPasswords.entries()),
         passwordResets: Array.from(this.passwordResets.entries()),
+        stripeEvents: Array.from(this.stripeEvents),
         stripeSubscriptions: Array.from(this.stripeSubscriptions.entries()),
         profileBoostPurchases: Array.from(this.profileBoostPurchases.entries()),
         localStoreSubscriptions: Array.from(this.localStoreSubscriptions.entries()),
@@ -261,6 +262,7 @@ export class DataStore {
       this.erasureAuditLog = data.erasureAuditLog || [];
       this.userPasswords = new Map(data.userPasswords || []);
       this.passwordResets = new Map(data.passwordResets || []);
+      this.stripeEvents = new Set(data.stripeEvents || []);
       this.stripeSubscriptions = new Map(data.stripeSubscriptions || []);
       this.profileBoostPurchases = new Map(data.profileBoostPurchases || []);
       this.localStoreSubscriptions = new Map(data.localStoreSubscriptions || []);
@@ -992,69 +994,96 @@ export class DataStore {
     subscriptionId: string,
     planId: string,
     status: string,
-    periodEnd?: Date
+    periodEnd?: Date,
+    autoRenew = status === 'active' || status === 'trialing'
   ): Promise<UserAccount | null> {
     const user = await this.getUserById(userId);
     if (!user) return null;
 
     const isActive = status === 'active' || status === 'trialing';
-    user.isPremium = isActive;
-    user.profile.isPremium = isActive;
-    if (isActive) {
-      user.premiumExpiresAt = periodEnd ? periodEnd.toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-      user.profile.premiumTier = planId === 'aura_vip_annual' ? 'VIP_ANNUAL' : 'VIP_MONTHLY';
-    } else {
-      delete user.premiumExpiresAt;
-      user.profile.premiumTier = undefined;
+    if (isActive && (!periodEnd || periodEnd.getTime() <= Date.now())) {
+      throw new Error('Active Stripe subscription requires a future billing period');
     }
-    user.updatedAt = new Date().toISOString();
-
-    this.stripeSubscriptions.set(userId, {
+    const now = new Date().toISOString();
+    const previousEntitlement = this.localStoreSubscriptions.get(userId);
+    const stripeRecord = {
       customerId,
       subscriptionId,
       planId,
       status,
-      currentPeriodEnd: user.premiumExpiresAt
-    });
+      currentPeriodEnd: periodEnd?.toISOString()
+    };
 
-    // Also record into unified store subscriptions
-    this.localStoreSubscriptions.set(userId, {
+    const entitlement: UserEntitlement = {
       userId,
       premium: isActive,
       provider: 'stripe',
       productId: planId,
       planTier: planId === 'aura_vip_annual' ? 'yearly' : planId === 'aura_vip_three_month' ? 'three_month' : 'monthly',
-      status: isActive ? 'active' : 'canceled',
-      expiresAt: user.premiumExpiresAt,
-      autoRenew: isActive,
+      status: isActive ? 'active' : status === 'canceled' ? 'canceled' : 'account_hold',
+      expiresAt: periodEnd?.toISOString(),
+      autoRenew,
       storeTransactionId: subscriptionId,
-      lastVerifiedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
+      lastVerifiedAt: now,
+      createdAt: previousEntitlement?.createdAt || now,
+      updatedAt: now
+    };
 
     if (this.pgAdapter) {
-      await this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd);
-      await this.pgAdapter.upsertStoreSubscription(this.localStoreSubscriptions.get(userId)!);
+      await this.pgAdapter.setStripeSubscription(userId, customerId, subscriptionId, planId, status, periodEnd, entitlement);
     }
 
+    user.isPremium = isActive;
+    user.profile.isPremium = isActive;
+    if (isActive) {
+      user.premiumExpiresAt = periodEnd!.toISOString();
+      user.profile.premiumTier = planId === 'aura_vip_annual' ? 'VIP_ANNUAL' : 'VIP_MONTHLY';
+    } else {
+      delete user.premiumExpiresAt;
+      user.profile.premiumTier = undefined;
+    }
+    user.updatedAt = now;
+    this.users.set(userId, user);
+    this.stripeSubscriptions.set(userId, stripeRecord);
+    this.localStoreSubscriptions.set(userId, entitlement);
     this.saveToDisk();
     return user;
   }
 
+  public async getStripeSubscriptionByUserId(userId: string): Promise<{
+    subscriptionId: string; planId: string; status: string; currentPeriodEnd?: Date
+  } | null> {
+    if (this.pgAdapter) return this.pgAdapter.getStripeSubscriptionByUserId(userId);
+    const sub = this.stripeSubscriptions.get(userId);
+    return sub ? {
+      subscriptionId: sub.subscriptionId,
+      planId: sub.planId,
+      status: sub.status,
+      currentPeriodEnd: sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : undefined
+    } : null;
+  }
+
   public async findUserByStripeCustomerId(customerId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const userId = await this.pgAdapter.findUserIdByStripeCustomerId(customerId);
+      return userId ? this.getUserById(userId) : null;
+    }
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.customerId === customerId) {
-        return this.users.get(userId) || null;
+        return this.getUserById(userId);
       }
     }
     return null;
   }
 
   public async findUserByStripeSubscriptionId(subscriptionId: string): Promise<UserAccount | null> {
+    if (this.pgAdapter) {
+      const userId = await this.pgAdapter.findUserIdByStripeSubscriptionId(subscriptionId);
+      return userId ? this.getUserById(userId) : null;
+    }
     for (const [userId, sub] of this.stripeSubscriptions.entries()) {
       if (sub.subscriptionId === subscriptionId) {
-        return this.users.get(userId) || null;
+        return this.getUserById(userId);
       }
     }
     return null;
