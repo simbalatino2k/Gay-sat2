@@ -41,5 +41,5 @@ jobs:
       - run: npm install --ignore-scripts --no-audit --no-fund
       - run: npm run build
       - run: npx cap sync android
-      - run: ./gradlew --no-daemon bundleRelease
+      - run: bash ./gradlew --no-daemon bundleRelease
         working-directory: android
