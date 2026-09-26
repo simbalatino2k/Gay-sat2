@@ -1199,16 +1199,49 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
+async function profileTextModerationError(
+  previousProfile: UserAccount['profile'],
+  updates: { displayName?: unknown; bio?: unknown }
+): Promise<{ status: number; error: string; reason?: string } | null> {
+  const nextDisplayName = typeof updates.displayName === 'string'
+    ? updates.displayName.trim() : previousProfile.displayName;
+  const nextBio = typeof updates.bio === 'string'
+    ? updates.bio.trim() : previousProfile.bio;
+  const nameChanged = nextDisplayName !== previousProfile.displayName?.trim();
+  const bioChanged = nextBio !== (previousProfile.bio || '').trim();
+
+  // Saving GPS, photos, or other fields must not depend on a second AI review.
+  if (!nameChanged && !bioChanged) return null;
+
+  const result = await moderateText(`${nextDisplayName} ${nextBio}`, 'PUBLIC_PROFILE', true);
+  if (result.isApproved) return null;
+
+  const unavailable = [
+    'Moderation service unavailable',
+    'Moderation service returned empty response',
+    'Moderation service returned unparseable JSON',
+    'Invalid moderation response schema from model',
+    'Moderation request timeout or error'
+  ].includes(result.reason || '');
+  const simpleNameOnly = nameChanged && !bioChanged &&
+    /^[\p{L}\p{N}][\p{L}\p{N} ._'-]{0,31}$/u.test(nextDisplayName);
+  if (unavailable && simpleNameOnly) return null;
+
+  return {
+    status: unavailable ? 503 : 400,
+    error: unavailable
+      ? 'Profile text moderation is temporarily unavailable. Please try again.'
+      : 'Profile content rejected by safety policy.',
+    reason: result.reason
+  };
+}
+
 // Profile: Update
 app.put('/api/profile', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    
-    if (req.body.bio || req.body.displayName) {
-      const textToModerate = `${req.body.displayName || ''} ${req.body.bio || ''}`;
-      const modResult = await moderateText(textToModerate, 'PUBLIC_PROFILE', true);
-      if (!modResult.isApproved) {
-        return res.status(400).json({ error: 'Profile content rejected by safety policy.', reason: modResult.reason });
-      }
+    const moderationError = await profileTextModerationError(req.user!.profile, req.body);
+    if (moderationError) {
+      return res.status(moderationError.status).json({ error: moderationError.error, reason: moderationError.reason });
     }
 
     if (req.body.userMode) {
@@ -1299,13 +1332,9 @@ app.delete('/api/profile/photos/:photoId', authenticateToken, async (req: Authen
 });
 
 // Discovery: Feed & Profiles
-app.get('/api/profiles', async (req: Request, res: Response) => {
+app.get('/api/profiles', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const profiles = await store.getDiscoverFeed(currentUserId);
+    const profiles = await store.getDiscoverFeed(req.user!.id);
     res.json({ profiles, count: profiles.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch profiles', profiles: [] });
@@ -1313,15 +1342,10 @@ app.get('/api/profiles', async (req: Request, res: Response) => {
 });
 
 // Profile Lookup by User ID
-app.get('/api/profiles/:userId', async (req: Request, res: Response) => {
+app.get('/api/profiles/:userId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = String(req.params.userId);
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const requestingUserId = user ? user.id : undefined;
-
-    const profile = await store.getProfileById(userId, requestingUserId);
+    const profile = await store.getProfileById(userId, req.user!.id);
     if (!profile) {
       return res.status(404).json({ error: 'User profile not found' });
     }
@@ -1331,26 +1355,18 @@ app.get('/api/profiles/:userId', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/discover', async (req: Request, res: Response) => {
+app.get('/api/discover', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const feed = await store.getDiscoverFeed(currentUserId);
+    const feed = await store.getDiscoverFeed(req.user!.id);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch discovery feed', feed: [], profiles: [] });
   }
 });
 
-app.post('/api/discover', async (req: Request, res: Response) => {
+app.post('/api/discover', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '').trim() : '';
-    const user = token ? await store.getUserByToken(token) : null;
-    const currentUserId = user ? user.id : 'guest';
-    const feed = await store.getDiscoverFeed(currentUserId, req.body);
+    const feed = await store.getDiscoverFeed(req.user!.id, req.body);
     res.json({ feed, profiles: feed });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to fetch discovery feed' });
@@ -1936,6 +1952,10 @@ app.post('/api/backup/cloud/run', authenticateToken, async (req: AuthenticatedRe
 app.post('/api/gdpr/rectify', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { email, displayName, bio } = req.body;
+    const moderationError = await profileTextModerationError(req.user!.profile, { displayName, bio });
+    if (moderationError) {
+      return res.status(moderationError.status).json({ error: moderationError.error, reason: moderationError.reason });
+    }
     const user = await store.rectifyUserData(req.user!.id, { email, displayName, bio });
     res.json({ success: true, user, message: 'Data rectified successfully' });
   } catch (err: any) {

@@ -40,6 +40,9 @@ const INITIAL_CONVERSATIONS: Conversation[] = [];
 const INITIAL_MESSAGES: Record<string, Message[]> = {};
 const INITIAL_MOMENTS: Moment[] = [];
 
+// Keep the existing payment-test account usable without presenting it as a real member.
+const NON_DISCOVERABLE_TEST_USER_IDS = new Set(['user-1790284871319-b6ebb4b7']);
+
 // These are the only remotely hosted images that can be added without an upload.
 // Previously saved URLs remain editable for existing profiles.
 const PROFILE_PHOTO_PRESETS = new Set([
@@ -1649,28 +1652,39 @@ export class DataStore {
   }
 
   public async rectifyUserData(userId: string, updates: { email?: string; displayName?: string; bio?: string }): Promise<UserAccount> {
-    const user = this.users.get(userId);
+    const user = await this.getUserById(userId);
     if (!user) throw new Error('User not found');
+
+    const updatedUser: UserAccount = {
+      ...user,
+      profile: { ...user.profile },
+      updatedAt: new Date().toISOString()
+    };
 
     if (updates.email) {
       const clean = updates.email.toLowerCase().trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) throw new Error('Invalid email format');
       const conflict = Array.from(this.users.values()).find(u => u.id !== userId && u.email === clean);
       if (conflict) throw new Error('Email is already taken by another account');
-      user.email = clean;
+      if (this.pgAdapter) {
+        const existing = await this.pgAdapter.getUserByEmail(clean);
+        if (existing && existing.id !== userId) throw new Error('Email is already taken by another account');
+      }
+      updatedUser.email = clean;
     }
 
     if (updates.displayName) {
-      user.profile.displayName = updates.displayName.replace(/<[^>]*>?/gm, '').trim();
+      updatedUser.profile.displayName = updates.displayName.replace(/<[^>]*>?/gm, '').trim();
     }
 
     if (updates.bio !== undefined) {
-      user.profile.bio = updates.bio.replace(/<[^>]*>?/gm, '').trim();
+      updatedUser.profile.bio = updates.bio.replace(/<[^>]*>?/gm, '').trim();
     }
 
-    user.updatedAt = new Date().toISOString();
+    if (this.pgAdapter) await this.pgAdapter.saveUser(updatedUser);
+    this.users.set(userId, updatedUser);
     this.saveToDisk();
-    return user;
+    return updatedUser;
   }
 
   public async restrictAccount(userId: string, reason: string): Promise<boolean> {
@@ -1978,6 +1992,7 @@ export class DataStore {
     let eligible = candidates
       .filter(u => u.id !== currentUserId)
       .filter(u => u.status === 'ACTIVE')
+      .filter(u => !NON_DISCOVERABLE_TEST_USER_IDS.has(u.id))
       .filter(u => this.pgAdapter || !blockedUserIds.has(u.id))
       .map(u => u.profile);
 
