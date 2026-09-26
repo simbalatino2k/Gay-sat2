@@ -21,6 +21,8 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: node scripts/test_discovery_regression.mjs
+      - run: npx tsx scripts/test_profile_visibility.ts
+      - run: npx tsx scripts/test_stripe_subscription_lifecycle.ts
 
   android-compile:
     runs-on: ubuntu-latest
