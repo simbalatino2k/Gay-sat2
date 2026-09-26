@@ -157,15 +157,18 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   const [callState, setCallState] = useState<CallState>(isIncoming ? 'INCOMING_RINGING' : 'OUTGOING_RINGING');
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(callType === 'voice');
+  const [isSelfViewExpanded, setIsSelfViewExpanded] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [callDuration, setCallDuration] = useState(0);
   const [showEffects, setShowEffects] = useState(false);
   const [activeEffect, setActiveEffect] = useState('none');
+  const activeEffectRef = useRef('none');
   const [turnNotice, setTurnNotice] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showPermissionModal, setShowPermissionModal] = useState<boolean>(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localPreviewStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -187,6 +190,10 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       setIsVideoOff(callType === 'voice');
     }
   }, [callType, incomingSignalData]);
+
+  useEffect(() => {
+    if (!isOpen || isVideoOff) setIsSelfViewExpanded(false);
+  }, [isOpen, isVideoOff]);
 
   // Audio ringtone / ringback management
   useEffect(() => {
@@ -225,14 +232,27 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     return () => clearInterval(interval);
   }, [callState]);
 
-  // Ensure local video ref binds to stream whenever mounted
+  // Keep the local preview on the same processed track sent to the other person.
   useEffect(() => {
-    if (localVideoRef.current && localStreamRef.current) {
-      if (localVideoRef.current.srcObject !== localStreamRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+    const preview = localPreviewStreamRef.current || localStreamRef.current;
+    if (localVideoRef.current && preview) {
+      if (localVideoRef.current.srcObject !== preview) {
+        localVideoRef.current.srcObject = preview;
       }
     }
-  }, [callState, isVideoOff, localStreamRef.current]);
+  }, [callState, isVideoOff]);
+
+  const bindLocalPreview = (track: MediaStreamTrack | null) => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const rawTrack = stream.getVideoTracks()[0];
+    localPreviewStreamRef.current = track && track !== rawTrack
+      ? new MediaStream([track])
+      : stream;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = localPreviewStreamRef.current;
+    }
+  };
 
   // Ensure remote video/audio ref binds to stream and plays reliably
   useEffect(() => {
@@ -314,9 +334,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStreamRef.current = stream;
-      if (localVideoRef.current && !audioOnly) {
-        localVideoRef.current.srcObject = stream;
-      }
+      bindLocalPreview(stream.getVideoTracks()[0] || null);
       return stream;
     } catch (err: any) {
       console.warn('[WebRTC] Błąd inicjalizacji mediów, próba zapasowego audio:', err);
@@ -327,6 +345,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             video: false
           });
           localStreamRef.current = audioOnlyStream;
+          localPreviewStreamRef.current = audioOnlyStream;
           setIsVideoOff(true);
           return audioOnlyStream;
         } catch {}
@@ -361,6 +380,17 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           videoSenderRef.current = sender;
         }
       });
+      if (activeEffectRef.current !== 'none' && stream.getVideoTracks().length > 0) {
+        try {
+          const effectTrack = await videoEffectsService.applyEffect(activeEffectRef.current, stream, videoSenderRef.current);
+          bindLocalPreview(effectTrack);
+        } catch (effectError) {
+          console.warn('[WebRTC] Efekt kamery nie jest dostępny:', effectError);
+          activeEffectRef.current = 'none';
+          setActiveEffect('none');
+          bindLocalPreview(stream.getVideoTracks()[0] || null);
+        }
+      }
 
       // Handle remote incoming tracks
       pc.ontrack = (event) => {
@@ -626,6 +656,9 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     }
 
     videoEffectsService.cleanup();
+    activeEffectRef.current = 'none';
+    setActiveEffect('none');
+    localPreviewStreamRef.current = null;
     setCallState(finalState);
     setTimeout(() => {
       onClose();
@@ -647,29 +680,38 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     if (isVideoOff) {
       // Turn video ON
       try {
-        if (!localStreamRef.current?.getVideoTracks().length) {
+        const stream = localStreamRef.current;
+        if (!stream) return;
+        let videoTrack = stream.getVideoTracks()[0];
+        if (!videoTrack || videoTrack.readyState === 'ended') {
           const videoStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } }
           });
-          const [videoTrack] = videoStream.getVideoTracks();
+          [videoTrack] = videoStream.getVideoTracks();
           if (videoTrack) {
-            localStreamRef.current?.addTrack(videoTrack);
-            if (localVideoRef.current) {
-              localVideoRef.current.srcObject = localStreamRef.current;
-            }
-            if (pcRef.current) {
-              if (videoSenderRef.current) {
-                await videoSenderRef.current.replaceTrack(videoTrack);
-              } else {
-                videoSenderRef.current = pcRef.current.addTrack(videoTrack, localStreamRef.current!);
-              }
+            stream.getVideoTracks().forEach(oldTrack => stream.removeTrack(oldTrack));
+            stream.addTrack(videoTrack);
+            if (pcRef.current && !videoSenderRef.current) {
+              videoSenderRef.current = pcRef.current.addTrack(videoTrack, stream);
             }
           }
-        } else {
-          localStreamRef.current.getVideoTracks().forEach(track => {
-            track.enabled = true;
-          });
         }
+        if (!videoTrack) return;
+        videoTrack.enabled = true;
+        let previewTrack: MediaStreamTrack | null = videoTrack;
+        if (activeEffect !== 'none') {
+          try {
+            previewTrack = await videoEffectsService.applyEffect(activeEffect, stream, videoSenderRef.current);
+          } catch (effectError) {
+            console.warn('[WebRTC] Błąd przywrócenia efektu kamery:', effectError);
+            await videoEffectsService.applyEffect('none', stream, videoSenderRef.current);
+            activeEffectRef.current = 'none';
+            setActiveEffect('none');
+          }
+        } else if (videoSenderRef.current) {
+          await videoSenderRef.current.replaceTrack(videoTrack);
+        }
+        bindLocalPreview(previewTrack);
         setIsVideoOff(false);
       } catch (err) {
         console.warn('[WebRTC] Błąd włączania wideo:', err);
@@ -688,32 +730,52 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
   // Switch camera facing mode (front/rear)
   const handleSwitchCamera = async () => {
     const nextFacing = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextFacing);
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach(t => t.stop());
-    }
-
+    const stream = localStreamRef.current;
+    if (!stream) return;
     try {
-      const newStream = await startLocalMedia(nextFacing, false);
-      const [newVideoTrack] = newStream.getVideoTracks();
+      // Request only a camera track so the active microphone and mute state stay intact.
+      const cameraStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: nextFacing, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      const [newVideoTrack] = cameraStream.getVideoTracks();
+      if (!newVideoTrack) return;
+      const oldVideoTracks = stream.getVideoTracks();
+      oldVideoTracks.forEach(track => stream.removeTrack(track));
+      stream.addTrack(newVideoTrack);
 
-      if (videoSenderRef.current && newVideoTrack) {
-        if (activeEffect !== 'none') {
-          await videoEffectsService.applyEffect(activeEffect, newStream, videoSenderRef.current);
+      try {
+        if (videoSenderRef.current) {
+          const previewTrack = activeEffect !== 'none'
+            ? await videoEffectsService.applyEffect(activeEffect, stream, videoSenderRef.current)
+            : newVideoTrack;
+          if (activeEffect === 'none') {
+            await videoSenderRef.current.replaceTrack(newVideoTrack);
+          }
+          bindLocalPreview(previewTrack);
         } else {
-          await videoSenderRef.current.replaceTrack(newVideoTrack);
+          bindLocalPreview(newVideoTrack);
         }
+        oldVideoTracks.forEach(track => track.stop());
+        setFacingMode(nextFacing);
+      } catch (err) {
+        stream.removeTrack(newVideoTrack);
+        newVideoTrack.stop();
+        oldVideoTracks.forEach(track => stream.addTrack(track));
+        throw err;
       }
     } catch (err) {
       console.warn('Błąd przełączenia kamery:', err);
     }
   };
 
-  // Apply selected AR effect
+  // Apply a native camera effect to both the call and local preview.
   const handleSelectEffect = async (effect: VideoEffect) => {
-    setActiveEffect(effect.id);
-    if (!localStreamRef.current) return;
+    if (!localStreamRef.current) {
+      activeEffectRef.current = effect.id;
+      setActiveEffect(effect.id);
+      return;
+    }
 
     try {
       const processedTrack = await videoEffectsService.applyEffect(
@@ -722,15 +784,19 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         videoSenderRef.current
       );
 
-      if (localVideoRef.current && processedTrack) {
-        const previewStream = new MediaStream([processedTrack]);
-        localVideoRef.current.srcObject = previewStream;
-      }
+      bindLocalPreview(processedTrack);
+      activeEffectRef.current = effect.id;
+      setActiveEffect(effect.id);
     } catch (err) {
       console.warn('Błąd aplikacji efektu wideo:', err);
-      if (localVideoRef.current && localStreamRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+      try {
+        await videoEffectsService.applyEffect('none', localStreamRef.current, videoSenderRef.current);
+      } catch (restoreError) {
+        console.warn('Nie udało się przywrócić obrazu bez efektu:', restoreError);
       }
+      bindLocalPreview(localStreamRef.current.getVideoTracks()[0] || null);
+      activeEffectRef.current = 'none';
+      setActiveEffect('none');
     }
   };
 
@@ -790,11 +856,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          className={`w-full h-full object-cover bg-black ${callState === 'CONNECTED' && !isVideoOff && activeCallType === 'video' ? 'block' : 'hidden'}`}
+          className={`w-full h-full object-cover bg-black ${callState === 'CONNECTED' && activeCallType === 'video' ? 'block' : 'hidden'}`}
         />
 
         {/* Audio Mode or Ringing Avatar View */}
-        {((callState === 'CONNECTED' && (isVideoOff || activeCallType === 'voice')) || callState !== 'CONNECTED') && (
+        {((callState === 'CONNECTED' && activeCallType === 'voice') || callState !== 'CONNECTED') && (
           <div className="flex flex-col items-center justify-center p-6 text-center space-y-4 max-w-xs z-10">
             <div className="relative">
               <div className="w-28 h-28 rounded-3xl overflow-hidden border-2 border-purple-500/50 shadow-2xl shadow-purple-900/40 relative z-10">
@@ -851,7 +917,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
         {/* Local Video Picture-in-Picture (PiP) */}
         {(callState === 'CONNECTED' || callState === 'CONNECTING') && (
-          <div className="absolute top-4 right-4 z-20 w-28 h-40 sm:w-36 sm:h-52 rounded-2xl overflow-hidden border border-purple-500/40 shadow-2xl bg-black/80 backdrop-blur-md">
+          <div className={`absolute top-4 right-4 z-20 max-h-[calc(100%-2rem)] rounded-2xl overflow-hidden border border-purple-500/40 shadow-2xl bg-black/80 backdrop-blur-md transition-[width,height] duration-200 ${
+            isSelfViewExpanded
+              ? 'w-[min(72vw,320px)] h-[min(55dvh,440px)] sm:w-[min(40vw,480px)] sm:h-[min(70dvh,600px)]'
+              : 'w-28 h-40 sm:w-36 sm:h-52'
+          }`}>
             <video
               ref={localVideoRef}
               autoPlay
@@ -859,6 +929,19 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               muted
               className={`w-full h-full object-cover ${isVideoOff ? 'hidden' : ''}`}
             />
+            {!isVideoOff && (
+              <button
+                id="btn-call-expand-self-view"
+                type="button"
+                onClick={() => setIsSelfViewExpanded(expanded => !expanded)}
+                aria-label={isSelfViewExpanded ? 'Zmniejsz podgląd własnej kamery' : 'Powiększ podgląd własnej kamery'}
+                aria-pressed={isSelfViewExpanded}
+                title={isSelfViewExpanded ? 'Zmniejsz podgląd' : 'Powiększ podgląd'}
+                className="absolute top-2 right-2 w-10 h-10 flex items-center justify-center rounded-xl bg-black/70 border border-white/30 text-white shadow-lg backdrop-blur-sm hover:bg-black/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fuchsia-400 transition active:scale-95"
+              >
+                {isSelfViewExpanded ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+              </button>
+            )}
             {isVideoOff && (
               <div className="w-full h-full flex flex-col items-center justify-center p-2 text-slate-400 bg-[#090b14]">
                 <VideoOff className="w-6 h-6 text-slate-500 mb-1" />
@@ -868,37 +951,42 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
             {activeEffect !== 'none' && !isVideoOff && (
               <div className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/70 backdrop-blur-md border border-purple-500/40 text-[9px] font-bold text-fuchsia-300 flex items-center gap-1">
                 <Sparkles className="w-2.5 h-2.5 text-amber-400" />
-                <span>AR</span>
+                <span>Efekt</span>
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* AR Effects Drawer Panel */}
+      {/* Camera Effects Drawer Panel */}
       {showEffects && !isVideoOff && (
         <div className="relative z-30 px-4 py-3 bg-[#0d0f1b]/95 border-t border-purple-500/20 backdrop-blur-xl animate-in slide-in-from-bottom duration-200">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-white">
               <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-              <span>Efekty AR i Aparatu</span>
+              <span>Efekty kamery</span>
             </div>
             <button 
+              type="button"
               onClick={() => setShowEffects(false)}
+              aria-label="Zamknij efekty kamery"
               className="p-1 rounded-lg text-slate-400 hover:text-white"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          <div className="grid grid-cols-5 gap-2 pb-1">
+          <div className="flex gap-2 pb-2 overflow-x-auto snap-x snap-mandatory" aria-label="Wybierz efekt kamery">
             {APPROVED_EFFECTS.map((eff) => {
               const isActive = activeEffect === eff.id;
               return (
                 <button
                   key={eff.id}
+                  type="button"
                   onClick={() => handleSelectEffect(eff)}
-                  className={`flex flex-col items-center p-2 rounded-xl border transition-all text-center ${
+                  aria-label={`${eff.name}. ${eff.description}`}
+                  aria-pressed={isActive}
+                  className={`flex-none w-24 min-h-20 flex flex-col items-center justify-center p-2 rounded-xl border transition-all text-center snap-start ${
                     isActive 
                       ? 'border-fuchsia-500 bg-fuchsia-500/20 text-white shadow-md shadow-purple-950/50 scale-105' 
                       : 'border-white/10 hover:border-white/20 bg-white/[0.03] text-slate-300'
@@ -910,13 +998,13 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                   >
                     {eff.id === 'none' ? <X className="w-3.5 h-3.5 text-white" /> : <Sparkles className="w-3.5 h-3.5 text-white" />}
                   </div>
-                  <span className="text-[10px] font-medium leading-tight truncate w-full">{eff.name}</span>
+                  <span className="text-[10px] font-medium leading-tight line-clamp-2 w-full">{eff.name}</span>
                 </button>
               );
             })}
           </div>
-          <div className="text-[10px] text-slate-400 text-center mt-1">
-            Efekty nakładane są bezpośrednio na strumień wideo i są widoczne dla rozmówcy w czasie rzeczywistym.
+          <div className="text-[10px] text-slate-400 text-center mt-1" aria-live="polite">
+            {APPROVED_EFFECTS.find(effect => effect.id === activeEffect)?.description} Efekt widzi także rozmówca.
           </div>
         </div>
       )}
@@ -992,7 +1080,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               </button>
             )}
 
-            {/* AR Effects Button - visible if video is active */}
+            {/* Camera Effects Button - visible if video is active */}
             {!isVideoOff && (
               <button
                 id="btn-call-ar-effects"
@@ -1002,7 +1090,9 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                     ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-[0_0_15px_rgba(217,70,239,0.5)]'
                     : 'bg-white/[0.08] hover:bg-white/[0.15] border-white/10 text-white'
                 }`}
-                title="Efekty AR i aparatu"
+                title="Efekty kamery"
+                aria-label="Efekty kamery"
+                aria-expanded={showEffects}
               >
                 <Sparkles className="w-5 h-5" />
               </button>
